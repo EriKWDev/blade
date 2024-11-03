@@ -119,9 +119,11 @@ struct ContextInner {
     glow: glow::Context,
 }
 
-pub struct PlatformContext {
+pub struct Context {
     wsi: Option<WindowSystemInterface>,
     inner: Mutex<ContextInner>,
+    pub(super) capabilities: super::Capabilities,
+    pub(super) limits: super::Limits,
 }
 
 pub struct ContextLock<'a> {
@@ -183,7 +185,7 @@ fn init_egl(desc: &crate::ContextDesc) -> Result<(EglInstance, String), crate::N
     Ok((egl, client_ext_str))
 }
 
-impl super::Context {
+impl Context {
     pub unsafe fn init(desc: crate::ContextDesc) -> Result<Self, crate::NotSupportedError> {
         let (egl, client_extensions) = init_egl(&desc)?;
 
@@ -195,7 +197,7 @@ impl super::Context {
             egl1_5
                 .get_platform_display(
                     EGL_PLATFORM_SURFACELESS_MESA,
-                    ptr::null_mut(),
+                    std::ptr::null_mut(),
                     &[egl::ATTRIB_NONE],
                 )
                 .unwrap()
@@ -206,23 +208,18 @@ impl super::Context {
 
         let egl_context = EglContext::init(&desc, egl, display)?;
         egl_context.make_current();
-        let (glow, capabilities, toggles, device_information, limits) =
-            egl_context.load_functions(&desc);
+        let (glow, capabilities, limits) = egl_context.load_functions(&desc);
         egl_context.unmake_current();
 
         Ok(Self {
-            platform: PlatformContext {
-                wsi: None,
-                inner: Mutex::new(ContextInner {
-                    egl: egl_context,
-                    swapchain: None,
-                    glow,
-                }),
-            },
+            wsi: None,
+            inner: Mutex::new(ContextInner {
+                egl: egl_context,
+                swapchain: None,
+                glow,
+            }),
             capabilities,
-            toggles,
             limits,
-            device_information,
         })
     }
 
@@ -325,37 +322,32 @@ impl super::Context {
 
         let egl_context = EglContext::init(&desc, egl, display)?;
         egl_context.make_current();
-        let (glow, capabilities, toggles, device_information, limits) =
-            egl_context.load_functions(&desc);
+        let (glow, capabilities, limits) = egl_context.load_functions(&desc);
         let renderbuf = glow.create_renderbuffer().unwrap();
         let framebuf = glow.create_framebuffer().unwrap();
         egl_context.unmake_current();
 
         Ok(Self {
-            platform: PlatformContext {
-                wsi: Some(WindowSystemInterface {
-                    library: wsi_library.map(Arc::new),
-                    window_handle: window.window_handle().unwrap().as_raw(),
-                    renderbuf,
-                    framebuf,
-                }),
-                inner: Mutex::new(ContextInner {
-                    egl: egl_context,
-                    swapchain: None,
-                    glow,
-                }),
-            },
+            wsi: Some(WindowSystemInterface {
+                library: wsi_library.map(Arc::new),
+                window_handle: window.window_handle().unwrap().as_raw(),
+                renderbuf,
+                framebuf,
+            }),
+            inner: Mutex::new(ContextInner {
+                egl: egl_context,
+                swapchain: None,
+                glow,
+            }),
             capabilities,
-            toggles,
             limits,
-            device_information,
         })
     }
 
     pub fn resize(&self, config: crate::SurfaceConfig) -> crate::SurfaceInfo {
         use raw_window_handle::RawWindowHandle as Rwh;
 
-        let wsi = self.platform.wsi.as_ref().unwrap();
+        let wsi = self.wsi.as_ref().unwrap();
         let (mut temp_xlib_handle, mut temp_xcb_handle);
         #[allow(trivial_casts)]
         let native_window_ptr = match wsi.window_handle {
@@ -404,7 +396,7 @@ impl super::Context {
             log::warn!("Unable to forbid exclusive full screen");
         }
 
-        let mut inner = self.platform.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
 
         let mut attributes = vec![
             egl::RENDER_BUFFER,
@@ -427,7 +419,9 @@ impl super::Context {
             }
         }
         let alpha = if config.transparent {
-            crate::AlphaMode::PreMultiplied //TODO: verify
+            attributes.push(egl::TRANSPARENT_TYPE);
+            attributes.push(egl::TRANSPARENT_RGB);
+            crate::AlphaMode::PostMultiplied //TODO: verify
         } else {
             crate::AlphaMode::Ignored
         };
@@ -445,15 +439,13 @@ impl super::Context {
                     .into_iter()
                     .map(|v| v as usize)
                     .collect::<Vec<_>>();
-                unsafe {
-                    egl.create_platform_window_surface(
-                        inner.egl.display,
-                        inner.egl.config,
-                        native_window_ptr,
-                        &attributes_usize,
-                    )
-                    .unwrap()
-                }
+                egl.create_platform_window_surface(
+                    inner.egl.display,
+                    inner.egl.config,
+                    native_window_ptr,
+                    &attributes_usize,
+                )
+                .unwrap()
             }
             _ => unsafe {
                 inner
@@ -506,8 +498,8 @@ impl super::Context {
     }
 
     pub fn acquire_frame(&self) -> super::Frame {
-        let wsi = self.platform.wsi.as_ref().unwrap();
-        let inner = self.platform.inner.lock().unwrap();
+        let wsi = self.wsi.as_ref().unwrap();
+        let inner = self.inner.lock().unwrap();
         let sc = inner.swapchain.as_ref().unwrap();
         super::Frame {
             texture: super::Texture {
@@ -519,14 +511,14 @@ impl super::Context {
     }
 
     pub(super) fn lock(&self) -> ContextLock {
-        let inner = self.platform.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap();
         inner.egl.make_current();
         ContextLock { guard: inner }
     }
 
     pub(super) fn present(&self) {
-        let inner = self.platform.inner.lock().unwrap();
-        let wsi = self.platform.wsi.as_ref().unwrap();
+        let inner = self.inner.lock().unwrap();
+        let wsi = self.wsi.as_ref().unwrap();
         inner.present(wsi);
     }
 }
@@ -548,8 +540,28 @@ impl ContextInner {
             .swap_interval(self.egl.display, sc.swap_interval)
             .unwrap();
 
+        let gl = &self.glow;
         unsafe {
-            super::present_blit(&self.glow, wsi.framebuf, sc.extent);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask(true, true, true, true);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(wsi.framebuf));
+            // Note the Y-flipping here. GL's presentation is not flipped,
+            // but main rendering is. Therefore, we Y-flip the output positions
+            // in the shader, and also this blit.
+            gl.blit_framebuffer(
+                0,
+                sc.extent.height as i32,
+                sc.extent.width as i32,
+                0,
+                0,
+                0,
+                sc.extent.width as i32,
+                sc.extent.height as i32,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
         }
 
         self.egl
@@ -763,34 +775,24 @@ impl EglContext {
     unsafe fn load_functions(
         &self,
         desc: &crate::ContextDesc,
-    ) -> (
-        glow::Context,
-        super::Capabilities,
-        super::Toggles,
-        crate::DeviceInformation,
-        super::Limits,
-    ) {
+    ) -> (glow::Context, super::Capabilities, super::Limits) {
         let mut gl = glow::Context::from_loader_function(|name| {
             self.instance
                 .get_proc_address(name)
                 .map_or(ptr::null(), |p| p as *const _)
         });
-        if desc.validation {
-            if gl.supports_debug() {
-                log::info!("Enabling GLES debug output");
-                gl.enable(glow::DEBUG_OUTPUT);
-                gl.debug_message_callback(gl_debug_message_callback);
-                for &(level, severity) in LOG_LEVEL_SEVERITY.iter() {
-                    gl.debug_message_control(
-                        glow::DONT_CARE,
-                        glow::DONT_CARE,
-                        severity,
-                        &[],
-                        level <= log::max_level(),
-                    );
-                }
-            } else {
-                log::warn!("Can't enable validation");
+        if desc.validation && gl.supports_debug() {
+            log::info!("Enabling GLES debug output");
+            gl.enable(glow::DEBUG_OUTPUT);
+            gl.debug_message_callback(gl_debug_message_callback);
+            for &(level, severity) in LOG_LEVEL_SEVERITY.iter() {
+                gl.debug_message_control(
+                    glow::DONT_CARE,
+                    glow::DONT_CARE,
+                    severity,
+                    &[],
+                    level <= log::max_level(),
+                );
             }
         }
 
@@ -802,12 +804,6 @@ impl EglContext {
         log::info!("Vendor: {}", vendor);
         log::info!("Renderer: {}", renderer);
         log::info!("Version: {}", version);
-        let device_information = crate::DeviceInformation {
-            is_software_emulated: false,
-            device_name: vendor,
-            driver_name: renderer,
-            driver_info: version,
-        };
 
         let mut capabilities = super::Capabilities::empty();
         capabilities.set(
@@ -825,24 +821,11 @@ impl EglContext {
             // Therefore, GL_EXT_draw_buffers_indexed is not sufficient.
         );
 
-        let toggles = super::Toggles {
-            scoping: desc.capture
-                && (gl.supports_debug() || {
-                    log::warn!("Scoping is not supported");
-                    false
-                }),
-            timing: desc.timing
-                && (extensions.contains("GL_EXT_disjoint_timer_query") || {
-                    log::warn!("Timing is not supported");
-                    false
-                }),
-        };
-
         let limits = super::Limits {
             uniform_buffer_alignment: gl.get_parameter_i32(glow::UNIFORM_BUFFER_OFFSET_ALIGNMENT)
                 as u32,
         };
-        (gl, capabilities, toggles, device_information, limits)
+        (gl, capabilities, limits)
     }
 }
 

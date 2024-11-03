@@ -196,6 +196,7 @@ impl crate::traits::ResourceDevice for super::Context {
             descriptor.set_height(desc.size.height as u64);
             descriptor.set_depth(desc.size.depth as u64);
             descriptor.set_array_length(desc.array_layer_count as u64);
+            descriptor.set_sample_count(desc.sample_count as u64);
             descriptor.set_mipmap_level_count(desc.mip_level_count as u64);
             descriptor.set_pixel_format(mtl_format);
             descriptor.set_usage(mtl_usage);
@@ -218,12 +219,8 @@ impl crate::traits::ResourceDevice for super::Context {
         }
     }
 
-    fn create_texture_view(
-        &self,
-        texture: super::Texture,
-        desc: crate::TextureViewDesc,
-    ) -> super::TextureView {
-        let texture = texture.as_ref();
+    fn create_texture_view(&self, desc: crate::TextureViewDesc) -> super::TextureView {
+        let texture = desc.texture.as_ref();
         let mtl_format = super::map_texture_format(desc.format);
         let mtl_type = map_view_dimension(desc.dimension);
         let mip_level_count = match desc.subresources.mip_level_count {

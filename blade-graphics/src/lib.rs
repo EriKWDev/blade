@@ -18,8 +18,7 @@
     trivial_casts,
     trivial_numeric_casts,
     unused_extern_crates,
-    //TODO: re-enable. Currently doesn't like "mem::size_of" on newer Rust
-    //unused_qualifications,
+    unused_qualifications,
     // We don't match on a reference, unless required.
     clippy::pattern_type_mismatch,
 )]
@@ -56,13 +55,7 @@ pub mod derive;
 #[cfg_attr(
     all(
         not(gles),
-        any(
-            vulkan,
-            windows,
-            target_os = "linux",
-            target_os = "android",
-            target_os = "freebsd"
-        )
+        any(vulkan, windows, target_os = "linux", target_os = "android")
     ),
     path = "vulkan/mod.rs"
 )]
@@ -72,15 +65,9 @@ mod shader;
 mod traits;
 pub mod util;
 pub mod limits {
-    /// Max number of passes inside a command encoder.
-    pub const PASS_COUNT: usize = 100;
-    /// Max plain data size for a pipeline.
     pub const PLAIN_DATA_SIZE: u32 = 256;
-    /// Max number of resources in a bind group.
     pub const RESOURCES_IN_GROUP: u32 = 8;
-    /// Min storage buffer alignment.
     pub const STORAGE_BUFFER_ALIGNMENT: u64 = 256;
-    /// Min acceleration structure scratch buffer alignment.
     pub const ACCELERATION_STRUCTURE_SCRATCH_ALIGNMENT: u64 = 256;
 }
 
@@ -93,8 +80,6 @@ pub struct ContextDesc {
     /// Enable validation of the GAPI, shaders,
     /// and insert crash markers into command buffers.
     pub validation: bool,
-    /// Enable GPU timing of all passes.
-    pub timing: bool,
     /// Enable capture support with GAPI tools.
     pub capture: bool,
     /// Enable GAPI overlay.
@@ -105,24 +90,12 @@ pub struct ContextDesc {
 pub enum NotSupportedError {
     #[cfg(all(
         not(gles),
-        any(
-            vulkan,
-            windows,
-            target_os = "linux",
-            target_os = "android",
-            target_os = "freebsd"
-        )
+        any(vulkan, windows, target_os = "linux", target_os = "android")
     ))]
     VulkanLoadingError(ash::LoadingError),
     #[cfg(all(
         not(gles),
-        any(
-            vulkan,
-            windows,
-            target_os = "linux",
-            target_os = "android",
-            target_os = "freebsd"
-        )
+        any(vulkan, windows, target_os = "linux", target_os = "android")
     ))]
     VulkanError(ash::vk::Result),
 
@@ -139,18 +112,6 @@ pub enum NotSupportedError {
 pub struct Capabilities {
     /// Which shader stages support ray queries
     pub ray_query: ShaderVisibility,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct DeviceInformation {
-    /// If this is something like llvmpipe, not a real GPU
-    pub is_software_emulated: bool,
-    /// The name of the GPU device
-    pub device_name: String,
-    /// The driver used to talk to the GPU
-    pub driver_name: String,
-    /// Further information about the driver
-    pub driver_info: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -404,6 +365,7 @@ pub struct TextureDesc<'a> {
     pub mip_level_count: u32,
     pub dimension: TextureDimension,
     pub usage: TextureUsage,
+    pub sample_count: u32,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -417,6 +379,7 @@ pub struct TextureSubresources {
 #[derive(Debug)]
 pub struct TextureViewDesc<'a> {
     pub name: &'a str,
+    pub texture: Texture,
     pub format: TextureFormat,
     pub dimension: ViewDimension,
     pub subresources: &'a TextureSubresources,
@@ -564,7 +527,6 @@ pub struct AccelerationStructureSizes {
 pub struct Shader {
     module: naga::Module,
     info: naga::valid::ModuleInfo,
-    source: String,
 }
 
 #[derive(Clone, Copy)]
@@ -595,7 +557,7 @@ pub enum ShaderBinding {
     Plain { size: u32 },
 }
 
-pub trait ShaderBindable: Clone + Copy + derive::HasShaderBinding {
+pub trait ShaderBindable: Clone + Copy {
     fn bind_to(&self, context: &mut PipelineContext, index: u32);
 }
 
@@ -1009,6 +971,24 @@ impl From<TextureFormat> for ColorTargetState {
     }
 }
 
+/// Described the multisampling state of a render pipeline
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MultisampleState {
+    pub sample_count: u32,
+    pub sample_mask: u64,
+    pub alpha_to_coverage: bool,
+}
+
+impl Default for MultisampleState {
+    fn default() -> Self {
+        Self {
+            sample_count: 1,
+            sample_mask: !0,
+            alpha_to_coverage: false,
+        }
+    }
+}
+
 pub struct RenderPipelineDesc<'a> {
     pub name: &'a str,
     pub data_layouts: &'a [&'a ShaderDataLayout],
@@ -1018,6 +998,7 @@ pub struct RenderPipelineDesc<'a> {
     pub depth_stencil: Option<DepthStencilState>,
     pub fragment: ShaderFunction<'a>,
     pub color_targets: &'a [ColorTargetState],
+    pub multisample_state: MultisampleState,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1110,5 +1091,3 @@ pub struct ScissorRect {
     pub w: u32,
     pub h: u32,
 }
-
-pub type Timings = std::collections::HashMap<String, std::time::Duration>;

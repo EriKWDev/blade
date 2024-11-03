@@ -1,17 +1,6 @@
 Changelog for Blade
 
-## blade-graphics-0.6 (TBD)
-
-- graphics:
-  - API for destruction of pipelines
-  - every pass now takes a label
-  - automatic GPU pass markers
-  - ability to capture pass GPU timings
-  - Metal:
-    - support for workgroup memory
-    - concurrent compute dispatches
-
-## blade-graphics-0.5, blade-macros-0.3, blade-egui-0.4, blade-util-0.1 (27 Aug 2024)
+## blade-graphics-0.5, blade-macros-0.3, blade-egui-0.4, blade-util-0.1 (TBD)
 
 - crate: `blade-util` for helper utilities
 - graphics:
@@ -21,18 +10,14 @@ Changelog for Blade
     - option to disable exclusive fullscreen
     - VK: using linear sRGB color space if available
   - exposed initialization errors
-  - exposed device information
   - Vk:
     - fixed initial RAM consumption
     - worked around Intel descriptor memory allocation bug
-    - fixed coherent memory requirements
-    - rudimentary cleanup on destruction
   - GLES:
     - support for storage buffer and compute
     - scissor rects, able to run "particle" example
     - blending and draw masks
     - fixed texture uploads
-- examples: "move"
 - window API switched to raw-window-handle-0.6
 
 ## blade-graphics-0.4, blade-render-0.3, blade-0.2 (22 Mar 2024)

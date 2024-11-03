@@ -59,23 +59,22 @@ fn main() {
         array_layer_count: 1,
         mip_level_count,
         usage: gpu::TextureUsage::RESOURCE | gpu::TextureUsage::STORAGE | gpu::TextureUsage::COPY,
+        sample_count: 1,
     });
     let views = (0..mip_level_count)
         .map(|i| {
-            context.create_texture_view(
+            context.create_texture_view(gpu::TextureViewDesc {
+                name: &format!("mip-{}", i),
                 texture,
-                gpu::TextureViewDesc {
-                    name: &format!("mip-{}", i),
-                    format: gpu::TextureFormat::Rgba8Unorm,
-                    dimension: gpu::ViewDimension::D2,
-                    subresources: &gpu::TextureSubresources {
-                        base_mip_level: i,
-                        mip_level_count: NonZeroU32::new(1),
-                        base_array_layer: 0,
-                        array_layer_count: None,
-                    },
+                format: gpu::TextureFormat::Rgba8Unorm,
+                dimension: gpu::ViewDimension::D2,
+                subresources: &gpu::TextureSubresources {
+                    base_mip_level: i,
+                    mip_level_count: NonZeroU32::new(1),
+                    base_array_layer: 0,
+                    array_layer_count: None,
                 },
-            )
+            })
         })
         .collect::<Vec<_>>();
 
@@ -111,7 +110,7 @@ fn main() {
     command_encoder.start();
     command_encoder.init_texture(texture);
 
-    if let mut transfer = command_encoder.transfer("gen-mips") {
+    if let mut transfer = command_encoder.transfer() {
         transfer.copy_buffer_to_texture(
             upload_buffer.into(),
             extent.width * 4,
@@ -120,7 +119,7 @@ fn main() {
         );
     }
     for i in 1..mip_level_count {
-        if let mut compute = command_encoder.compute("generate mips") {
+        if let mut compute = command_encoder.compute() {
             if let mut pc = compute.with(&pipeline) {
                 let groups = pipeline.get_dispatch_for(extent.at_mip_level(i));
                 pc.bind(
@@ -139,7 +138,7 @@ fn main() {
             }
         }
     }
-    if let mut tranfer = command_encoder.transfer("init 1x2 texture") {
+    if let mut tranfer = command_encoder.transfer() {
         tranfer.copy_texture_to_buffer(
             gpu::TexturePiece {
                 texture,

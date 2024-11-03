@@ -252,7 +252,7 @@ impl crate::traits::ResourceDevice for super::Context {
         let mut create_flags = vk::ImageCreateFlags::empty();
         if desc.dimension == crate::TextureDimension::D2
             && desc.size.depth % 6 == 0
-            //&& desc.sample_count == 1
+            && desc.sample_count == 1
             && desc.size.width == desc.size.height
         {
             create_flags |= vk::ImageCreateFlags::CUBE_COMPATIBLE;
@@ -265,7 +265,7 @@ impl crate::traits::ResourceDevice for super::Context {
             extent: super::map_extent_3d(&desc.size),
             mip_levels: desc.mip_level_count,
             array_layers: desc.array_layer_count,
-            samples: vk::SampleCountFlags::from_raw(1), // desc.sample_count
+            samples: super::map_sample_count(desc.sample_count),
             tiling: vk::ImageTiling::OPTIMAL,
             usage: map_texture_usage(desc.usage, desc.format.aspects()),
             sharing_mode: vk::SharingMode::EXCLUSIVE,
@@ -312,18 +312,14 @@ impl crate::traits::ResourceDevice for super::Context {
         self.free_memory(texture.memory_handle);
     }
 
-    fn create_texture_view(
-        &self,
-        texture: super::Texture,
-        desc: crate::TextureViewDesc,
-    ) -> super::TextureView {
+    fn create_texture_view(&self, desc: crate::TextureViewDesc) -> super::TextureView {
         let aspects = desc.format.aspects();
         let subresource_range = super::map_subresource_range(desc.subresources, aspects);
         let vk_info = vk::ImageViewCreateInfo {
-            image: texture.raw,
+            image: desc.texture.raw,
             view_type: map_view_dimension(desc.dimension),
             format: super::map_texture_format(desc.format),
-            subresource_range,
+            subresource_range: subresource_range,
             ..Default::default()
         };
 
@@ -335,8 +331,8 @@ impl crate::traits::ResourceDevice for super::Context {
         super::TextureView {
             raw,
             target_size: [
-                (texture.target_size[0] >> desc.subresources.base_mip_level).max(1),
-                (texture.target_size[1] >> desc.subresources.base_mip_level).max(1),
+                (desc.texture.target_size[0] >> desc.subresources.base_mip_level).max(1),
+                (desc.texture.target_size[1] >> desc.subresources.base_mip_level).max(1),
             ],
             aspects,
         }

@@ -2,14 +2,15 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use blade_graphics as gpu;
-use blade_helpers::ControlledCamera;
 use std::{
+    collections::VecDeque,
     fmt, fs,
     path::{Path, PathBuf},
     sync::Arc,
     time,
 };
 
+const FRAME_TIME_HISTORY: usize = 30;
 const RENDER_WHILE_LOADING: bool = true;
 const MAX_DEPTH: f32 = 1e9;
 
@@ -55,15 +56,6 @@ impl From<gpu::Transform> for TransformComponents {
         }
     }
 }
-impl From<transform_gizmo_egui::math::Transform> for TransformComponents {
-    fn from(t: transform_gizmo_egui::math::Transform) -> Self {
-        Self {
-            scale: glam::DVec3::from(t.scale).as_vec3(),
-            rotation: glam::DQuat::from(t.rotation).as_quat(),
-            translation: glam::DVec3::from(t.translation).as_vec3(),
-        }
-    }
-}
 impl TransformComponents {
     fn to_blade(&self) -> gpu::Transform {
         let m = glam::Mat4::from_scale_rotation_translation(
@@ -76,13 +68,6 @@ impl TransformComponents {
             x: m.x_axis.into(),
             y: m.y_axis.into(),
             z: m.z_axis.into(),
-        }
-    }
-    fn to_egui(&self) -> transform_gizmo_egui::math::Transform {
-        transform_gizmo_egui::math::Transform {
-            scale: self.scale.as_dvec3().into(),
-            rotation: self.rotation.as_dquat().into(),
-            translation: self.translation.as_dvec3().into(),
         }
     }
     fn is_inversible(&self) -> bool {
@@ -145,15 +130,18 @@ struct Example {
     object_extras: Vec<ObjectExtra>,
     selected_object_index: Option<usize>,
     need_picked_selection_frames: usize,
+    gizmo_mode: egui_gizmo::GizmoMode,
     have_objects_changed: bool,
-    gizmo: transform_gizmo_egui::Gizmo,
     scene_revision: usize,
-    camera: ControlledCamera,
+    camera: blade_render::Camera,
+    fly_speed: f32,
     debug: blade_render::DebugConfig,
     track_hot_reloads: bool,
     need_accumulation_reset: bool,
     is_point_selected: bool,
     is_file_hovered: bool,
+    last_render_time: time::Instant,
+    render_times: VecDeque<u32>,
     ray_config: blade_render::RayConfig,
     denoiser_enabled: bool,
     denoiser_config: blade_render::DenoiserConfig,
@@ -187,8 +175,8 @@ impl Example {
                 window,
                 gpu::ContextDesc {
                     validation: cfg!(debug_assertions),
-                    capture: true,
-                    ..Default::default()
+                    capture: false,
+                    overlay: false,
                 },
             )
             .unwrap()
@@ -226,7 +214,7 @@ impl Example {
             &render_config,
         );
         pacer.end_frame(&context);
-        let gui_painter = blade_egui::GuiPainter::new(surface_info, &context);
+        let gui_painter = blade_egui::GuiPainter::new(surface_info, &context, 1);
 
         Self {
             scene_path: PathBuf::new(),
@@ -242,16 +230,42 @@ impl Example {
             object_extras: Vec::new(),
             selected_object_index: None,
             need_picked_selection_frames: 0,
+            gizmo_mode: egui_gizmo::GizmoMode::Translate,
             have_objects_changed: false,
-            gizmo: Default::default(),
             scene_revision: 0,
-            camera: ControlledCamera::default(),
+            camera: blade_render::Camera {
+                pos: mint::Vector3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                rot: mint::Quaternion {
+                    v: mint::Vector3 {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    s: 1.0,
+                },
+                fov_y: 0.0,
+                depth: 0.0,
+            },
+            fly_speed: 0.0,
             debug: blade_render::DebugConfig::default(),
-            track_hot_reloads: true,
+            track_hot_reloads: false,
             need_accumulation_reset: true,
             is_point_selected: false,
             is_file_hovered: false,
-            ray_config: blade_helpers::default_ray_config(),
+            last_render_time: time::Instant::now(),
+            render_times: VecDeque::with_capacity(FRAME_TIME_HISTORY),
+            ray_config: blade_render::RayConfig {
+                num_environment_samples: 1,
+                environment_importance_sampling: false,
+                temporal_history: 10,
+                spatial_taps: 1,
+                spatial_tap_history: 5,
+                spatial_radius: 10,
+            },
             denoiser_enabled: true,
             denoiser_config: blade_render::DenoiserConfig {
                 num_passes: 3,
@@ -293,7 +307,7 @@ impl Example {
             ron::de::from_bytes(&fs::read(scene_path).expect("Unable to open the scene file"))
                 .expect("Unable to parse the scene file");
 
-        self.camera.inner = blade_render::Camera {
+        self.camera = blade_render::Camera {
             pos: config_scene.camera.position,
             rot: glam::Quat::from(config_scene.camera.orientation)
                 .normalize()
@@ -301,7 +315,7 @@ impl Example {
             fov_y: config_scene.camera.fov_y,
             depth: MAX_DEPTH,
         };
-        self.camera.fly_speed = config_scene.camera.speed;
+        self.fly_speed = config_scene.camera.speed;
         self.ray_config.environment_importance_sampling = !config_scene.environment_map.is_empty();
         self.post_proc_config.average_luminocity = config_scene.average_luminocity;
 
@@ -349,10 +363,10 @@ impl Example {
     pub fn save_scene(&self, scene_path: &Path) {
         let config_scene = ConfigScene {
             camera: ConfigCamera {
-                position: self.camera.inner.pos,
-                orientation: self.camera.inner.rot,
-                fov_y: self.camera.inner.fov_y,
-                speed: self.camera.fly_speed,
+                position: self.camera.pos,
+                orientation: self.camera.rot,
+                fov_y: self.camera.fov_y,
+                speed: self.fly_speed,
             },
             environment_map: self.scene_environment_map.clone(),
             average_luminocity: self.post_proc_config.average_luminocity,
@@ -446,13 +460,10 @@ impl Example {
         if do_render {
             self.renderer.prepare(
                 command_encoder,
-                &self.camera.inner,
-                blade_render::FrameConfig {
-                    frozen: false,
-                    debug_draw: self.is_point_selected || self.is_file_hovered,
-                    reset_variance: self.debug.mouse_pos.is_none(),
-                    reset_reservoirs: self.need_accumulation_reset,
-                },
+                &self.camera,
+                self.is_point_selected || self.is_file_hovered,
+                self.debug.mouse_pos.is_some(),
+                self.need_accumulation_reset,
             );
             self.need_accumulation_reset = false;
 
@@ -470,17 +481,14 @@ impl Example {
         let frame = self.context.acquire_frame();
         command_encoder.init_texture(frame.texture());
 
-        if let mut pass = command_encoder.render(
-            "draw",
-            gpu::RenderTargetSet {
-                colors: &[gpu::RenderTarget {
-                    view: frame.texture_view(),
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
-                    finish_op: gpu::FinishOp::Store,
-                }],
-                depth_stencil: None,
-            },
-        ) {
+        if let mut pass = command_encoder.render(gpu::RenderTargetSet {
+            colors: &[gpu::RenderTarget {
+                view: frame.texture_view(),
+                init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
+                finish_op: gpu::FinishOp::Store,
+            }],
+            depth_stencil: None,
+        }) {
             let screen_desc = blade_egui::ScreenDescriptor {
                 physical_size: (physical_size.width, physical_size.height),
                 scale_factor,
@@ -514,42 +522,51 @@ impl Example {
     }
 
     fn add_manipulation_gizmo(&mut self, obj_index: usize, ui: &mut egui::Ui) {
-        use transform_gizmo_egui::GizmoExt as _;
-
-        let view_matrix = self.camera.get_view_matrix();
+        let view_matrix =
+            glam::Mat4::from_rotation_translation(self.camera.rot.into(), self.camera.pos.into())
+                .inverse();
         let extent = self.renderer.get_surface_size();
-        let projection_matrix = self
-            .camera
-            .get_projection_matrix(extent.width as f32 / extent.height as f32);
-
-        self.gizmo.update_config(transform_gizmo_egui::GizmoConfig {
-            view_matrix: view_matrix.as_dmat4().into(),
-            projection_matrix: projection_matrix.as_dmat4().into(),
-            viewport: transform_gizmo_egui::Rect {
-                min: transform_gizmo_egui::math::Pos2::ZERO,
-                max: transform_gizmo_egui::math::Pos2 {
-                    x: extent.width as f32,
-                    y: extent.height as f32,
-                },
-            },
-            orientation: transform_gizmo_egui::GizmoOrientation::Global,
-            snapping: true,
-            ..Default::default()
-        });
-
+        let aspect = extent.width as f32 / extent.height as f32;
+        let projection_matrix =
+            glam::Mat4::perspective_rh(self.camera.fov_y, aspect, 1.0, self.camera.depth);
         let object = &mut self.objects[obj_index];
-        let tc = TransformComponents::from(object.transform);
-
-        if let Some((_result, transforms)) = self.gizmo.interact(ui, &[tc.to_egui()]) {
-            object.transform = TransformComponents::from(transforms[0]).to_blade();
-            self.have_objects_changed = true;
+        let model_matrix = mint::ColumnMatrix4::from(mint::RowMatrix4 {
+            x: object.transform.x,
+            y: object.transform.y,
+            z: object.transform.z,
+            w: [0.0, 0.0, 0.0, 1.0].into(),
+        });
+        let gizmo = egui_gizmo::Gizmo::new("Object")
+            .view_matrix(mint::ColumnMatrix4::from(view_matrix))
+            .projection_matrix(mint::ColumnMatrix4::from(projection_matrix))
+            .model_matrix(model_matrix)
+            .mode(self.gizmo_mode)
+            .orientation(egui_gizmo::GizmoOrientation::Global)
+            .snapping(true);
+        if let Some(response) = gizmo.interact(ui) {
+            let t1 = TransformComponents {
+                scale: response.scale.into(),
+                rotation: response.rotation.into(),
+                translation: response.translation.into(),
+            }
+            .to_blade();
+            if object.transform != t1 {
+                object.transform = t1;
+                self.have_objects_changed = true;
+            }
         }
     }
 
     #[profiling::function]
     fn populate_view(&mut self, ui: &mut egui::Ui) {
-        use blade_helpers::{populate_debug_selection, ExposeHud as _};
         use strum::IntoEnumIterator as _;
+
+        let delta = self.last_render_time.elapsed();
+        self.last_render_time += delta;
+        while self.render_times.len() >= FRAME_TIME_HISTORY {
+            self.render_times.pop_back();
+        }
+        self.render_times.push_front(delta.as_millis() as u32);
 
         if self.scene_load_task.is_some() {
             ui.horizontal(|ui| {
@@ -573,19 +590,137 @@ impl Example {
         }
 
         egui::CollapsingHeader::new("Camera").show(ui, |ui| {
-            self.camera.populate_hud(ui);
+            ui.horizontal(|ui| {
+                ui.label("Position:");
+                ui.add(egui::DragValue::new(&mut self.camera.pos.x));
+                ui.add(egui::DragValue::new(&mut self.camera.pos.y));
+                ui.add(egui::DragValue::new(&mut self.camera.pos.z));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Rotation:");
+                ui.add(egui::DragValue::new(&mut self.camera.rot.v.x));
+                ui.add(egui::DragValue::new(&mut self.camera.rot.v.y));
+                ui.add(egui::DragValue::new(&mut self.camera.rot.v.z));
+                ui.add(egui::DragValue::new(&mut self.camera.rot.s));
+            });
+            ui.add(egui::Slider::new(&mut self.camera.fov_y, 0.5f32..=2.0f32).text("FOV"));
+            ui.add(
+                egui::Slider::new(&mut self.fly_speed, 1f32..=100000f32)
+                    .text("Fly speed")
+                    .logarithmic(true),
+            );
         });
 
         egui::CollapsingHeader::new("Debug")
             .default_open(true)
             .show(ui, |ui| {
-                self.debug.populate_hud(ui);
-                populate_debug_selection(
-                    &mut self.debug.mouse_pos,
-                    &selection,
-                    &self.asset_hub,
-                    ui,
-                );
+                ui.checkbox(&mut self.track_hot_reloads, "Hot reloading");
+                // debug mode
+                egui::ComboBox::from_label("View mode")
+                    .selected_text(format!("{:?}", self.debug.view_mode))
+                    .show_ui(ui, |ui| {
+                        for value in blade_render::DebugMode::iter() {
+                            ui.selectable_value(
+                                &mut self.debug.view_mode,
+                                value,
+                                format!("{value:?}"),
+                            );
+                        }
+                    });
+                // debug flags
+                ui.label("Draw debug:");
+                for (name, bit) in blade_render::DebugDrawFlags::all().iter_names() {
+                    let mut enabled = self.debug.draw_flags.contains(bit);
+                    ui.checkbox(&mut enabled, name);
+                    self.debug.draw_flags.set(bit, enabled);
+                }
+                ui.label("Ignore textures:");
+                for (name, bit) in blade_render::DebugTextureFlags::all().iter_names() {
+                    let mut enabled = self.debug.texture_flags.contains(bit);
+                    ui.checkbox(&mut enabled, name);
+                    self.debug.texture_flags.set(bit, enabled);
+                }
+
+                // selection info
+                if let Some(screen_pos) = self.debug.mouse_pos {
+                    let style = ui.style();
+                    egui::Frame::group(style).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Pixel:");
+                            ui.colored_label(
+                                egui::Color32::WHITE,
+                                format!("{}x{}", screen_pos[0], screen_pos[1]),
+                            );
+                            if ui.button("Unselect").clicked() {
+                                self.debug.mouse_pos = None;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            let sd = &selection.std_deviation;
+                            ui.label("Std Deviation:");
+                            ui.colored_label(
+                                egui::Color32::WHITE,
+                                format!("{:.2} {:.2} {:.2}", sd.x, sd.y, sd.z),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Samples:");
+                            let power = selection
+                                .std_deviation_history
+                                .next_power_of_two()
+                                .trailing_zeros();
+                            ui.colored_label(egui::Color32::WHITE, format!("2^{}", power));
+                            self.need_accumulation_reset |= ui.button("Reset").clicked();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Depth:");
+                            ui.colored_label(
+                                egui::Color32::WHITE,
+                                format!("{:.2}", selection.depth),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            let tc = &selection.tex_coords;
+                            ui.label("Texture coords:");
+                            ui.colored_label(
+                                egui::Color32::WHITE,
+                                format!("{:.2} {:.2}", tc.x, tc.y),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            let wp = &selection.position;
+                            ui.label("World pos:");
+                            ui.colored_label(
+                                egui::Color32::WHITE,
+                                format!("{:.2} {:.2} {:.2}", wp.x, wp.y, wp.z),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Base color:");
+                            if let Some(handle) = selection.base_color_texture {
+                                let name = self
+                                    .asset_hub
+                                    .textures
+                                    .get_main_source_path(handle)
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_default();
+                                ui.colored_label(egui::Color32::WHITE, name);
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Normal:");
+                            if let Some(handle) = selection.normal_texture {
+                                let name = self
+                                    .asset_hub
+                                    .textures
+                                    .get_main_source_path(handle)
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_default();
+                                ui.colored_label(egui::Color32::WHITE, name);
+                            }
+                        });
+                    });
+                }
 
                 // blits
                 ui.label("Debug blit:");
@@ -641,21 +776,93 @@ impl Example {
 
         let old_ray_config = self.ray_config;
         egui::CollapsingHeader::new("Ray Trace")
-            .default_open(false)
+            .default_open(true)
             .show(ui, |ui| {
-                self.ray_config.populate_hud(ui);
+                let rc = &mut self.ray_config;
+                ui.add(
+                    egui::Slider::new(&mut rc.num_environment_samples, 1..=100u32)
+                        .text("Num env samples")
+                        .logarithmic(true),
+                );
+                ui.checkbox(
+                    &mut rc.environment_importance_sampling,
+                    "Env importance sampling",
+                );
+                ui.add(
+                    egui::widgets::Slider::new(&mut rc.temporal_history, 0..=50)
+                        .text("Temporal history"),
+                );
+                ui.add(
+                    egui::widgets::Slider::new(&mut rc.spatial_taps, 0..=10).text("Spatial taps"),
+                );
+                ui.add(
+                    egui::widgets::Slider::new(&mut rc.spatial_tap_history, 0..=50)
+                        .text("Spatial tap history"),
+                );
+                ui.add(
+                    egui::widgets::Slider::new(&mut rc.spatial_radius, 1..=50)
+                        .text("Spatial radius (px)"),
+                );
             });
         self.need_accumulation_reset |= self.ray_config != old_ray_config;
 
         egui::CollapsingHeader::new("Denoise")
-            .default_open(false)
+            .default_open(true)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.denoiser_enabled, "Enable");
-                self.denoiser_config.populate_hud(ui);
+                let dc = &mut self.denoiser_config;
+                ui.add(
+                    egui::Slider::new(&mut dc.temporal_weight, 0.0..=1.0f32)
+                        .text("Temporal weight"),
+                );
+                ui.add(egui::Slider::new(&mut dc.num_passes, 0..=5u32).text("A-trous passes"));
             });
 
         egui::CollapsingHeader::new("Tone Map").show(ui, |ui| {
-            self.post_proc_config.populate_hud(ui);
+            ui.add(
+                egui::Slider::new(
+                    &mut self.post_proc_config.average_luminocity,
+                    0.1f32..=1_000f32,
+                )
+                .text("Average luminocity")
+                .logarithmic(true),
+            );
+            ui.add(
+                egui::Slider::new(
+                    &mut self.post_proc_config.exposure_key_value,
+                    0.01f32..=10f32,
+                )
+                .text("Key value")
+                .logarithmic(true),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.post_proc_config.white_level, 0.1f32..=2f32)
+                    .text("White level"),
+            );
+        });
+
+        egui::CollapsingHeader::new("Performance").show(ui, |ui| {
+            let times = self.render_times.as_slices();
+            let fd_points = egui_plot::PlotPoints::from_iter(
+                times
+                    .0
+                    .iter()
+                    .chain(times.1.iter())
+                    .enumerate()
+                    .map(|(x, &y)| [x as f64, y as f64]),
+            );
+            let fd_line = egui_plot::Line::new(fd_points).name("last");
+            egui_plot::Plot::new("Frame time")
+                .allow_zoom(false)
+                .allow_scroll(false)
+                .allow_drag(false)
+                .show_x(false)
+                .include_y(0.0)
+                .show_axes([false, true])
+                .show(ui, |plot_ui| {
+                    plot_ui.line(fd_line);
+                    plot_ui.hline(egui_plot::HLine::new(1000.0 / 60.0).name("smooth"));
+                });
         });
     }
 
@@ -704,27 +911,40 @@ impl Example {
             egui::CollapsingHeader::new("Transform")
                 .default_open(true)
                 .show(ui, |ui| {
-                    use std::f32::consts::PI;
                     let object = self.objects.get_mut(index).unwrap();
                     let mut tc = TransformComponents::from(object.transform);
-                    let (mut a1, mut a2, mut a3) = tc.rotation.to_euler(glam::EulerRot::default());
                     ui.horizontal(|ui| {
-                        ui.label("Translate");
+                        ui.selectable_value(
+                            &mut self.gizmo_mode,
+                            egui_gizmo::GizmoMode::Translate,
+                            "Translate",
+                        );
                         ui.add(egui::DragValue::new(&mut tc.translation.x));
                         ui.add(egui::DragValue::new(&mut tc.translation.y));
                         ui.add(egui::DragValue::new(&mut tc.translation.z));
                     });
-                    ui.add(egui::Slider::new(&mut a1, -PI..=PI).text("Euler Y"));
-                    ui.add(egui::Slider::new(&mut a2, -PI * 0.5..=PI * 0.5).text("Euler X"));
-                    ui.add(egui::Slider::new(&mut a3, -PI..=PI).text("Euler Z"));
                     ui.horizontal(|ui| {
-                        ui.label("Scale");
+                        ui.selectable_value(
+                            &mut self.gizmo_mode,
+                            egui_gizmo::GizmoMode::Rotate,
+                            "Rotate",
+                        );
+                        ui.add(egui::DragValue::new(&mut tc.rotation.x));
+                        ui.add(egui::DragValue::new(&mut tc.rotation.y));
+                        ui.add(egui::DragValue::new(&mut tc.rotation.z));
+                        ui.add(egui::DragValue::new(&mut tc.rotation.w));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(
+                            &mut self.gizmo_mode,
+                            egui_gizmo::GizmoMode::Scale,
+                            "Scale",
+                        );
                         ui.add(egui::DragValue::new(&mut tc.scale.x));
                         ui.add(egui::DragValue::new(&mut tc.scale.y));
                         ui.add(egui::DragValue::new(&mut tc.scale.z));
                     });
 
-                    tc.rotation = glam::Quat::from_euler(glam::EulerRot::default(), a1, a2, a3);
                     let transform = tc.to_blade();
                     if object.transform != transform {
                         if tc.is_inversible() {
@@ -786,6 +1006,19 @@ impl Example {
         });
         true
     }
+
+    fn move_camera_by(&mut self, offset: glam::Vec3) {
+        let dir = glam::Quat::from(self.camera.rot) * offset;
+        self.camera.pos = (glam::Vec3::from(self.camera.pos) + dir).into();
+        self.debug.mouse_pos = None;
+    }
+    fn rotate_camera_z_by(&mut self, angle: f32) -> glam::Quat {
+        let quat = glam::Quat::from(self.camera.rot);
+        let rotation = glam::Quat::from_rotation_z(angle);
+        self.camera.rot = (quat * rotation).into();
+        self.debug.mouse_pos = None;
+        rotation
+    }
 }
 
 fn main() {
@@ -811,7 +1044,7 @@ fn main() {
 
     struct Drag {
         _screen_pos: glam::IVec2,
-        _rotation: glam::Quat,
+        rotation: glam::Quat,
     }
     let mut drag_start = None::<Drag>;
     let mut last_event = time::Instant::now();
@@ -823,8 +1056,10 @@ fn main() {
             target.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
             let delta = last_event.elapsed().as_secs_f32();
-            let drag_speed = 0.01f32;
             last_event = time::Instant::now();
+            let move_speed = example.fly_speed * delta;
+            let rotate_speed = 0.01f32;
+            let rotate_speed_z = 1000.0 * delta;
 
             match event {
                 winit::event::Event::AboutToWait => {
@@ -848,14 +1083,42 @@ fn main() {
                                     ..
                                 },
                             ..
-                        } => {
-                            if key_code == winit::keyboard::KeyCode::Escape {
+                        } => match key_code {
+                            winit::keyboard::KeyCode::Escape => {
                                 target.exit();
-                            } else if drag_start.is_none() && example.camera.on_key(key_code, delta)
-                            {
-                                example.debug.mouse_pos = None;
                             }
-                        }
+                            winit::keyboard::KeyCode::KeyW => {
+                                example.move_camera_by(glam::Vec3::new(0.0, 0.0, -move_speed));
+                            }
+                            winit::keyboard::KeyCode::KeyS => {
+                                example.move_camera_by(glam::Vec3::new(0.0, 0.0, move_speed));
+                            }
+                            winit::keyboard::KeyCode::KeyA => {
+                                example.move_camera_by(glam::Vec3::new(-move_speed, 0.0, 0.0));
+                            }
+                            winit::keyboard::KeyCode::KeyD => {
+                                example.move_camera_by(glam::Vec3::new(move_speed, 0.0, 0.0));
+                            }
+                            winit::keyboard::KeyCode::KeyZ => {
+                                example.move_camera_by(glam::Vec3::new(0.0, -move_speed, 0.0));
+                            }
+                            winit::keyboard::KeyCode::KeyX => {
+                                example.move_camera_by(glam::Vec3::new(0.0, move_speed, 0.0));
+                            }
+                            winit::keyboard::KeyCode::KeyQ => {
+                                let rot = example.rotate_camera_z_by(rotate_speed_z);
+                                if let Some(ref mut drag) = drag_start {
+                                    drag.rotation *= rot;
+                                }
+                            }
+                            winit::keyboard::KeyCode::KeyE => {
+                                let rot = example.rotate_camera_z_by(-rotate_speed_z);
+                                if let Some(ref mut drag) = drag_start {
+                                    drag.rotation *= rot;
+                                }
+                            }
+                            _ => {}
+                        },
                         winit::event::WindowEvent::CloseRequested => {
                             target.exit();
                         }
@@ -867,7 +1130,7 @@ fn main() {
                             drag_start = match state {
                                 winit::event::ElementState::Pressed => Some(Drag {
                                     _screen_pos: last_mouse_pos.into(),
-                                    _rotation: example.camera.inner.rot.into(),
+                                    rotation: example.camera.rot.into(),
                                 }),
                                 winit::event::ElementState::Released => None,
                             };
@@ -889,21 +1152,18 @@ fn main() {
                         }
                         winit::event::WindowEvent::CursorMoved { position, .. } => {
                             if let Some(_) = drag_start {
-                                let prev = glam::Quat::from(example.camera.inner.rot);
+                                let prev = glam::Quat::from(example.camera.rot);
                                 let rotation_local = glam::Quat::from_rotation_x(
-                                    (last_mouse_pos[1] as f32 - position.y as f32) * drag_speed,
+                                    (last_mouse_pos[1] as f32 - position.y as f32) * rotate_speed,
                                 );
                                 let rotation_global = glam::Quat::from_rotation_y(
-                                    (last_mouse_pos[0] as f32 - position.x as f32) * drag_speed,
+                                    (last_mouse_pos[0] as f32 - position.x as f32) * rotate_speed,
                                 );
-                                example.camera.inner.rot =
+                                example.camera.rot =
                                     (rotation_global * prev * rotation_local).into();
                                 example.debug.mouse_pos = None;
                             }
                             last_mouse_pos = [position.x as i32, position.y as i32];
-                        }
-                        winit::event::WindowEvent::MouseWheel { delta, .. } => {
-                            example.camera.on_wheel(delta);
                         }
                         winit::event::WindowEvent::HoveredFile(_) => {
                             example.is_file_hovered = true;

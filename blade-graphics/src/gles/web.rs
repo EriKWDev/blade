@@ -10,14 +10,16 @@ struct Swapchain {
     extent: Cell<crate::Extent>,
 }
 
-pub struct PlatformContext {
+pub struct Context {
     #[allow(unused)]
     webgl2: web_sys::WebGl2RenderingContext,
     glow: glow::Context,
     swapchain: Swapchain,
+    pub(super) capabilities: super::Capabilities,
+    pub(super) limits: super::Limits,
 }
 
-impl super::Context {
+impl Context {
     pub unsafe fn init(_desc: crate::ContextDesc) -> Result<Self, crate::NotSupportedError> {
         Err(crate::NotSupportedError::PlatformNotSupported)
     }
@@ -71,31 +73,20 @@ impl super::Context {
             extent: Cell::default(),
         };
 
-        let device_information = crate::DeviceInformation {
-            is_software_emulated: false,
-            device_name: glow.get_parameter_string(glow::VENDOR),
-            driver_name: glow.get_parameter_string(glow::RENDERER),
-            driver_info: glow.get_parameter_string(glow::VERSION),
-        };
-
         Ok(Self {
-            platform: PlatformContext {
-                webgl2,
-                glow,
-                swapchain,
-            },
+            webgl2,
+            glow,
+            swapchain,
             capabilities,
-            toggles: super::Toggles::default(),
             limits,
-            device_information,
         })
     }
 
     pub fn resize(&self, config: crate::SurfaceConfig) -> crate::SurfaceInfo {
         //TODO: create WebGL context here
-        let sc = &self.platform.swapchain;
+        let sc = &self.swapchain;
         let format_desc = super::describe_texture_format(sc.format);
-        let gl = &self.platform.glow;
+        let gl = &self.glow;
         //Note: this code can be shared with EGL
         unsafe {
             gl.bind_renderbuffer(glow::RENDERBUFFER, Some(sc.renderbuf));
@@ -123,7 +114,7 @@ impl super::Context {
     }
 
     pub fn acquire_frame(&self) -> super::Frame {
-        let sc = &self.platform.swapchain;
+        let sc = &self.swapchain;
         let size = sc.extent.get();
         super::Frame {
             texture: super::Texture {
@@ -137,13 +128,34 @@ impl super::Context {
     /// Obtain a lock to the EGL context and get handle to the [`glow::Context`] that can be used to
     /// do rendering.
     pub(super) fn lock(&self) -> &glow::Context {
-        &self.platform.glow
+        &self.glow
     }
 
     pub(super) fn present(&self) {
-        let sc = &self.platform.swapchain;
+        let sc = &self.swapchain;
+        let size = sc.extent.get();
+        let gl = &self.glow;
         unsafe {
-            super::present_blit(&self.platform.glow, sc.framebuf, sc.extent.get());
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask(true, true, true, true);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(sc.framebuf));
+            // Note the Y-flipping here. GL's presentation is not flipped,
+            // but main rendering is. Therefore, we Y-flip the output positions
+            // in the shader, and also this blit.
+            gl.blit_framebuffer(
+                0,
+                size.height as i32,
+                size.width as i32,
+                0,
+                0,
+                0,
+                size.width as i32,
+                size.height as i32,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
         }
     }
 }

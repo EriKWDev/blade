@@ -18,8 +18,7 @@ const SHADER_SOURCE: &'static str = include_str!("../shader.wgsl");
 use blade_util::{BufferBelt, BufferBeltDescriptor};
 use std::{
     collections::hash_map::{Entry, HashMap},
-    mem::size_of,
-    ptr,
+    mem, ptr,
 };
 
 #[repr(C)]
@@ -71,16 +70,15 @@ impl GuiTexture {
             mip_level_count: 1,
             dimension: blade_graphics::TextureDimension::D2,
             usage: blade_graphics::TextureUsage::COPY | blade_graphics::TextureUsage::RESOURCE,
+            sample_count: 1,
         });
-        let view = context.create_texture_view(
-            allocation,
-            blade_graphics::TextureViewDesc {
-                name,
-                format,
-                dimension: blade_graphics::ViewDimension::D2,
-                subresources: &blade_graphics::TextureSubresources::default(),
-            },
-        );
+        let view = context.create_texture_view(blade_graphics::TextureViewDesc {
+            name,
+            texture: allocation,
+            format,
+            dimension: blade_graphics::ViewDimension::D2,
+            subresources: &blade_graphics::TextureSubresources::default(),
+        });
         Self { allocation, view }
     }
 
@@ -109,15 +107,8 @@ pub struct GuiPainter {
 impl GuiPainter {
     /// Destroy the contents of the painter.
     pub fn destroy(&mut self, context: &blade_graphics::Context) {
-        context.destroy_render_pipeline(&mut self.pipeline);
         self.belt.destroy(context);
         for (_, gui_texture) in self.textures.drain() {
-            gui_texture.delete(context);
-        }
-        for gui_texture in self.textures_dropped.drain(..) {
-            gui_texture.delete(context);
-        }
-        for (gui_texture, _) in self.textures_to_delete.drain(..) {
             gui_texture.delete(context);
         }
         context.destroy_sampler(self.sampler);
@@ -128,7 +119,11 @@ impl GuiPainter {
     /// It supports renderpasses with only a color attachment,
     /// and this attachment format must be The `output_format`.
     #[profiling::function]
-    pub fn new(info: blade_graphics::SurfaceInfo, context: &blade_graphics::Context) -> Self {
+    pub fn new(
+        info: blade_graphics::SurfaceInfo,
+        context: &blade_graphics::Context,
+        sample_count: u32,
+    ) -> Self {
         let shader = context.create_shader(blade_graphics::ShaderDesc {
             source: SHADER_SOURCE,
         });
@@ -150,6 +145,10 @@ impl GuiPainter {
                 blend: Some(blade_graphics::BlendState::ALPHA_BLENDING),
                 write_mask: blade_graphics::ColorWrites::all(),
             }],
+            multisample_state: blade_graphics::MultisampleState {
+                sample_count,
+                ..Default::default()
+            },
         });
 
         let belt = BufferBelt::new(BufferBeltDescriptor {
@@ -210,7 +209,7 @@ impl GuiPainter {
                 egui::ImageData::Font(ref a) => {
                     let color_iter = a.srgba_pixels(None);
                     let stage = self.belt.alloc(
-                        (color_iter.len() * size_of::<egui::Color32>()) as u64,
+                        (color_iter.len() * mem::size_of::<egui::Color32>()) as u64,
                         context,
                     );
                     let mut ptr = stage.data() as *mut egui::Color32;
@@ -265,7 +264,7 @@ impl GuiPainter {
             copies.push((src, dst, extent));
         }
 
-        if let mut transfer = command_encoder.transfer("update egui textures") {
+        if let mut transfer = command_encoder.transfer() {
             for (src, dst, extent) in copies {
                 transfer.copy_buffer_to_texture(src, 4 * extent.width, dst, extent);
             }

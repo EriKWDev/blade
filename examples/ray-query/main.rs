@@ -51,7 +51,8 @@ impl Example {
                 window,
                 gpu::ContextDesc {
                     validation: cfg!(debug_assertions),
-                    ..Default::default()
+                    capture: false,
+                    overlay: false,
                 },
             )
             .unwrap()
@@ -75,16 +76,15 @@ impl Example {
             array_layer_count: 1,
             mip_level_count: 1,
             usage: gpu::TextureUsage::RESOURCE | gpu::TextureUsage::STORAGE,
+            sample_count: 1,
         });
-        let target_view = context.create_texture_view(
-            target,
-            gpu::TextureViewDesc {
-                name: "main",
-                format: TARGET_FORMAT,
-                dimension: gpu::ViewDimension::D2,
-                subresources: &gpu::TextureSubresources::default(),
-            },
-        );
+        let target_view = context.create_texture_view(gpu::TextureViewDesc {
+            name: "main",
+            texture: target,
+            format: TARGET_FORMAT,
+            dimension: gpu::ViewDimension::D2,
+            subresources: &gpu::TextureSubresources::default(),
+        });
 
         let surface_info = context.resize(gpu::SurfaceConfig {
             size: screen_size,
@@ -114,10 +114,11 @@ impl Example {
             fragment: shader.at("draw_fs"),
             color_targets: &[surface_info.format.into()],
             depth_stencil: None,
+            multisample_state: Default::default(),
         });
 
-        let (indices, vertex_values) =
-            del_msh_core::trimesh3_primitive::torus_yup::<u16, f32>(TORUS_RADIUS, 1.0, 100, 20);
+        let (indices_usize, vertex_values) =
+            del_msh::trimesh3_primitive::torus_yup(TORUS_RADIUS, 1.0, 100, 20);
         let vertex_buf = context.create_buffer(gpu::BufferDesc {
             name: "vertices",
             size: (vertex_values.len() * mem::size_of::<f32>()) as u64,
@@ -131,6 +132,10 @@ impl Example {
             )
         };
 
+        let indices = indices_usize
+            .into_iter()
+            .map(|i| i as u16)
+            .collect::<Vec<_>>();
         let index_buf = context.create_buffer(gpu::BufferDesc {
             name: "indices",
             size: (indices.len() * mem::size_of::<u16>()) as u64,
@@ -209,11 +214,11 @@ impl Example {
         });
         command_encoder.start();
         command_encoder.init_texture(target);
-        if let mut pass = command_encoder.acceleration_structure("BLAS") {
+        if let mut pass = command_encoder.acceleration_structure() {
             pass.build_bottom_level(blas, &meshes, scratch_buffer.at(0));
         }
         //Note: separate pass in order to enforce synchronization
-        if let mut pass = command_encoder.acceleration_structure("TLAS") {
+        if let mut pass = command_encoder.acceleration_structure() {
             pass.build_top_level(
                 tlas,
                 &[blas],
@@ -249,21 +254,18 @@ impl Example {
         if let Some(sp) = self.prev_sync_point {
             self.context.wait_for(&sp, !0);
         }
+        self.context
+            .destroy_command_encoder(&mut self.command_encoder);
         self.context.destroy_texture_view(self.target_view);
         self.context.destroy_texture(self.target);
         self.context.destroy_acceleration_structure(self.blas);
         self.context.destroy_acceleration_structure(self.tlas);
-        self.context
-            .destroy_command_encoder(&mut self.command_encoder);
-        self.context.destroy_compute_pipeline(&mut self.rt_pipeline);
-        self.context
-            .destroy_render_pipeline(&mut self.draw_pipeline);
     }
 
     fn render(&mut self) {
         self.command_encoder.start();
 
-        if let mut pass = self.command_encoder.compute("ray-trace") {
+        if let mut pass = self.command_encoder.compute() {
             let groups = self.rt_pipeline.get_dispatch_for(self.screen_size);
             if let mut pc = pass.with(&self.rt_pipeline) {
                 let fov_y = 0.3;
@@ -292,17 +294,14 @@ impl Example {
         let frame = self.context.acquire_frame();
         self.command_encoder.init_texture(frame.texture());
 
-        if let mut pass = self.command_encoder.render(
-            "draw",
-            gpu::RenderTargetSet {
-                colors: &[gpu::RenderTarget {
-                    view: frame.texture_view(),
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
-                    finish_op: gpu::FinishOp::Store,
-                }],
-                depth_stencil: None,
-            },
-        ) {
+        if let mut pass = self.command_encoder.render(gpu::RenderTargetSet {
+            colors: &[gpu::RenderTarget {
+                view: frame.texture_view(),
+                init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
+                finish_op: gpu::FinishOp::Store,
+            }],
+            depth_stencil: None,
+        }) {
             if let mut pc = pass.with(&self.draw_pipeline) {
                 pc.bind(
                     0,

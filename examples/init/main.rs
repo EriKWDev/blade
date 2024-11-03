@@ -29,16 +29,15 @@ impl EnvMapSampler {
             mip_level_count: 1,
             dimension: gpu::TextureDimension::D2,
             usage: gpu::TextureUsage::TARGET,
+            sample_count: 1,
         });
-        let accum_view = context.create_texture_view(
-            accum_texture,
-            gpu::TextureViewDesc {
-                name: "env-test",
-                format,
-                dimension: gpu::ViewDimension::D2,
-                subresources: &gpu::TextureSubresources::default(),
-            },
-        );
+        let accum_view = context.create_texture_view(gpu::TextureViewDesc {
+            texture: accum_texture,
+            name: "env-test",
+            format,
+            dimension: gpu::ViewDimension::D2,
+            subresources: &gpu::TextureSubresources::default(),
+        });
 
         let layout = <EnvSampleData as gpu::ShaderData>::layout();
         let init_pipeline = context.create_render_pipeline(gpu::RenderPipelineDesc {
@@ -57,6 +56,7 @@ impl EnvMapSampler {
                 blend: None,
                 write_mask: gpu::ColorWrites::ALL,
             }],
+            multisample_state: Default::default(),
         });
         let accum_pipeline = context.create_render_pipeline(gpu::RenderPipelineDesc {
             name: "env-accum",
@@ -74,6 +74,7 @@ impl EnvMapSampler {
                 blend: Some(gpu::BlendState::ADDITIVE),
                 write_mask: gpu::ColorWrites::RED,
             }],
+            multisample_state: Default::default(),
         });
 
         Self {
@@ -92,17 +93,14 @@ impl EnvMapSampler {
         env_weights: gpu::TextureView,
     ) {
         command_encoder.init_texture(self.accum_texture);
-        let mut pass = command_encoder.render(
-            "accumulate",
-            gpu::RenderTargetSet {
-                colors: &[gpu::RenderTarget {
-                    view: self.accum_view,
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
-                    finish_op: gpu::FinishOp::Store,
-                }],
-                depth_stencil: None,
-            },
-        );
+        let mut pass = command_encoder.render(gpu::RenderTargetSet {
+            colors: &[gpu::RenderTarget {
+                view: self.accum_view,
+                init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
+                finish_op: gpu::FinishOp::Store,
+            }],
+            depth_stencil: None,
+        });
         if let mut encoder = pass.with(&self.init_pipeline) {
             encoder.bind(
                 0,

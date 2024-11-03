@@ -81,7 +81,7 @@ impl Baker {
             encoder.init_texture(init.dst);
         }
         if !pending_ops.transfers.is_empty() {
-            let mut pass = encoder.transfer("init textures");
+            let mut pass = encoder.transfer();
             for transfer in pending_ops.transfers.drain(..) {
                 let dst = blade_graphics::TexturePiece {
                     texture: transfer.dst,
@@ -396,16 +396,17 @@ impl blade_asset::Baker for Baker {
                 mip_level_count: image.mips.len() as u32,
                 dimension: blade_graphics::TextureDimension::D2,
                 usage: blade_graphics::TextureUsage::COPY | blade_graphics::TextureUsage::RESOURCE,
+                sample_count: 1,
             });
-        let view = self.gpu_context.create_texture_view(
-            texture,
-            blade_graphics::TextureViewDesc {
+        let view = self
+            .gpu_context
+            .create_texture_view(blade_graphics::TextureViewDesc {
                 name,
+                texture,
                 format: image.format.0,
                 dimension: blade_graphics::ViewDimension::D2,
                 subresources: &Default::default(),
-            },
-        );
+            });
         self.pending_operations
             .lock()
             .unwrap()

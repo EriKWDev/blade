@@ -114,9 +114,9 @@ impl JointAxis {
     fn into_rapier(self) -> rapier3d::dynamics::JointAxis {
         use rapier3d::dynamics::JointAxis as Ja;
         match self {
-            Self::LinearX => Ja::LinX,
-            Self::LinearY => Ja::LinY,
-            Self::LinearZ => Ja::LinZ,
+            Self::LinearX => Ja::X,
+            Self::LinearY => Ja::Y,
+            Self::LinearZ => Ja::Z,
             Self::AngularX => Ja::AngX,
             Self::AngularY => Ja::AngY,
             Self::AngularZ => Ja::AngZ,
@@ -130,22 +130,17 @@ pub enum JointHandle {
     Hard(#[doc(hidden)] rapier3d::dynamics::MultibodyJointHandle),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MotorDesc {
+    pub stiffness: f32,
+    pub damping: f32,
+    pub max_force: f32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FreedomAxis {
     pub limits: Option<ops::Range<f32>>,
-    pub motor: Option<config::Motor>,
-}
-
-impl FreedomAxis {
-    pub const FREE: Self = Self {
-        limits: None,
-        motor: None,
-    };
-    pub const ALL_FREE: mint::Vector3<Option<Self>> = mint::Vector3 {
-        x: Some(Self::FREE),
-        y: Some(Self::FREE),
-        z: Some(Self::FREE),
-    };
+    pub motor: Option<MotorDesc>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -347,18 +342,6 @@ pub struct FrameCamera {
     pub fov_y: f32,
 }
 
-impl From<blade_render::Camera> for FrameCamera {
-    fn from(cam: blade_render::Camera) -> Self {
-        Self {
-            transform: Transform {
-                position: cam.pos,
-                orientation: cam.rot,
-            },
-            fov_y: cam.fov_y,
-        }
-    }
-}
-
 /// Blade Engine encapsulates all the context for applications,
 /// such as the GPU context, Ray-tracing context, EGUI integration,
 /// asset hub, physics context, task processing, and more.
@@ -376,11 +359,12 @@ pub struct Engine {
     selected_collider: Option<rapier3d::geometry::ColliderHandle>,
     render_objects: Vec<blade_render::Object>,
     debug: blade_render::DebugConfig,
-    pub frame_config: blade_render::FrameConfig,
-    pub ray_config: blade_render::RayConfig,
-    pub denoiser_enabled: bool,
-    pub denoiser_config: blade_render::DenoiserConfig,
-    pub post_proc_config: blade_render::PostProcConfig,
+    need_accumulation_reset: bool,
+    is_debug_drawing: bool,
+    ray_config: blade_render::RayConfig,
+    denoiser_enabled: bool,
+    denoiser_config: blade_render::DenoiserConfig,
+    post_proc_config: blade_render::PostProcConfig,
     track_hot_reloads: bool,
     workers: Vec<choir::WorkerHandle>,
     choir: Arc<choir::Choir>,
@@ -415,7 +399,6 @@ impl Engine {
                 window,
                 gpu::ContextDesc {
                     validation: cfg!(debug_assertions),
-                    timing: true,
                     capture: false,
                     overlay: false,
                 },
@@ -458,7 +441,7 @@ impl Engine {
 
         pacer.end_frame(&gpu_context);
 
-        let gui_painter = blade_egui::GuiPainter::new(surface_info, &gpu_context);
+        let gui_painter = blade_egui::GuiPainter::new(surface_info, &gpu_context, 1);
         let mut physics = Physics::default();
         physics.debug_pipeline.mode = rapier3d::pipeline::DebugRenderMode::empty();
         physics.integration_params.dt = config.time_step;
@@ -477,20 +460,23 @@ impl Engine {
             selected_collider: None,
             render_objects: Vec::new(),
             debug: blade_render::DebugConfig::default(),
-            frame_config: blade_render::FrameConfig {
-                frozen: false,
-                debug_draw: true,
-                reset_variance: false,
-                reset_reservoirs: true,
+            need_accumulation_reset: true,
+            is_debug_drawing: false,
+            ray_config: blade_render::RayConfig {
+                num_environment_samples: 1,
+                environment_importance_sampling: false,
+                temporal_history: 10,
+                spatial_taps: 1,
+                spatial_tap_history: 5,
+                spatial_radius: 10,
             },
-            ray_config: blade_helpers::default_ray_config(),
             denoiser_enabled: true,
             denoiser_config: blade_render::DenoiserConfig {
                 num_passes: 4,
                 temporal_weight: 0.1,
             },
             post_proc_config: blade_render::PostProcConfig {
-                average_luminocity: 0.5,
+                average_luminocity: 1.0,
                 exposure_key_value: 1.0 / 9.6,
                 white_level: 1.0,
             },
@@ -530,7 +516,7 @@ impl Engine {
         scale_factor: f32,
     ) {
         if self.track_hot_reloads {
-            self.renderer.hot_reload(
+            self.need_accumulation_reset |= self.renderer.hot_reload(
                 &self.asset_hub,
                 &self.gpu_context,
                 self.pacer.last_sync_point().unwrap(),
@@ -551,9 +537,8 @@ impl Engine {
         if new_render_size != self.renderer.get_surface_size() {
             self.renderer
                 .resize_screen(new_render_size, command_encoder, &self.gpu_context);
-            self.frame_config.reset_reservoirs = true;
+            self.need_accumulation_reset = true;
         }
-        self.frame_config.reset_variance = self.debug.mouse_pos.is_none();
 
         self.gui_painter
             .update_textures(command_encoder, gui_textures, &self.gpu_context);
@@ -597,16 +582,14 @@ impl Engine {
             }
 
             // Rebuilding every frame
-            if !self.frame_config.frozen {
-                self.renderer.build_scene(
-                    command_encoder,
-                    &self.render_objects,
-                    self.environment_map,
-                    &self.asset_hub,
-                    &self.gpu_context,
-                    temp,
-                );
-            }
+            self.renderer.build_scene(
+                command_encoder,
+                &self.render_objects,
+                self.environment_map,
+                &self.asset_hub,
+                &self.gpu_context,
+                temp,
+            );
 
             self.renderer.prepare(
                 command_encoder,
@@ -616,9 +599,11 @@ impl Engine {
                     fov_y: camera.fov_y,
                     depth: MAX_DEPTH,
                 },
-                self.frame_config,
+                self.is_debug_drawing,
+                self.debug.mouse_pos.is_some(),
+                self.need_accumulation_reset,
             );
-            self.frame_config.reset_reservoirs = false;
+            self.need_accumulation_reset = false;
 
             if !self.render_objects.is_empty() {
                 self.renderer
@@ -680,17 +665,14 @@ impl Engine {
         let frame = self.gpu_context.acquire_frame();
         command_encoder.init_texture(frame.texture());
 
-        if let mut pass = command_encoder.render(
-            "draw",
-            gpu::RenderTargetSet {
-                colors: &[gpu::RenderTarget {
-                    view: frame.texture_view(),
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
-                    finish_op: gpu::FinishOp::Store,
-                }],
-                depth_stencil: None,
-            },
-        ) {
+        if let mut pass = command_encoder.render(gpu::RenderTargetSet {
+            colors: &[gpu::RenderTarget {
+                view: frame.texture_view(),
+                init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
+                finish_op: gpu::FinishOp::Store,
+            }],
+            depth_stencil: None,
+        }) {
             let screen_desc = blade_egui::ScreenDescriptor {
                 physical_size: (physical_size.width, physical_size.height),
                 scale_factor,
@@ -717,39 +699,25 @@ impl Engine {
 
     #[profiling::function]
     pub fn populate_hud(&mut self, ui: &mut egui::Ui) {
-        use blade_helpers::ExposeHud as _;
-
-        let mut selection = blade_render::SelectionInfo::default();
-        if self.debug.mouse_pos.is_some() {
-            selection = self.renderer.read_debug_selection_info();
-            self.selected_object_handle = self.find_object(selection.custom_index);
-        }
-
-        ui.checkbox(&mut self.track_hot_reloads, "Hot reloading");
-
+        use strum::IntoEnumIterator as _;
         egui::CollapsingHeader::new("Rendering")
-            .default_open(false)
-            .show(ui, |ui| {
-                self.ray_config.populate_hud(ui);
-                self.frame_config.reset_reservoirs |= ui.button("Reset Accumulation").clicked();
-                ui.checkbox(&mut self.denoiser_enabled, "Enable Denoiser");
-                self.denoiser_config.populate_hud(ui);
-                self.post_proc_config.populate_hud(ui);
-            });
-        egui::CollapsingHeader::new("Debug")
             .default_open(true)
             .show(ui, |ui| {
-                self.debug.populate_hud(ui);
-                blade_helpers::populate_debug_selection(
-                    &mut self.debug.mouse_pos,
-                    &selection,
-                    &self.asset_hub,
-                    ui,
-                );
+                ui.checkbox(&mut self.denoiser_enabled, "Enable Denoiser");
+                egui::ComboBox::from_label("Debug mode")
+                    .selected_text(format!("{:?}", self.debug.view_mode))
+                    .show_ui(ui, |ui| {
+                        for value in blade_render::DebugMode::iter() {
+                            ui.selectable_value(
+                                &mut self.debug.view_mode,
+                                value,
+                                format!("{value:?}"),
+                            );
+                        }
+                    });
             });
-
         egui::CollapsingHeader::new("Visualize")
-            .default_open(false)
+            .default_open(true)
             .show(ui, |ui| {
                 let all_bits = rapier3d::pipeline::DebugRenderMode::all().bits();
                 for bit_pos in 0..=all_bits.ilog2() {
@@ -762,17 +730,6 @@ impl Engine {
                     self.physics.debug_pipeline.mode.set(flag, enabled);
                 }
             });
-
-        egui::CollapsingHeader::new("Performance").show(ui, |ui| {
-            for (name, time) in self.pacer.timings() {
-                let millis = time.as_secs_f32() * 1000.0;
-                ui.horizontal(|ui| {
-                    ui.label(name);
-                    ui.colored_label(egui::Color32::WHITE, format!("{:.2} ms", millis));
-                });
-            }
-        });
-
         egui::CollapsingHeader::new("Objects")
             .default_open(true)
             .show(ui, |ui| {
@@ -839,7 +796,7 @@ impl Engine {
                         .add(
                             egui::DragValue::new(&mut density)
                                 .prefix("Density: ")
-                                .range(0.1..=1e6),
+                                .clamp_range(0.1..=1e6),
                         )
                         .changed()
                     {
@@ -850,7 +807,7 @@ impl Engine {
                         .add(
                             egui::DragValue::new(&mut friction)
                                 .prefix("Friction: ")
-                                .range(0.0..=5.0)
+                                .clamp_range(0.0..=5.0)
                                 .speed(0.01),
                         )
                         .changed()
@@ -862,7 +819,7 @@ impl Engine {
                         .add(
                             egui::DragValue::new(&mut restitution)
                                 .prefix("Restituion: ")
-                                .range(0.0..=1.0)
+                                .clamp_range(0.0..=1.0)
                                 .speed(0.01),
                         )
                         .changed()
@@ -876,20 +833,6 @@ impl Engine {
     pub fn screen_aspect(&self) -> f32 {
         let size = self.renderer.get_surface_size();
         size.width as f32 / size.height.max(1) as f32
-    }
-
-    fn find_object(&self, geometry_index: u32) -> Option<ObjectHandle> {
-        let mut index = geometry_index as usize;
-        for (obj_handle, object) in self.objects.iter() {
-            for visual in object.visuals.iter() {
-                let model = &self.asset_hub.models[visual.model];
-                match index.checked_sub(model.geometries.len()) {
-                    Some(i) => index = i,
-                    None => return Some(ObjectHandle(obj_handle)),
-                }
-            }
-        }
-        None
     }
 
     pub fn add_object(
@@ -1185,9 +1128,5 @@ impl Engine {
 
     pub fn set_average_luminosity(&mut self, avg_lum: f32) {
         self.post_proc_config.average_luminocity = avg_lum;
-    }
-
-    pub fn set_debug_pixel(&mut self, mouse_pos: Option<[i32; 2]>) {
-        self.debug.mouse_pos = mouse_pos;
     }
 }

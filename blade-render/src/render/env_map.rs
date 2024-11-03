@@ -80,7 +80,6 @@ impl EnvironmentMap {
         for view in self.weight_mips.drain(..) {
             gpu.destroy_texture_view(view);
         }
-        gpu.destroy_compute_pipeline(&mut self.prepare_pipeline);
     }
 
     pub fn assign(
@@ -112,30 +111,27 @@ impl EnvironmentMap {
             array_layer_count: 1,
             mip_level_count,
             usage: blade_graphics::TextureUsage::RESOURCE | blade_graphics::TextureUsage::STORAGE,
+            sample_count: 1,
         });
-        self.weight_view = gpu.create_texture_view(
-            self.weight_texture,
-            blade_graphics::TextureViewDesc {
-                name: "env-weight",
+        self.weight_view = gpu.create_texture_view(blade_graphics::TextureViewDesc {
+            name: "env-weight",
+            texture: self.weight_texture,
+            format,
+            dimension: blade_graphics::ViewDimension::D2,
+            subresources: &Default::default(),
+        });
+        for base_mip_level in 0..mip_level_count {
+            let view = gpu.create_texture_view(blade_graphics::TextureViewDesc {
+                name: &format!("env-weight-mip{}", base_mip_level),
+                texture: self.weight_texture,
                 format,
                 dimension: blade_graphics::ViewDimension::D2,
-                subresources: &Default::default(),
-            },
-        );
-        for base_mip_level in 0..mip_level_count {
-            let view = gpu.create_texture_view(
-                self.weight_texture,
-                blade_graphics::TextureViewDesc {
-                    name: &format!("env-weight-mip{}", base_mip_level),
-                    format,
-                    dimension: blade_graphics::ViewDimension::D2,
-                    subresources: &blade_graphics::TextureSubresources {
-                        base_mip_level,
-                        mip_level_count: NonZeroU32::new(1),
-                        ..Default::default()
-                    },
+                subresources: &blade_graphics::TextureSubresources {
+                    base_mip_level,
+                    mip_level_count: NonZeroU32::new(1),
+                    ..Default::default()
                 },
-            );
+            });
             self.weight_mips.push(view);
         }
 
@@ -144,7 +140,7 @@ impl EnvironmentMap {
             let groups = self
                 .prepare_pipeline
                 .get_dispatch_for(weight_extent.at_mip_level(target_level));
-            let mut compute = encoder.compute("pre-process env map");
+            let mut compute = encoder.compute();
             let mut pass = compute.with(&self.prepare_pipeline);
             pass.bind(
                 0,

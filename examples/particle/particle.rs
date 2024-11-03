@@ -31,11 +31,6 @@ struct MainData {
     free_list: gpu::BufferPiece,
 }
 
-#[derive(blade_macros::ShaderData)]
-struct EmitData {
-    parameters: Parameters,
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
 struct UpdateParams {
@@ -77,7 +72,6 @@ impl System {
         let particle_size = shader.get_struct_size("Particle");
 
         let main_layout = <MainData as gpu::ShaderData>::layout();
-        let emit_layout = <EmitData as gpu::ShaderData>::layout();
         let update_layout = <UpdateData as gpu::ShaderData>::layout();
         let draw_layout = <DrawData as gpu::ShaderData>::layout();
 
@@ -88,7 +82,7 @@ impl System {
         });
         let emit_pipeline = context.create_compute_pipeline(gpu::ComputePipelineDesc {
             name: &format!("{} - emit", desc.name),
-            data_layouts: &[&main_layout, &emit_layout],
+            data_layouts: &[&main_layout, &update_layout],
             compute: shader.at("emit"),
         });
         let update_pipeline = context.create_compute_pipeline(gpu::ComputePipelineDesc {
@@ -112,6 +106,10 @@ impl System {
                 write_mask: gpu::ColorWrites::default(),
             }],
             depth_stencil: None,
+            multisample_state: gpu::MultisampleState {
+                sample_count: 4,
+                ..Default::default()
+            },
         });
 
         let wg_width = reset_pipeline.get_workgroup_size()[0] as usize;
@@ -146,10 +144,6 @@ impl System {
     pub fn destroy(&mut self, context: &gpu::Context) {
         context.destroy_buffer(self.particle_buf);
         context.destroy_buffer(self.free_list_buf);
-        context.destroy_compute_pipeline(&mut self.reset_pipeline);
-        context.destroy_compute_pipeline(&mut self.emit_pipeline);
-        context.destroy_compute_pipeline(&mut self.update_pipeline);
-        context.destroy_render_pipeline(&mut self.draw_pipeline);
     }
 
     fn main_data(&self) -> MainData {
@@ -160,7 +154,7 @@ impl System {
     }
 
     pub fn reset(&self, encoder: &mut gpu::CommandEncoder) {
-        let mut pass = encoder.compute("reset");
+        let mut pass = encoder.compute();
         let mut pc = pass.with(&self.reset_pipeline);
         pc.bind(0, &self.main_data());
         let group_size = self.reset_pipeline.get_workgroup_size();
@@ -170,7 +164,7 @@ impl System {
 
     pub fn update(&self, encoder: &mut gpu::CommandEncoder) {
         let main_data = self.main_data();
-        if let mut pass = encoder.compute("update") {
+        if let mut pass = encoder.compute() {
             let mut pc = pass.with(&self.update_pipeline);
             pc.bind(0, &main_data);
             pc.bind(
@@ -185,20 +179,14 @@ impl System {
             pc.dispatch([group_count, 1, 1]);
         }
         // new pass because both pipelines use the free list
-        if let mut pass = encoder.compute("emit") {
+        if let mut pass = encoder.compute() {
             let mut pc = pass.with(&self.emit_pipeline);
             pc.bind(0, &main_data);
-            pc.bind(
-                1,
-                &EmitData {
-                    parameters: self.params,
-                },
-            );
             pc.dispatch([1, 1, 1]);
         }
     }
 
-    pub fn draw(&self, pass: &mut gpu::RenderCommandEncoder) {
+    pub fn draw(&self, pass: &mut gpu::RenderCommandEncoder, width: f32, height: f32) {
         let mut pc = pass.with(&self.draw_pipeline);
         pc.bind(
             0,
@@ -211,7 +199,7 @@ impl System {
                         scale: 1.0,
                     },
                     screen_center: [0.0; 2],
-                    screen_extent: [1000.0; 2],
+                    screen_extent: [width, height],
                 },
             },
         );

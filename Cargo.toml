@@ -4,7 +4,6 @@ members = [
     "blade-asset",
     "blade-egui",
     "blade-graphics",
-    "blade-helpers",
     "blade-macros",
     "blade-render",
     "run-wasm",
@@ -16,20 +15,16 @@ base64 = "0.21"
 bitflags = "2"
 bytemuck = { version = "1", features = ["derive"] }
 choir = "0.7"
-egui = "0.28"
+egui = "0.26"
 glam = { version = "0.27", features = ["mint"] }
 gltf = { version = "1.1", default-features = false }
 log = "0.4"
 mint = "0.5"
-#TODO: switch to crates once https://github.com/gfx-rs/wgpu/pull/6256 is published
-naga = { git = "https://github.com/gfx-rs/wgpu", rev = "dfc384a7fd4ab7250a75d59c6f831d9ffb220f7e", features = [
-    "wgsl-in",
-] }
+naga = { git = "https://github.com/gfx-rs/wgpu", features = ["wgsl-in"], rev = "425526828f738c95ec50b016c6a761bc00d2fb25" }
 profiling = "1"
 slab = "0.4"
 strum = { version = "0.25", features = ["derive"] }
 web-sys = "0.3.60"
-winit = "0.29"
 
 [lib]
 
@@ -48,35 +43,36 @@ readme = "docs/README.md"
 
 [dependencies]
 blade-asset = { version = "0.2", path = "blade-asset" }
-blade-egui = { version = "0.4", path = "blade-egui" }
-blade-graphics = { version = "0.5", path = "blade-graphics" }
-blade-helpers = { version = "0.1", path = "blade-helpers" }
+blade-egui = { version = "0.3", path = "blade-egui" }
+blade-graphics = { version = "0.4", path = "blade-graphics" }
 blade-util = { version = "0.1", path = "blade-util" }
 base64 = { workspace = true }
 choir = { workspace = true }
 colorsys = "0.6"
 egui = { workspace = true }
 gltf = { workspace = true }
-nalgebra = { version = "0.33", features = ["mint"] }
+nalgebra = { version = "0.32", features = ["mint"] }
 log = { workspace = true }
 mint = { workspace = true, features = ["serde"] }
 num_cpus = "1"
 profiling = { workspace = true }
-rapier3d = { version = "0.22", features = ["debug-render"] }
+rapier3d = { version = "0.19", features = ["debug-render"] }
 serde = { version = "1", features = ["serde_derive"] }
 slab = "0.4"
-winit = { workspace = true }
+strum = { workspace = true }
+winit = { version="0.29", default-features=false, features=["rwh_06", "x11"]}
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 blade-render = { version = "0.3", path = "blade-render" }
 
 [dev-dependencies]
-blade-macros = { version = "0.3", path = "blade-macros" }
+blade-macros = { version = "0.2", path = "blade-macros" }
 bytemuck = { workspace = true }
 choir = { workspace = true }
 egui = { workspace = true }
-transform-gizmo-egui = { git = "https://github.com/urholaukkarinen/transform-gizmo", rev = "5be085444468ff7059abcd4e4872ab4510f65a06" }
-env_logger = "0.11"
+egui-gizmo = "0.16"
+egui_plot = "0.26"
+env_logger = "0.10"
 glam = { workspace = true }
 log = { workspace = true }
 mint = { workspace = true, features = ["serde"] }
@@ -86,12 +82,13 @@ profiling = { workspace = true }
 ron = "0.8"
 serde = { version = "1", features = ["serde_derive"] }
 strum = { workspace = true }
-del-msh-core = "=0.1.33"
-del-geo = "=0.1.29"
+# not following semver :(
+del-msh = "=0.1.25"
+del-geo = "=0.1.19"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 # see https://github.com/emilk/egui/issues/4270
-egui-winit = "0.28"
+egui-winit = { version="0.26", default-features=false, features=["x11"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 console_error_panic_hook = "0.1.7"
@@ -100,7 +97,7 @@ web-sys = { workspace = true, features = ["Window"] }
 getrandom = { version = "0.2", features = ["js"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dev-dependencies]
-renderdoc = "0.12"
+renderdoc = "0.11"
 
 # This is too slow in Debug
 [profile.dev.package.texpresso]
@@ -108,15 +105,4 @@ opt-level = 3
 
 [package.metadata.cargo_check_external_types]
 #TODO: reconsider `egui`/`epaint` and `winit` here
-allowed_external_types = [
-    "egui::*",
-    "epaint::*",
-    "mint::*",
-    "profiling::*",
-    "serde::*",
-    "winit::*",
-]
-
-[lints.rust]
-unexpected_cfgs = { level = "allow", check-cfg = ['cfg(gles)'] }
-# not following semver :(
+allowed_external_types = ["egui::*", "epaint::*", "mint::*", "profiling::*", "serde::*", "winit::*"]

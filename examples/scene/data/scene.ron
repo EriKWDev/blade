@@ -11,5 +11,8 @@
         (
             path: "plane.glb",
         ),
+        (
+            path: "monkey.gltf",
+        ),
     ],
 )

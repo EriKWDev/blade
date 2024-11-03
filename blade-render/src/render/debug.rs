@@ -95,6 +95,7 @@ fn create_draw_pipeline(
             blend: Some(blade_graphics::BlendState::ALPHA_BLENDING),
             write_mask: blade_graphics::ColorWrites::all(),
         }],
+        multisample_state: Default::default(),
     })
 }
 
@@ -117,6 +118,7 @@ fn create_blit_pipeline(
         depth_stencil: None,
         fragment: shader.at("blit_fs"),
         color_targets: &[format.into()],
+        multisample_state: Default::default(),
     })
 }
 
@@ -194,7 +196,7 @@ impl DebugRender {
             );
         }
 
-        let mut transfers = encoder.transfer("upload debug");
+        let mut transfers = encoder.transfer();
         transfers.copy_buffer_to_buffer(
             this.entry_buffer.at(0),
             this.buffer.at(0),
@@ -209,8 +211,6 @@ impl DebugRender {
         gpu.destroy_buffer(self.variance_buffer);
         gpu.destroy_buffer(self.entry_buffer);
         gpu.destroy_buffer(self.cpu_lines_buffer);
-        gpu.destroy_render_pipeline(&mut self.draw_pipeline);
-        gpu.destroy_render_pipeline(&mut self.blit_pipeline);
     }
 
     pub(super) fn recreate_draw_pipeline(

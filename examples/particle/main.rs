@@ -10,7 +10,15 @@ struct Example {
     context: gpu::Context,
     gui_painter: blade_egui::GuiPainter,
     particle_system: particle::System,
+
+    msaa_color: gpu::Texture,
+    msaa_view: gpu::TextureView,
 }
+
+// const SAMPLE_COUNT: u32 = 1;
+// const SAMPLE_COUNT: u32 = 2;
+const SAMPLE_COUNT: u32 = 4;
+// const SAMPLE_COUNT: u32 = 8;
 
 impl Example {
     fn new(window: &winit::window::Window) -> Self {
@@ -20,8 +28,7 @@ impl Example {
                 window,
                 gpu::ContextDesc {
                     validation: cfg!(debug_assertions),
-                    timing: true,
-                    capture: true,
+                    capture: false,
                     overlay: false,
                 },
             )
@@ -35,10 +42,10 @@ impl Example {
                 depth: 1,
             },
             usage: gpu::TextureUsage::TARGET,
-            display_sync: gpu::DisplaySync::Block,
+            display_sync: gpu::DisplaySync::Recent,
             ..Default::default()
         });
-        let gui_painter = blade_egui::GuiPainter::new(surface_info, &context);
+        let gui_painter = blade_egui::GuiPainter::new(surface_info, &context, SAMPLE_COUNT);
         let particle_system = particle::System::new(
             &context,
             particle::SystemDesc {
@@ -56,13 +63,79 @@ impl Example {
         particle_system.reset(&mut command_encoder);
         let sync_point = context.submit(&mut command_encoder);
 
+        let msaa_color = context.create_texture(gpu::TextureDesc {
+            name: "msaa color",
+            format: surface_info.format,
+            size: gpu::Extent {
+                width: window_size.width,
+                height: window_size.height,
+                depth: 1,
+            },
+            sample_count: SAMPLE_COUNT,
+            array_layer_count: 1,
+            mip_level_count: 1,
+            dimension: gpu::TextureDimension::D2,
+            usage: gpu::TextureUsage::TARGET,
+        });
+        let msaa_view = context.create_texture_view(gpu::TextureViewDesc {
+            name: "msaa color view",
+            texture: msaa_color,
+            format: surface_info.format,
+            dimension: gpu::ViewDimension::D2,
+            subresources: &gpu::TextureSubresources::default(),
+        });
+
         Self {
             command_encoder,
             prev_sync_point: Some(sync_point),
             context,
             gui_painter,
             particle_system,
+
+            msaa_color,
+            msaa_view,
         }
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        let surface_info = self.context.resize(gpu::SurfaceConfig {
+            size: gpu::Extent {
+                width,
+                height,
+                depth: 1,
+            },
+            usage: gpu::TextureUsage::TARGET,
+            display_sync: gpu::DisplaySync::Recent,
+            ..Default::default()
+        });
+
+        self.context.destroy_texture_view(self.msaa_view);
+        self.context.destroy_texture(self.msaa_color);
+
+        let msaa_color = self.context.create_texture(gpu::TextureDesc {
+            name: "msaa color",
+            format: surface_info.format,
+            size: gpu::Extent {
+                width,
+                height,
+                depth: 1,
+            },
+            sample_count: SAMPLE_COUNT,
+            array_layer_count: 1,
+            mip_level_count: 1,
+            dimension: gpu::TextureDimension::D2,
+            usage: gpu::TextureUsage::TARGET,
+        });
+        let msaa_view = self.context.create_texture_view(gpu::TextureViewDesc {
+            name: "msaa color view",
+            texture: msaa_color,
+            format: surface_info.format,
+            dimension: gpu::ViewDimension::D2,
+            subresources: &gpu::TextureSubresources::default(),
+        });
+
+        self.msaa_color = msaa_color;
+        self.msaa_view = msaa_view;
     }
 
     fn destroy(&mut self) {
@@ -73,6 +146,9 @@ impl Example {
             .destroy_command_encoder(&mut self.command_encoder);
         self.gui_painter.destroy(&self.context);
         self.particle_system.destroy(&self.context);
+
+        self.context.destroy_texture_view(self.msaa_view);
+        self.context.destroy_texture(self.msaa_color);
     }
 
     fn render(
@@ -84,27 +160,39 @@ impl Example {
         let frame = self.context.acquire_frame();
         self.command_encoder.start();
         self.command_encoder.init_texture(frame.texture());
+        self.command_encoder.init_texture(self.msaa_color);
 
         self.gui_painter
             .update_textures(&mut self.command_encoder, gui_textures, &self.context);
 
         self.particle_system.update(&mut self.command_encoder);
 
-        if let mut pass = self.command_encoder.render(
-            "draw",
-            gpu::RenderTargetSet {
-                colors: &[gpu::RenderTarget {
-                    view: frame.texture_view(),
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
-                    finish_op: gpu::FinishOp::Store,
-                }],
-                depth_stencil: None,
-            },
-        ) {
-            self.particle_system.draw(&mut pass);
+        if let mut pass = self.command_encoder.render(gpu::RenderTargetSet {
+            colors: &[gpu::RenderTarget {
+                view: self.msaa_view,
+                init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
+                finish_op: gpu::FinishOp::ResolveTo(frame.texture_view()),
+            }],
+            depth_stencil: None,
+        }) {
+            self.particle_system.draw(
+                &mut pass,
+                screen_desc.physical_size.0 as _,
+                screen_desc.physical_size.1 as _,
+            );
+        }
+        if let mut pass = self.command_encoder.render(gpu::RenderTargetSet {
+            colors: &[gpu::RenderTarget {
+                view: self.msaa_view,
+                init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
+                finish_op: gpu::FinishOp::ResolveTo(frame.texture_view()),
+            }],
+            depth_stencil: None,
+        }) {
             self.gui_painter
                 .paint(&mut pass, gui_primitives, screen_desc, &self.context);
         }
+
         self.command_encoder.present(frame);
         let sync_point = self.context.submit(&mut self.command_encoder);
         self.gui_painter.after_submit(&sync_point);
@@ -113,19 +201,6 @@ impl Example {
             self.context.wait_for(&sp, !0);
         }
         self.prev_sync_point = Some(sync_point);
-    }
-
-    fn add_gui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Particle System");
-        self.particle_system.add_gui(ui);
-        ui.heading("Timings");
-        for (name, time) in self.command_encoder.timings() {
-            let millis = time.as_secs_f32() * 1000.0;
-            ui.horizontal(|ui| {
-                ui.label(name);
-                ui.colored_label(egui::Color32::WHITE, format!("{:.2} ms", millis));
-            });
-        }
     }
 }
 
@@ -161,6 +236,10 @@ fn main() {
                     }
 
                     match event {
+                        winit::event::WindowEvent::Resized(new_size) => {
+                            example.resize(new_size.width, new_size.height);
+                        }
+
                         winit::event::WindowEvent::KeyboardInput {
                             event:
                                 winit::event::KeyEvent {
@@ -178,11 +257,13 @@ fn main() {
                         winit::event::WindowEvent::CloseRequested => {
                             target.exit();
                         }
+
                         winit::event::WindowEvent::RedrawRequested => {
                             let raw_input = egui_winit.take_egui_input(&window);
                             let egui_output = egui_winit.egui_ctx().run(raw_input, |egui_ctx| {
-                                egui::SidePanel::left("info").show(egui_ctx, |ui| {
-                                    example.add_gui(ui);
+                                egui::SidePanel::left("my_side_panel").show(egui_ctx, |ui| {
+                                    ui.heading("Particle System");
+                                    example.particle_system.add_gui(ui);
                                     if ui.button("Quit").clicked() {
                                         target.exit();
                                     }
@@ -214,7 +295,6 @@ fn main() {
                                 physical_size: (window_size.width, window_size.height),
                                 scale_factor: pixels_per_point,
                             };
-
                             example.render(&primitives, &egui_output.textures_delta, &screen_desc);
                         }
                         _ => {}

@@ -1,5 +1,3 @@
-use std::{str, time::Duration};
-
 const COLOR_ATTACHMENTS: &[u32] = &[
     glow::COLOR_ATTACHMENT0,
     glow::COLOR_ATTACHMENT1,
@@ -81,98 +79,48 @@ impl crate::ShaderBindable for super::AccelerationStructure {
 }
 
 impl super::CommandEncoder {
-    fn begin_pass(&mut self, label: &str) {
-        if self.needs_scopes {
-            let start = self.string_data.len();
-            self.string_data.extend_from_slice(label.as_bytes());
-            self.commands.push(super::Command::PushScope {
-                name_range: start..self.string_data.len(),
-            });
-        }
-        if let Some(ref mut timing_datas) = self.timing_datas {
-            let td = timing_datas.first_mut().unwrap();
-            let id = td.pass_names.len();
-            self.commands.push(super::Command::QueryCounter {
-                query: td.queries[id],
-            });
-            td.pass_names.push(label.to_string());
-        }
+    pub fn start(&mut self) {
+        self.commands.clear();
+        self.plain_data.clear();
+        self.has_present = false;
     }
 
-    fn pass<P>(&mut self, kind: super::PassKind) -> super::PassEncoder<P> {
+    pub fn init_texture(&mut self, _texture: super::Texture) {}
+
+    pub fn present(&mut self, _frame: super::Frame) {
+        self.has_present = true;
+    }
+
+    pub fn transfer(&mut self) -> super::PassEncoder<()> {
         super::PassEncoder {
             commands: &mut self.commands,
             plain_data: &mut self.plain_data,
-            kind,
+            kind: super::PassKind::Transfer,
             invalidate_attachments: Vec::new(),
             pipeline: Default::default(),
             limits: &self.limits,
-            has_scope: self.needs_scopes,
         }
     }
 
-    pub(super) fn finish(&mut self, gl: &glow::Context) {
-        use glow::HasContext as _;
-        #[allow(trivial_casts)]
-        if let Some(ref mut timing_datas) = self.timing_datas {
-            {
-                let td = timing_datas.first_mut().unwrap();
-                let id = td.pass_names.len();
-                self.commands.push(super::Command::QueryCounter {
-                    query: td.queries[id],
-                });
-            }
-
-            timing_datas.rotate_left(1);
-            self.timings.clear();
-            let td = timing_datas.first_mut().unwrap();
-            if !td.pass_names.is_empty() {
-                let mut prev = 0;
-                unsafe {
-                    gl.get_query_parameter_u64_with_offset(
-                        td.queries[0],
-                        glow::QUERY_RESULT,
-                        &mut prev as *mut _ as usize,
-                    );
-                }
-                for (pass_name, &query) in td.pass_names.drain(..).zip(td.queries[1..].iter()) {
-                    let mut result: u64 = 0;
-                    unsafe {
-                        gl.get_query_parameter_u64_with_offset(
-                            query,
-                            glow::QUERY_RESULT,
-                            &mut result as *mut _ as usize,
-                        );
-                    }
-                    let time = Duration::from_nanos(result - prev);
-                    *self.timings.entry(pass_name).or_default() += time;
-                    prev = result
-                }
-            }
-        }
-    }
-
-    pub fn transfer(&mut self, label: &str) -> super::PassEncoder<()> {
-        self.begin_pass(label);
-        self.pass(super::PassKind::Transfer)
-    }
-
-    pub fn acceleration_structure(&mut self, _label: &str) -> super::PassEncoder<()> {
+    pub fn acceleration_structure(&mut self) -> super::PassEncoder<()> {
         unimplemented!()
     }
 
-    pub fn compute(&mut self, label: &str) -> super::PassEncoder<super::ComputePipeline> {
-        self.begin_pass(label);
-        self.pass(super::PassKind::Compute)
+    pub fn compute(&mut self) -> super::PassEncoder<super::ComputePipeline> {
+        super::PassEncoder {
+            commands: &mut self.commands,
+            plain_data: &mut self.plain_data,
+            kind: super::PassKind::Compute,
+            invalidate_attachments: Vec::new(),
+            pipeline: Default::default(),
+            limits: &self.limits,
+        }
     }
 
     pub fn render(
         &mut self,
-        label: &str,
         targets: crate::RenderTargetSet,
     ) -> super::PassEncoder<super::RenderPipeline> {
-        self.begin_pass(label);
-
         let mut target_size = [0u16; 2];
         let mut invalidate_attachments = Vec::new();
         for (i, rt) in targets.colors.iter().enumerate() {
@@ -243,32 +191,14 @@ impl super::CommandEncoder {
             }
         }
 
-        let mut pass = self.pass(super::PassKind::Render);
-        pass.invalidate_attachments = invalidate_attachments;
-        pass
-    }
-}
-
-#[hidden_trait::expose]
-impl crate::traits::CommandEncoder for super::CommandEncoder {
-    type Texture = super::Texture;
-    type Frame = super::Frame;
-
-    fn start(&mut self) {
-        self.commands.clear();
-        self.plain_data.clear();
-        self.string_data.clear();
-        self.has_present = false;
-    }
-
-    fn init_texture(&mut self, _texture: super::Texture) {}
-
-    fn present(&mut self, _frame: super::Frame) {
-        self.has_present = true;
-    }
-
-    fn timings(&self) -> &crate::Timings {
-        &self.timings
+        super::PassEncoder {
+            commands: &mut self.commands,
+            plain_data: &mut self.plain_data,
+            kind: super::PassKind::Render,
+            invalidate_attachments,
+            pipeline: Default::default(),
+            limits: &self.limits,
+        }
     }
 }
 
@@ -336,17 +266,11 @@ impl<T> Drop for super::PassEncoder<'_, T> {
                 self.commands.push(super::Command::ResetFramebuffer);
             }
         }
-        if self.has_scope {
-            self.commands.push(super::Command::PopScope);
-        }
     }
 }
 
 #[hidden_trait::expose]
 impl crate::traits::TransferEncoder for super::PassEncoder<'_, ()> {
-    type BufferPiece = crate::BufferPiece;
-    type TexturePiece = crate::TexturePiece;
-
     fn fill_buffer(&mut self, dst: crate::BufferPiece, size: u64, value: u8) {
         self.commands.push(super::Command::FillBuffer {
             dst: dst.into(),
@@ -412,6 +336,29 @@ impl crate::traits::TransferEncoder for super::PassEncoder<'_, ()> {
 }
 
 #[hidden_trait::expose]
+impl crate::traits::AccelerationStructureEncoder for super::PassEncoder<'_, ()> {
+    fn build_bottom_level(
+        &mut self,
+        _acceleration_structure: super::AccelerationStructure,
+        _meshes: &[crate::AccelerationStructureMesh],
+        _scratch_data: crate::BufferPiece,
+    ) {
+        unimplemented!()
+    }
+
+    fn build_top_level(
+        &mut self,
+        _acceleration_structure: super::AccelerationStructure,
+        _bottom_level: &[super::AccelerationStructure],
+        _instance_count: u32,
+        _instance_data: crate::BufferPiece,
+        _scratch_data: crate::BufferPiece,
+    ) {
+        unimplemented!()
+    }
+}
+
+#[hidden_trait::expose]
 impl crate::traits::PipelineEncoder for super::PipelineEncoder<'_> {
     fn bind<D: crate::ShaderData>(&mut self, group: u32, data: &D) {
         data.fill(super::PipelineContext {
@@ -432,14 +379,11 @@ impl crate::traits::ComputePipelineEncoder for super::PipelineEncoder<'_> {
 
 #[hidden_trait::expose]
 impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_> {
-    type BufferPiece = crate::BufferPiece;
-
     fn set_scissor_rect(&mut self, rect: &crate::ScissorRect) {
         self.commands.push(super::Command::SetScissor(rect.clone()));
     }
 
     fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
-        assert_eq!(index, 0);
         self.commands.push(super::Command::BindVertex {
             buffer: vertex_buf.buffer.raw,
         });
@@ -652,9 +596,9 @@ impl super::Command {
                 gl.dispatch_compute_indirect(indirect_buf.offset as i32);
             }
             Self::FillBuffer {
-                dst: ref _dst,
-                size: _size,
-                value: _value,
+                ref dst,
+                size,
+                value,
             } => unimplemented!(),
             Self::CopyBufferToBuffer {
                 ref src,
@@ -1027,16 +971,6 @@ impl super::Command {
                 for slot in 0..4 {
                     gl.bind_sampler(slot, None);
                 }
-            }
-            Self::QueryCounter { query } => {
-                gl.query_counter(query, glow::TIMESTAMP);
-            }
-            Self::PushScope { ref name_range } => {
-                let name = str::from_utf8(&ec.string_data[name_range.clone()]).unwrap();
-                gl.push_debug_group(glow::DEBUG_SOURCE_APPLICATION, super::DEBUG_ID, name);
-            }
-            Self::PopScope => {
-                gl.pop_debug_group();
             }
         }
     }

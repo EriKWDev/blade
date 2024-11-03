@@ -55,7 +55,7 @@ impl super::Context {
     fn load_shader(
         &self,
         sf: crate::ShaderFunction,
-        naga_options_base: &spv::Options,
+        naga_options: &spv::Options,
         group_layouts: &[&crate::ShaderDataLayout],
         group_infos: &mut [crate::ShaderDataInfo],
         vertex_fetch_states: &[crate::VertexFetchState],
@@ -78,30 +78,6 @@ impl super::Context {
         let pipeline_options = spv::PipelineOptions {
             shader_stage: ep.stage,
             entry_point: sf.entry_point.to_string(),
-        };
-        let file_path;
-        let mut naga_options_debug;
-        let naga_options = if let Some(ref temp_dir) = self.shader_debug_path {
-            use std::{
-                fs,
-                hash::{DefaultHasher, Hash as _, Hasher as _},
-            };
-            let mut hasher = DefaultHasher::new();
-            sf.shader.source.hash(&mut hasher);
-            file_path = temp_dir.join(format!("{}-{:x}.wgsl", sf.entry_point, hasher.finish()));
-            log::debug!("Dumping processed shader code to: {}", file_path.display());
-            let _ = fs::write(&file_path, &sf.shader.source);
-
-            naga_options_debug = naga_options_base.clone();
-            naga_options_debug.debug_info = Some(naga::back::spv::DebugInfo {
-                source_code: &sf.shader.source,
-                file_name: &file_path,
-                //TODO: switch to WGSL once NSight Graphics recognizes it
-                language: naga::back::spv::SourceLanguage::GLSL,
-            });
-            &naga_options_debug
-        } else {
-            naga_options_base
         };
 
         let spv = spv::write_vec(
@@ -308,29 +284,10 @@ impl super::Context {
         }
     }
 
-    fn destroy_pipeline_layout(&self, layout: &mut super::PipelineLayout) {
-        unsafe {
-            self.device.core.destroy_pipeline_layout(layout.raw, None);
-        }
-        for dsl in layout.descriptor_set_layouts.drain(..) {
-            unsafe {
-                self.device
-                    .core
-                    .destroy_descriptor_set_layout(dsl.raw, None);
-                self.device
-                    .core
-                    .destroy_descriptor_update_template(dsl.update_template, None);
-            }
-        }
-    }
-}
-
-#[hidden_trait::expose]
-impl crate::traits::ShaderDevice for super::Context {
-    type ComputePipeline = super::ComputePipeline;
-    type RenderPipeline = super::RenderPipeline;
-
-    fn create_compute_pipeline(&self, desc: crate::ComputePipelineDesc) -> super::ComputePipeline {
+    pub fn create_compute_pipeline(
+        &self,
+        desc: crate::ComputePipelineDesc,
+    ) -> super::ComputePipeline {
         let mut group_infos = desc
             .data_layouts
             .iter()
@@ -386,14 +343,7 @@ impl crate::traits::ShaderDevice for super::Context {
         }
     }
 
-    fn destroy_compute_pipeline(&self, pipeline: &mut super::ComputePipeline) {
-        self.destroy_pipeline_layout(&mut pipeline.layout);
-        unsafe {
-            self.device.core.destroy_pipeline(pipeline.raw, None);
-        }
-    }
-
-    fn create_render_pipeline(&self, desc: crate::RenderPipelineDesc) -> super::RenderPipeline {
+    pub fn create_render_pipeline(&self, desc: crate::RenderPipelineDesc) -> super::RenderPipeline {
         let mut group_infos = desc
             .data_layouts
             .iter()
@@ -452,6 +402,7 @@ impl crate::traits::ShaderDevice for super::Context {
         let vk_vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_buffers)
             .vertex_attribute_descriptions(&vertex_attributes);
+
         let (raw_topology, supports_restart) = map_primitive_topology(desc.primitive.topology);
         let vk_input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(raw_topology)
@@ -464,7 +415,9 @@ impl crate::traits::ShaderDevice for super::Context {
                 vk::PolygonMode::FILL
             })
             .front_face(map_front_face(desc.primitive.front_face))
+            .cull_mode(map_cull_mode(desc.primitive.cull_mode))
             .line_width(1.0);
+
         let mut vk_depth_clip_state =
             vk::PipelineRasterizationDepthClipStateCreateInfoEXT::default()
                 .depth_clip_enable(false);
@@ -486,9 +439,16 @@ impl crate::traits::ShaderDevice for super::Context {
             .scissor_count(1)
             .viewport_count(1);
 
-        let vk_sample_mask = [1u32, 0];
+        let vk_sample_mask = [
+            desc.multisample_state.sample_mask as u32,
+            (desc.multisample_state.sample_mask >> 32) as u32,
+        ];
+
         let vk_multisample = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1)
+            .rasterization_samples(vk::SampleCountFlags::from_raw(
+                desc.multisample_state.sample_count,
+            ))
+            .alpha_to_coverage_enable(desc.multisample_state.alpha_to_coverage)
             .sample_mask(&vk_sample_mask);
 
         let mut ds_format = vk::Format::UNDEFINED;
@@ -579,13 +539,6 @@ impl crate::traits::ShaderDevice for super::Context {
         }
         super::RenderPipeline { raw, layout }
     }
-
-    fn destroy_render_pipeline(&self, pipeline: &mut super::RenderPipeline) {
-        self.destroy_pipeline_layout(&mut pipeline.layout);
-        unsafe {
-            self.device.core.destroy_pipeline(pipeline.raw, None);
-        }
-    }
 }
 
 fn map_shader_visibility(visibility: crate::ShaderVisibility) -> vk::ShaderStageFlags {
@@ -621,6 +574,16 @@ fn map_front_face(front_face: crate::FrontFace) -> vk::FrontFace {
     match front_face {
         crate::FrontFace::Cw => vk::FrontFace::CLOCKWISE,
         crate::FrontFace::Ccw => vk::FrontFace::COUNTER_CLOCKWISE,
+    }
+}
+
+fn map_cull_mode(cull_mode: Option<crate::Face>) -> vk::CullModeFlags {
+    match cull_mode {
+        None => vk::CullModeFlags::NONE,
+        Some(it) => match it {
+            crate::Face::Front => vk::CullModeFlags::FRONT,
+            crate::Face::Back => vk::CullModeFlags::BACK,
+        },
     }
 }
 

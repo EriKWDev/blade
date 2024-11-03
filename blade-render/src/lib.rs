@@ -4,8 +4,7 @@
     trivial_casts,
     trivial_numeric_casts,
     unused_extern_crates,
-    //TODO: re-enable. Currently doesn't like "mem::size_of" on newer Rust
-    //unused_qualifications,
+    unused_qualifications,
     // We don't match on a reference, unless required.
     clippy::pattern_type_mismatch,
 )]
@@ -34,7 +33,6 @@ pub struct Vertex {
     pub tangent: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
 pub struct Camera {
     pub pos: mint::Vector3<f32>,
     pub rot: mint::Quaternion<f32>,

@@ -1,6 +1,6 @@
 [package]
 name = "blade-graphics"
-version = "0.5.0"
+version = "0.4.0"
 edition = "2021"
 description = "Graphics abstraction for Blade"
 keywords = ["graphics"]
@@ -22,15 +22,11 @@ raw-window-handle = "0.6"
 [target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
 block = "0.1"
 core-graphics-types = "0.1"
-#TODO: switch to crates once https://github.com/gfx-rs/metal-rs/pull/335 is published
-#TODO: switch to upstream once these are merged:
-# - https://github.com/gfx-rs/metal-rs/pull/336
-# - https://github.com/gfx-rs/metal-rs/pull/337
-metal = { git = "https://github.com/kvark/metal-rs", branch = "blade" }
+metal = "0.25"
 objc = "0.2.5"
 naga = { workspace = true, features = ["msl-out"] }
 
-[target.'cfg(any(vulkan, windows, target_os = "linux", target_os = "android", target_os = "freebsd"))'.dependencies]
+[target.'cfg(any(vulkan, windows, target_os = "linux", target_os = "android"))'.dependencies]
 ash = "0.38"
 ash-window = "0.13"
 gpu-alloc = "0.6"
@@ -39,28 +35,17 @@ naga = { workspace = true, features = ["spv-out"] }
 slab = { workspace = true }
 
 [target.'cfg(any(gles, target_arch = "wasm32"))'.dependencies]
-glow = "0.14"
+glow = "0.13"
 naga = { workspace = true, features = ["glsl-out"] }
 
 [target.'cfg(all(gles, not(target_arch = "wasm32")))'.dependencies]
-egl = { package = "khronos-egl", version = "6.0", features = ["dynamic"] }
+egl = { package = "khronos-egl", version = "5.0", features = ["dynamic"] }
 libloading = { version = "0.8" }
 
 [target.'cfg(all(target_arch = "wasm32"))'.dependencies]
 wasm-bindgen = "0.2.83"
-web-sys = { workspace = true, features = [
-    "HtmlCanvasElement",
-    "WebGl2RenderingContext",
-] }
+web-sys = { workspace = true, features = ["HtmlCanvasElement", "WebGl2RenderingContext"] }
 js-sys = "0.3.60"
 
 [package.metadata.cargo_check_external_types]
-allowed_external_types = [
-    "bitflags::*",
-    "mint::*",
-    "naga::*",
-    "raw_window_handle::*",
-]
-
-[lints.rust]
-unexpected_cfgs = { level = "allow", check-cfg = ['cfg(gles)'] }
+allowed_external_types = ["bitflags::*", "mint::*", "naga::*", "raw_window_handle::*"]

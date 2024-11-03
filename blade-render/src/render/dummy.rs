@@ -29,16 +29,15 @@ impl DummyResources {
             mip_level_count: 1,
             dimension: blade_graphics::TextureDimension::D2,
             usage: blade_graphics::TextureUsage::COPY | blade_graphics::TextureUsage::RESOURCE,
+            sample_count: 1,
         });
-        let white_view = gpu.create_texture_view(
-            white_texture,
-            blade_graphics::TextureViewDesc {
-                name: "dummy/white",
-                format: blade_graphics::TextureFormat::Rgba8Unorm,
-                dimension: blade_graphics::ViewDimension::D2,
-                subresources: &blade_graphics::TextureSubresources::default(),
-            },
-        );
+        let white_view = gpu.create_texture_view(blade_graphics::TextureViewDesc {
+            name: "dummy/white",
+            texture: white_texture,
+            format: blade_graphics::TextureFormat::Rgba8Unorm,
+            dimension: blade_graphics::ViewDimension::D2,
+            subresources: &blade_graphics::TextureSubresources::default(),
+        });
         let black_texture = gpu.create_texture(blade_graphics::TextureDesc {
             name: "dummy/black",
             format: blade_graphics::TextureFormat::Rgba8Unorm,
@@ -47,16 +46,15 @@ impl DummyResources {
             mip_level_count: 1,
             dimension: blade_graphics::TextureDimension::D2,
             usage: blade_graphics::TextureUsage::COPY | blade_graphics::TextureUsage::RESOURCE,
+            sample_count: 1,
         });
-        let black_view = gpu.create_texture_view(
-            black_texture,
-            blade_graphics::TextureViewDesc {
-                name: "dummy/black",
-                format: blade_graphics::TextureFormat::Rgba8Unorm,
-                dimension: blade_graphics::ViewDimension::D2,
-                subresources: &blade_graphics::TextureSubresources::default(),
-            },
-        );
+        let black_view = gpu.create_texture_view(blade_graphics::TextureViewDesc {
+            name: "dummy/black",
+            texture: black_texture,
+            format: blade_graphics::TextureFormat::Rgba8Unorm,
+            dimension: blade_graphics::ViewDimension::D2,
+            subresources: &blade_graphics::TextureSubresources::default(),
+        });
         let red_texture = gpu.create_texture(blade_graphics::TextureDesc {
             name: "dummy/red",
             format: blade_graphics::TextureFormat::Rgba8Unorm,
@@ -65,21 +63,20 @@ impl DummyResources {
             mip_level_count: 1,
             dimension: blade_graphics::TextureDimension::D2,
             usage: blade_graphics::TextureUsage::COPY | blade_graphics::TextureUsage::RESOURCE,
+            sample_count: 1,
         });
-        let red_view = gpu.create_texture_view(
-            red_texture,
-            blade_graphics::TextureViewDesc {
-                name: "dummy/red",
-                format: blade_graphics::TextureFormat::Rgba8Unorm,
-                dimension: blade_graphics::ViewDimension::D2,
-                subresources: &blade_graphics::TextureSubresources::default(),
-            },
-        );
+        let red_view = gpu.create_texture_view(blade_graphics::TextureViewDesc {
+            name: "dummy/red",
+            texture: red_texture,
+            format: blade_graphics::TextureFormat::Rgba8Unorm,
+            dimension: blade_graphics::ViewDimension::D2,
+            subresources: &blade_graphics::TextureSubresources::default(),
+        });
 
         command_encoder.init_texture(white_texture);
         command_encoder.init_texture(black_texture);
         command_encoder.init_texture(red_texture);
-        let mut transfers = command_encoder.transfer("init dummy");
+        let mut transfers = command_encoder.transfer();
         let staging_buf = gpu.create_buffer(blade_graphics::BufferDesc {
             name: "dummy/staging",
             size: 4 * 3,

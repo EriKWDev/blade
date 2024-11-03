@@ -102,7 +102,6 @@ struct CompiledShader {
     function: metal::Function,
     attribute_mappings: Vec<crate::VertexAttributeMapping>,
     wg_size: metal::MTLSize,
-    wg_memory_sizes: Vec<u32>,
 }
 
 bitflags::bitflags! {
@@ -192,7 +191,6 @@ impl super::Context {
         let ep_index = sf.entry_point_index();
         let ep = &sf.shader.module.entry_points[ep_index];
         let ep_info = sf.shader.info.get_entry_point(ep_index);
-        let _ = sf.shader.source;
 
         let mut module = sf.shader.module.clone();
         crate::Shader::fill_resource_bindings(
@@ -204,16 +202,6 @@ impl super::Context {
         );
         let attribute_mappings =
             crate::Shader::fill_vertex_locations(&mut module, ep_index, vertex_fetch_states);
-
-        // figure out how much workgroup memory is needed for each binding
-        let mut wg_memory_sizes = Vec::new();
-        for (var_handle, var) in module.global_variables.iter() {
-            if var.space == naga::AddressSpace::WorkGroup && !ep_info[var_handle].is_empty() {
-                let size = module.types[var.ty].inner.size(module.to_ctx());
-                //TODO: use `u32::next_multiple_of`
-                wg_memory_sizes.push(((size - 1) | 0xF) + 1); // multiple of 16
-            }
-        }
 
         // copy the visibility for convenience
         for (group_mapping, group_info) in pipeline_layout
@@ -324,17 +312,13 @@ impl super::Context {
             function,
             attribute_mappings,
             wg_size,
-            wg_memory_sizes,
         }
     }
-}
 
-#[hidden_trait::expose]
-impl crate::traits::ShaderDevice for super::Context {
-    type ComputePipeline = super::ComputePipeline;
-    type RenderPipeline = super::RenderPipeline;
-
-    fn create_compute_pipeline(&self, desc: crate::ComputePipelineDesc) -> super::ComputePipeline {
+    pub fn create_compute_pipeline(
+        &self,
+        desc: crate::ComputePipelineDesc,
+    ) -> super::ComputePipeline {
         let mut layout = make_pipeline_layout(desc.data_layouts, 0);
 
         objc::rc::autoreleasepool(|| {
@@ -366,16 +350,11 @@ impl crate::traits::ShaderDevice for super::Context {
                 lib: cs.library,
                 layout,
                 wg_size: cs.wg_size,
-                wg_memory_sizes: cs.wg_memory_sizes.into_boxed_slice(),
             }
         })
     }
 
-    fn destroy_compute_pipeline(&self, _pipeline: &mut super::ComputePipeline) {
-        //TODO: is there a way to release?
-    }
-
-    fn create_render_pipeline(&self, desc: crate::RenderPipelineDesc) -> super::RenderPipeline {
+    pub fn create_render_pipeline(&self, desc: crate::RenderPipelineDesc) -> super::RenderPipeline {
         let mut layout = make_pipeline_layout(desc.data_layouts, desc.vertex_fetches.len() as u32);
 
         let triangle_fill_mode = match desc.primitive.wireframe {
@@ -539,9 +518,5 @@ impl crate::traits::ShaderDevice for super::Context {
                 depth_stencil,
             }
         })
-    }
-
-    fn destroy_render_pipeline(&self, _pipeline: &mut super::RenderPipeline) {
-        //TODO: is there a way to release?
     }
 }

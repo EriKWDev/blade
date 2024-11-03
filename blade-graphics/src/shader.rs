@@ -35,11 +35,7 @@ impl super::Context {
                 "validation failed"
             })?;
 
-        Ok(super::Shader {
-            module,
-            info,
-            source: desc.source.to_owned(),
-        })
+        Ok(super::Shader { module, info })
     }
 
     pub fn create_shader(&self, desc: super::ShaderDesc) -> super::Shader {

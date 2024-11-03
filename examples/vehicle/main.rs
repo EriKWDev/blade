@@ -183,7 +183,7 @@ impl Game {
                 let wheel_angular_freedoms = mint::Vector3 {
                     x: Some(blade::FreedomAxis {
                         limits: None,
-                        motor: Some(blade::config::Motor {
+                        motor: Some(blade::MotorDesc {
                             stiffness: 0.0,
                             damping: veh_config.drive_factor,
                             max_force: 1000.0,
@@ -193,9 +193,10 @@ impl Game {
                     z: None,
                 };
 
-                vehicle.wheels.push(
-                    if ac.max_steering_angle > 0.0 || ac.max_suspension_offset > 0.0 {
-                        let max_angle = ac.max_steering_angle.to_radians();
+                vehicle
+                    .wheels
+                    .push(if ac.steering.limit > 0.0 || ac.suspension.limit > 0.0 {
+                        let max_angle = ac.steering.limit.to_radians();
                         let suspender_handle = engine.add_object(
                             &suspender_config,
                             blade::Transform {
@@ -215,10 +216,14 @@ impl Game {
                                 },
                                 linear: mint::Vector3 {
                                     x: None,
-                                    y: if ac.max_suspension_offset > 0.0 {
+                                    y: if ac.suspension.limit > 0.0 {
                                         Some(blade::FreedomAxis {
-                                            limits: Some(0.0..ac.max_suspension_offset),
-                                            motor: Some(ac.suspension),
+                                            limits: Some(0.0..ac.suspension.limit),
+                                            motor: Some(blade::MotorDesc {
+                                                stiffness: ac.suspension.stiffness,
+                                                damping: ac.suspension.damping,
+                                                max_force: 1000.0,
+                                            }),
                                         })
                                     } else {
                                         None
@@ -227,10 +232,14 @@ impl Game {
                                 },
                                 angular: mint::Vector3 {
                                     x: None,
-                                    y: if ac.max_steering_angle > 0.0 {
+                                    y: if ac.steering.limit > 0.0 {
                                         Some(blade::FreedomAxis {
                                             limits: Some(-max_angle..max_angle),
-                                            motor: Some(ac.steering),
+                                            motor: Some(blade::MotorDesc {
+                                                stiffness: ac.steering.stiffness,
+                                                damping: ac.steering.damping,
+                                                max_force: 1000.0,
+                                            }),
                                         })
                                     } else {
                                         None
@@ -258,8 +267,16 @@ impl Game {
                             vehicle.body_handle,
                             wheel_handle,
                             blade::JointDesc {
-                                linear: blade::FreedomAxis::ALL_FREE,
-                                angular: blade::FreedomAxis::ALL_FREE,
+                                linear: mint::Vector3 {
+                                    x: Some(Default::default()),
+                                    y: Some(Default::default()),
+                                    z: Some(Default::default()),
+                                },
+                                angular: mint::Vector3 {
+                                    x: Some(Default::default()),
+                                    y: Some(Default::default()),
+                                    z: Some(Default::default()),
+                                },
                                 ..Default::default()
                             },
                         );
@@ -268,7 +285,7 @@ impl Game {
                             object: wheel_handle,
                             spin_joint: wheel_joint,
                             suspender: Some(suspender_handle),
-                            steer_joint: if ac.max_steering_angle > 0.0 {
+                            steer_joint: if ac.steering.limit > 0.0 {
                                 Some(suspension_joint)
                             } else {
                                 None
@@ -298,8 +315,7 @@ impl Game {
                             suspender: None,
                             steer_joint: None,
                         }
-                    },
-                );
+                    });
             }
         }
 
@@ -517,12 +533,12 @@ impl Game {
                     ui.label("Angle");
                     ui.add(
                         egui::DragValue::new(&mut self.cam_config.azimuth)
-                            .range(-consts::PI..=consts::PI)
+                            .clamp_range(-consts::PI..=consts::PI)
                             .speed(0.1),
                     );
                     ui.add(
                         egui::DragValue::new(&mut self.cam_config.altitude)
-                            .range(eps..=consts::FRAC_PI_2 - eps)
+                            .clamp_range(eps..=consts::FRAC_PI_2 - eps)
                             .speed(0.1),
                     );
                 });

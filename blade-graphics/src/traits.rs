@@ -1,5 +1,4 @@
 use std::{fmt::Debug, hash::Hash};
-
 pub trait ResourceDevice {
     type Buffer: Send + Sync + Clone + Copy + Debug + Hash + PartialEq;
     type Texture: Send + Sync + Clone + Copy + Debug + Hash + PartialEq;
@@ -12,11 +11,7 @@ pub trait ResourceDevice {
     fn destroy_buffer(&self, buffer: Self::Buffer);
     fn create_texture(&self, desc: super::TextureDesc) -> Self::Texture;
     fn destroy_texture(&self, texture: Self::Texture);
-    fn create_texture_view(
-        &self,
-        texture: Self::Texture,
-        desc: super::TextureViewDesc,
-    ) -> Self::TextureView;
+    fn create_texture_view(&self, desc: super::TextureViewDesc) -> Self::TextureView;
     fn destroy_texture_view(&self, view: Self::TextureView);
     fn create_sampler(&self, desc: super::SamplerDesc) -> Self::Sampler;
     fn destroy_sampler(&self, sampler: Self::Sampler);
@@ -25,16 +20,6 @@ pub trait ResourceDevice {
         desc: super::AccelerationStructureDesc,
     ) -> Self::AccelerationStructure;
     fn destroy_acceleration_structure(&self, acceleration_structure: Self::AccelerationStructure);
-}
-
-pub trait ShaderDevice {
-    type ComputePipeline: Send + Sync;
-    type RenderPipeline: Send + Sync;
-
-    fn create_compute_pipeline(&self, desc: super::ComputePipelineDesc) -> Self::ComputePipeline;
-    fn destroy_compute_pipeline(&self, pipeline: &mut Self::ComputePipeline);
-    fn create_render_pipeline(&self, desc: super::RenderPipelineDesc) -> Self::RenderPipeline;
-    fn destroy_render_pipeline(&self, pipeline: &mut Self::RenderPipeline);
 }
 
 pub trait CommandDevice {
@@ -47,64 +32,53 @@ pub trait CommandDevice {
     fn wait_for(&self, sp: &Self::SyncPoint, timeout_ms: u32) -> bool;
 }
 
-pub trait CommandEncoder {
-    type Texture: Send + Sync + Clone + Copy + Debug;
-    type Frame: Send + Sync + Debug;
-    fn start(&mut self);
-    fn init_texture(&mut self, texture: Self::Texture);
-    fn present(&mut self, frame: Self::Frame);
-    fn timings(&self) -> &super::Timings;
-}
-
 pub trait TransferEncoder {
-    type BufferPiece: Send + Sync + Clone + Copy + Debug;
-    type TexturePiece: Send + Sync + Clone + Copy + Debug;
-
-    fn fill_buffer(&mut self, dst: Self::BufferPiece, size: u64, value: u8);
-    fn copy_buffer_to_buffer(&mut self, src: Self::BufferPiece, dst: Self::BufferPiece, size: u64);
+    fn fill_buffer(&mut self, dst: super::BufferPiece, size: u64, value: u8);
+    fn copy_buffer_to_buffer(
+        &mut self,
+        src: super::BufferPiece,
+        dst: super::BufferPiece,
+        size: u64,
+    );
     fn copy_texture_to_texture(
         &mut self,
-        src: Self::TexturePiece,
-        dst: Self::TexturePiece,
+        src: super::TexturePiece,
+        dst: super::TexturePiece,
         size: super::Extent,
     );
 
     fn copy_buffer_to_texture(
         &mut self,
-        src: Self::BufferPiece,
+        src: super::BufferPiece,
         bytes_per_row: u32,
-        dst: Self::TexturePiece,
+        dst: super::TexturePiece,
         size: super::Extent,
     );
 
     fn copy_texture_to_buffer(
         &mut self,
-        src: Self::TexturePiece,
-        dst: Self::BufferPiece,
+        src: super::TexturePiece,
+        dst: super::BufferPiece,
         bytes_per_row: u32,
         size: super::Extent,
     );
 }
 
 pub trait AccelerationStructureEncoder {
-    type AccelerationStructure: Send + Sync + Clone + Debug;
-    type AccelerationStructureMesh: Send + Sync + Clone + Debug;
-    type BufferPiece: Send + Sync + Clone + Copy + Debug;
-
     fn build_bottom_level(
         &mut self,
-        acceleration_structure: Self::AccelerationStructure,
-        meshes: &[Self::AccelerationStructureMesh],
-        scratch_data: Self::BufferPiece,
+        acceleration_structure: crate::AccelerationStructure,
+        meshes: &[super::AccelerationStructureMesh],
+        scratch_data: super::BufferPiece,
     );
 
     fn build_top_level(
         &mut self,
-        acceleration_structure: Self::AccelerationStructure,
-        bottom_level: &[Self::AccelerationStructure],
+        acceleration_structure: crate::AccelerationStructure,
+        bottom_level: &[crate::AccelerationStructure],
         instance_count: u32,
-        instance_data: Self::BufferPiece,
-        scratch_data: Self::BufferPiece,
+        instance_data: super::BufferPiece,
+        scratch_data: super::BufferPiece,
     );
 }
 
@@ -117,11 +91,9 @@ pub trait ComputePipelineEncoder: PipelineEncoder {
 }
 
 pub trait RenderPipelineEncoder: PipelineEncoder {
-    type BufferPiece: Send + Sync + Clone + Copy + Debug;
-
     //TODO: reconsider exposing this here
     fn set_scissor_rect(&mut self, rect: &super::ScissorRect);
-    fn bind_vertex(&mut self, index: u32, vertex_buf: Self::BufferPiece);
+    fn bind_vertex(&mut self, index: u32, vertex_buf: super::BufferPiece);
     fn draw(
         &mut self,
         first_vertex: u32,
@@ -131,18 +103,18 @@ pub trait RenderPipelineEncoder: PipelineEncoder {
     );
     fn draw_indexed(
         &mut self,
-        index_buf: Self::BufferPiece,
+        index_buf: super::BufferPiece,
         index_type: super::IndexType,
         index_count: u32,
         base_vertex: i32,
         start_instance: u32,
         instance_count: u32,
     );
-    fn draw_indirect(&mut self, indirect_buf: Self::BufferPiece);
+    fn draw_indirect(&mut self, indirect_buf: super::BufferPiece);
     fn draw_indexed_indirect(
         &mut self,
-        index_buf: Self::BufferPiece,
+        index_buf: crate::BufferPiece,
         index_type: crate::IndexType,
-        indirect_buf: Self::BufferPiece,
+        indirect_buf: super::BufferPiece,
     );
 }

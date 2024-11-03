@@ -1,5 +1,5 @@
 use ash::{khr, vk};
-use std::{num::NonZeroU32, path::PathBuf, ptr, sync::Mutex};
+use std::{num::NonZeroU32, ptr, sync::Mutex};
 
 mod command;
 mod descriptor;
@@ -7,26 +7,16 @@ mod init;
 mod pipeline;
 mod resource;
 
-const QUERY_POOL_SIZE: usize = crate::limits::PASS_COUNT + 1;
-
 struct Instance {
     core: ash::Instance,
     _debug_utils: ash::ext::debug_utils::Instance,
     get_physical_device_properties2: khr::get_physical_device_properties2::Instance,
-    get_surface_capabilities2: khr::get_surface_capabilities2::Instance,
     surface: Option<khr::surface::Instance>,
 }
 
 #[derive(Clone)]
 struct RayTracingDevice {
     acceleration_structure: khr::acceleration_structure::Device,
-}
-
-#[derive(Clone, Default)]
-struct CommandScopeDevice {}
-#[derive(Clone, Default)]
-struct TimingDevice {
-    period: f32,
 }
 
 #[derive(Clone)]
@@ -39,16 +29,14 @@ struct Workarounds {
 #[derive(Clone)]
 struct Device {
     core: ash::Device,
-    device_information: crate::DeviceInformation,
     debug_utils: ash::ext::debug_utils::Device,
     timeline_semaphore: khr::timeline_semaphore::Device,
     dynamic_rendering: khr::dynamic_rendering::Device,
+    // dynamic_rendering_local_read: khr::dynamic_rendering_local_read::Device,
     ray_tracing: Option<RayTracingDevice>,
     buffer_marker: Option<ash::amd::buffer_marker::Device>,
     shader_info: Option<ash::amd::shader_info::Device>,
     full_screen_exclusive: Option<ash::ext::full_screen_exclusive::Device>,
-    command_scope: Option<CommandScopeDevice>,
-    timing: Option<TimingDevice>,
     workarounds: Workarounds,
 }
 
@@ -118,7 +106,6 @@ pub struct Context {
     surface: Option<Mutex<Surface>>,
     physical_device: vk::PhysicalDevice,
     naga_flags: naga::back::spv::WriterFlags,
-    shader_debug_path: Option<PathBuf>,
     instance: Instance,
     _entry: ash::Entry,
 }
@@ -228,8 +215,6 @@ pub struct RenderPipeline {
 struct CommandBuffer {
     raw: vk::CommandBuffer,
     descriptor_pool: descriptor::DescriptorPool,
-    query_pool: vk::QueryPool,
-    timed_pass_names: Vec<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -252,8 +237,6 @@ pub struct CommandEncoder {
     update_data: Vec<u8>,
     present: Option<Presentation>,
     crash_handler: Option<CrashHandler>,
-    temp_label: Vec<u8>,
-    timings: crate::Timings,
 }
 pub struct TransferCommandEncoder<'a> {
     raw: vk::CommandBuffer,
@@ -353,24 +336,9 @@ impl crate::traits::CommandDevice for Context {
                     self.set_object_name(raw, desc.name);
                 };
                 let descriptor_pool = self.device.create_descriptor_pool();
-                let query_pool = if self.device.timing.is_some() {
-                    let query_pool_info = vk::QueryPoolCreateInfo::default()
-                        .query_type(vk::QueryType::TIMESTAMP)
-                        .query_count(QUERY_POOL_SIZE as u32);
-                    unsafe {
-                        self.device
-                            .core
-                            .create_query_pool(&query_pool_info, None)
-                            .unwrap()
-                    }
-                } else {
-                    vk::QueryPool::null()
-                };
                 CommandBuffer {
                     raw,
                     descriptor_pool,
-                    query_pool,
-                    timed_pass_names: Vec::new(),
                 }
             })
             .collect();
@@ -397,8 +365,6 @@ impl crate::traits::CommandDevice for Context {
             update_data: Vec::new(),
             present: None,
             crash_handler,
-            temp_label: Vec::new(),
-            timings: Default::default(),
         }
     }
 
@@ -412,13 +378,6 @@ impl crate::traits::CommandDevice for Context {
             }
             self.device
                 .destroy_descriptor_pool(&mut cmd_buf.descriptor_pool);
-            if self.device.timing.is_some() {
-                unsafe {
-                    self.device
-                        .core
-                        .destroy_query_pool(cmd_buf.query_pool, None);
-                }
-            }
         }
         unsafe {
             self.device
@@ -608,6 +567,10 @@ fn map_vertex_format(vertex_format: crate::VertexFormat) -> vk::Format {
         Vf::I32Vec3 => vk::Format::R32G32B32_SINT,
         Vf::I32Vec4 => vk::Format::R32G32B32A32_SINT,
     }
+}
+
+fn map_sample_count(n: u32) -> vk::SampleCountFlags {
+    vk::SampleCountFlags::from_raw(n)
 }
 
 struct BottomLevelAccelerationStructureInput<'a> {
