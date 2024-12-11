@@ -81,9 +81,16 @@ impl Example {
                 presentation: true,
                 validation: cfg!(debug_assertions),
                 timing: false,
-                capture: false,
                 overlay: true,
                 device_id: 0,
+                // NOTE: Uncomment to enable capture
+                // capture: true,
+                // metal_capture_location: Some(
+                //     std::env::current_dir()
+                //         .unwrap()
+                //         .join("bunnymark_capture.gputrace"),
+                // ),
+                ..Default::default()
             })
             .unwrap()
         };

@@ -13,3 +13,5 @@ libGLESv2.dylib
 .DS_Store
 /.vs
 /.vscode
+
+*.gputrace

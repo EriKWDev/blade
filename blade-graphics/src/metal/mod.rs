@@ -57,6 +57,7 @@ pub struct Context {
     device: Mutex<metal::Device>,
     queue: Arc<Mutex<metal::CommandQueue>>,
     capture: Option<metal::CaptureManager>,
+    capture_location: Option<std::path::PathBuf>,
     info: PrivateInfo,
     device_information: crate::DeviceInformation,
 }
@@ -426,13 +427,49 @@ impl Context {
             .ok_or(super::NotSupportedError::NoSupportedDeviceFound)?;
         let queue = device.new_command_queue();
 
-        let auto_capture_everything = false;
+        // let auto_capture_everything = false;
+        let auto_capture_everything = true;
         let capture = if desc.capture && auto_capture_everything {
             objc::rc::autoreleasepool(|| {
                 let capture_manager = metal::CaptureManager::shared();
+
                 let default_capture_scope = capture_manager.new_capture_scope_with_device(&device);
                 capture_manager.set_default_capture_scope(&default_capture_scope);
-                capture_manager.start_capture_with_scope(&default_capture_scope);
+
+                let capture_desc = metal::CaptureDescriptor::new();
+                capture_desc.set_capture_device(&device);
+                capture_desc.set_capture_scope(&default_capture_scope);
+
+                if let Some(capture_location) = desc.metal_capture_location.as_ref() {
+                    let ext = capture_location
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    if ext != "gputrace" {
+                        log::error!("The file path for a metal capture must end with '.gputrace', current is '{}'", capture_location.display());
+                    }
+                    if !capture_location.is_absolute() {
+                        log::warn!("An absolute path might be required in order to succesfully save a metal capture. '{}' is not absolute", capture_location.display());
+                    }
+                    if !std::env::var("MTL_CAPTURE_ENABLED").is_ok_and(|v| v == "1") {
+                        log::warn!("Unless the environment variable 'MTL_CAPTURE_ENABLED=1' is set, a metal capture is only possible if the application is launched from Xcode or a correct Info.plist file is present with MetalCaptureEnabled set to true");
+                    }
+
+                    if capture_manager
+                        .supports_destination(metal::MTLCaptureDestination::GpuTraceDocument)
+                    {
+                        capture_desc
+                            .set_destination(metal::MTLCaptureDestination::GpuTraceDocument);
+                        capture_desc.set_output_url(capture_location);
+                    } else {
+                        log::error!("A capture location was specified but metal device doesn't support saving a gpu trace")
+                    }
+                }
+                let res = capture_manager.start_capture(capture_desc.as_ref());
+                if let Err(res) = res {
+                    log::error!("Error during metal capture start: {res}");
+                }
+
                 default_capture_scope.begin_scope();
                 Some(capture_manager.to_owned())
             })
@@ -475,6 +512,7 @@ impl Context {
                 timestamp_counter_set,
             },
             device_information,
+            capture_location: desc.metal_capture_location,
         })
     }
 

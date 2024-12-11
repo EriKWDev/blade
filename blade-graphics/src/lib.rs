@@ -106,6 +106,8 @@ pub struct ContextDesc {
     pub overlay: bool,
     /// Force selection of a specific Device ID, unless 0.
     pub device_id: u32,
+    /// Optional metal capture location
+    pub metal_capture_location: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]

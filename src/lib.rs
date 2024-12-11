@@ -419,6 +419,7 @@ impl Engine {
                 capture: false,
                 overlay: false,
                 device_id: 0,
+                metal_capture_location: None,
             })
             .unwrap()
         });
