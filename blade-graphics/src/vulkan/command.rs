@@ -853,7 +853,7 @@ impl crate::Viewport {
     const fn to_vk(&self) -> vk::Viewport {
         vk::Viewport {
             x: self.x,
-            y: self.y,
+            y: self.y + self.h, // shift since flipped y
             width: self.w,
             height: -self.h, // flip Y
             min_depth: self.depth.start,
