@@ -244,6 +244,7 @@ impl crate::traits::ResourceDevice for super::Context {
         texture: super::Texture,
         desc: crate::TextureViewDesc,
     ) -> super::TextureView {
+        let aspects = desc.format.aspects();
         let texture = texture.as_ref();
         let mtl_format = super::map_texture_format(desc.format);
         let mtl_type = map_view_dimension(desc.dimension, texture.sample_count());
@@ -274,7 +275,7 @@ impl crate::traits::ResourceDevice for super::Context {
             }
             unsafe { msg_send![raw.as_ref(), retain] }
         });
-        super::TextureView { raw }
+        super::TextureView { raw, aspects }
     }
 
     fn destroy_texture_view(&self, view: super::TextureView) {

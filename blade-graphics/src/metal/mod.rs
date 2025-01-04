@@ -41,6 +41,7 @@ impl Frame {
     pub fn texture_view(&self) -> TextureView {
         TextureView {
             raw: self.texture.as_ptr(),
+            aspects: crate::TexelAspects::COLOR,
         }
     }
 }
@@ -112,6 +113,7 @@ impl Texture {
 #[derive(Clone, Copy, Debug, Hash, PartialEq)]
 pub struct TextureView {
     raw: *mut metal::MTLTexture,
+    aspects: crate::TexelAspects,
 }
 
 unsafe impl Send for TextureView {}
@@ -121,6 +123,7 @@ impl Default for TextureView {
     fn default() -> Self {
         Self {
             raw: ptr::null_mut(),
+            aspects: crate::TexelAspects::COLOR,
         }
     }
 }
@@ -133,7 +136,10 @@ impl TextureView {
     /// Create a TextureView from a raw Metal Texture.
     /// Does not keep a reference, need not being destoryed.
     pub fn from_metal_texture(raw: &metal::TextureRef) -> Self {
-        Self { raw: raw.as_ptr() }
+        Self {
+            raw: raw.as_ptr(),
+            aspects: crate::TexelAspects::COLOR,
+        }
     }
 }
 
