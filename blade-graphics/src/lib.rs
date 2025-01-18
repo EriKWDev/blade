@@ -1119,12 +1119,14 @@ pub struct RenderTargetSet<'a> {
     pub depth_stencil: Option<DepthStencilRenderTarget>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolveMode {
     /// Default for MSAA color resolve
     Average,
+
     /// Default for depth/stencil resolve
     Sample0,
+
     Min,
     Max,
 }
