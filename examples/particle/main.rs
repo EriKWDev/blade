@@ -215,7 +215,7 @@ impl Example {
                 gpu::RenderTargetSet {
                     colors: &[gpu::RenderTarget {
                         view: frame_view,
-                        init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
+                        init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
                         finish_op: gpu::FinishOp::Store,
                     }],
                     depth_stencil: None,
@@ -236,9 +236,13 @@ impl Example {
                         finish_op: if self.export_image {
                             gpu::FinishOp::Store
                         } else {
-                            gpu::FinishOp::ResolveTo(frame_view)
-                        },
-                    }],
+                            gpu::FinishOp::ResolveTo {
+                                view: frame_view,
+                                mode: gpu::ResolveMode::Average,
+                                store_original: false,
+                            },
+                        }
+                    ],
                     depth_stencil: None,
                 },
             ) {

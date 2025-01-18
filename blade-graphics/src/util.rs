@@ -74,8 +74,18 @@ impl super::TextureFormat {
             Self::Rg32Uint => uncompressed(8),
             Self::Rgba32Uint => uncompressed(16),
             Self::Depth32Float => uncompressed(4),
-            Self::Depth32FloatStencil8Uint => uncompressed(5),
-            Self::Stencil8Uint => uncompressed(1),
+
+            Self::Depth32FloatStencil8Uint => {
+                log::warn!("Requested 'block_info' on depth-stencil format, information most likely incorrect");
+                uncompressed(5)
+            }
+            Self::Stencil8Uint => {
+                log::warn!(
+                    "Requested 'block_info' on stencil format, information most likely incorrect"
+                );
+                uncompressed(1)
+            }
+
             Self::Bc1Unorm => cx_bc(8),
             Self::Bc1UnormSrgb => cx_bc(8),
             Self::Bc2Unorm => cx_bc(16),
@@ -96,35 +106,112 @@ impl super::TextureFormat {
         }
     }
 
-    pub fn aspects(&self) -> super::TexelAspects {
+    pub const fn aspects(&self) -> super::TexelAspects {
+        let mut aspects = super::TexelAspects::empty();
+        aspects = aspects.union(self.depth_stencil_color());
+        aspects = aspects.union(self.float_int_uint());
+        if self.is_srgb() {
+            aspects = aspects.union(super::TexelAspects::SRGB)
+        }
+        aspects
+    }
+
+    pub const fn is_srgb(&self) -> bool {
+        match *self {
+            crate::TextureFormat::R8Unorm
+            | crate::TextureFormat::Rg8Unorm
+            | crate::TextureFormat::Rg8Snorm
+            | crate::TextureFormat::Rgba8Unorm
+            | crate::TextureFormat::Bgra8Unorm
+            | crate::TextureFormat::Rgba8Snorm
+            | crate::TextureFormat::R16Float
+            | crate::TextureFormat::Rg16Float
+            | crate::TextureFormat::Rgba16Float
+            | crate::TextureFormat::R32Float
+            | crate::TextureFormat::Rg32Float
+            | crate::TextureFormat::Rgba32Float
+            | crate::TextureFormat::R32Uint
+            | crate::TextureFormat::Rg32Uint
+            | crate::TextureFormat::Rgba32Uint
+            | crate::TextureFormat::Depth32Float
+            | crate::TextureFormat::Depth32FloatStencil8Uint
+            | crate::TextureFormat::Stencil8Uint
+            | crate::TextureFormat::Bc1Unorm
+            | crate::TextureFormat::Bc2Unorm
+            | crate::TextureFormat::Bc3Unorm
+            | crate::TextureFormat::Bc4Unorm
+            | crate::TextureFormat::Bc4Snorm
+            | crate::TextureFormat::Bc5Unorm
+            | crate::TextureFormat::Bc5Snorm
+            | crate::TextureFormat::Bc6hUfloat
+            | crate::TextureFormat::Bc6hFloat
+            | crate::TextureFormat::Bc7Unorm
+            | crate::TextureFormat::Rgb10a2Unorm
+            | crate::TextureFormat::Rg11b10Ufloat
+            | crate::TextureFormat::Rgb9e5Ufloat => false,
+
+            crate::TextureFormat::Bc7UnormSrgb
+            | crate::TextureFormat::Rgba8UnormSrgb
+            | crate::TextureFormat::Bgra8UnormSrgb
+            | crate::TextureFormat::Bc1UnormSrgb
+            | crate::TextureFormat::Bc2UnormSrgb
+            | crate::TextureFormat::Bc3UnormSrgb => true,
+        }
+    }
+
+    const fn depth_stencil_color(&self) -> super::TexelAspects {
         match *self {
             Self::Depth32Float => super::TexelAspects::DEPTH,
-
             Self::Depth32FloatStencil8Uint => {
-                super::TexelAspects::DEPTH | super::TexelAspects::STENCIL
+                super::TexelAspects::DEPTH.union(super::TexelAspects::STENCIL)
             }
-
             Self::Stencil8Uint => super::TexelAspects::STENCIL,
 
             _ => super::TexelAspects::COLOR,
         }
     }
-}
 
-impl super::TextureColor {
-    pub fn stencil_clear_value(&self) -> u32 {
-        match self {
-            crate::TextureColor::TransparentBlack => 0,
-            crate::TextureColor::OpaqueBlack => !0,
-            crate::TextureColor::White => !0,
-        }
-    }
+    const fn float_int_uint(&self) -> super::TexelAspects {
+        match *self {
+            crate::TextureFormat::Rg8Snorm
+            | crate::TextureFormat::Rgba8Snorm
+            | crate::TextureFormat::R32Uint
+            | crate::TextureFormat::Rg32Uint
+            | crate::TextureFormat::Rgba32Uint
+            | crate::TextureFormat::Stencil8Uint
+            | crate::TextureFormat::Bc4Snorm
+            | crate::TextureFormat::Bc5Snorm => super::TexelAspects::INT,
 
-    pub fn depth_clear_value(&self) -> f32 {
-        match self {
-            crate::TextureColor::TransparentBlack => 0.0,
-            crate::TextureColor::OpaqueBlack => 0.0,
-            crate::TextureColor::White => 1.0,
+            crate::TextureFormat::R8Unorm
+            | crate::TextureFormat::Rg8Unorm
+            | crate::TextureFormat::Rgba8Unorm
+            | crate::TextureFormat::Rgba8UnormSrgb
+            | crate::TextureFormat::Bgra8Unorm
+            | crate::TextureFormat::Bgra8UnormSrgb
+            | crate::TextureFormat::Bc1Unorm
+            | crate::TextureFormat::Bc1UnormSrgb
+            | crate::TextureFormat::Bc2Unorm
+            | crate::TextureFormat::Bc2UnormSrgb
+            | crate::TextureFormat::Bc3Unorm
+            | crate::TextureFormat::Bc3UnormSrgb
+            | crate::TextureFormat::Bc4Unorm
+            | crate::TextureFormat::Bc5Unorm
+            | crate::TextureFormat::Bc7Unorm
+            | crate::TextureFormat::Bc7UnormSrgb => super::TexelAspects::UINT,
+
+            crate::TextureFormat::R16Float
+            | crate::TextureFormat::Rg16Float
+            | crate::TextureFormat::Rgba16Float
+            | crate::TextureFormat::R32Float
+            | crate::TextureFormat::Rg32Float
+            | crate::TextureFormat::Rgba32Float
+            | crate::TextureFormat::Depth32Float
+            | crate::TextureFormat::Depth32FloatStencil8Uint
+            | crate::TextureFormat::Bc6hUfloat
+            | crate::TextureFormat::Bc6hFloat
+            | crate::TextureFormat::Rgb10a2Unorm
+            | crate::TextureFormat::Rg11b10Ufloat
+            | crate::TextureFormat::Rgb9e5Ufloat => super::TexelAspects::FLOAT,
         }
     }
 }
