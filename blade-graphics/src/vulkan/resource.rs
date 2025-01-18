@@ -646,6 +646,10 @@ fn map_address_mode(mode: crate::AddressMode) -> vk::SamplerAddressMode {
 }
 
 fn map_border_color(border_color: crate::TextureColor) -> vk::BorderColor {
+    /*
+        TODO: How to get the texture aspects? FLOAT_ is not supposed to be for
+              int/uint backed formats
+    */
     match border_color {
         crate::TextureColor::TransparentBlack => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
         crate::TextureColor::OpaqueBlack => vk::BorderColor::FLOAT_OPAQUE_BLACK,
