@@ -189,7 +189,7 @@ impl Example {
                 gpu::RenderTargetSet {
                     colors: &[gpu::RenderTarget {
                         view: frame_view,
-                        init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
+                        init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
                         finish_op: gpu::FinishOp::Store,
                     }],
                     depth_stencil: None,
@@ -206,8 +206,12 @@ impl Example {
                 gpu::RenderTargetSet {
                     colors: &[gpu::RenderTarget {
                         view: self.msaa_view.unwrap(),
-                        init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
-                        finish_op: gpu::FinishOp::ResolveTo(frame_view),
+                        init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
+                        finish_op: gpu::FinishOp::ResolveTo {
+                            view: frame_view,
+                            mode: gpu::ResolveMode::Average,
+                            store_original: false,
+                        },
                     }],
                     depth_stencil: None,
                 },
