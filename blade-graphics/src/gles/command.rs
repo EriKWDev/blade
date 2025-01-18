@@ -185,24 +185,33 @@ impl super::CommandEncoder {
             if let crate::FinishOp::Discard = rt.finish_op {
                 invalidate_attachments.push(attachment);
             }
-            if let crate::FinishOp::ResolveTo(to) = rt.finish_op {
+            if let crate::FinishOp::ResolveTo { view: to, .. } = rt.finish_op {
                 self.commands
                     .push(super::Command::BlitFramebuffer { from: rt.view, to });
             }
         }
         if let Some(ref rt) = targets.depth_stencil {
-            let attachment = match rt.view.aspects {
-                crate::TexelAspects::DEPTH => glow::DEPTH_ATTACHMENT,
-                crate::TexelAspects::STENCIL => glow::STENCIL_ATTACHMENT,
-                _ => glow::DEPTH_STENCIL_ATTACHMENT,
+            let is_depth = rt.view.aspects.contains(crate::TexelAspects::DEPTH);
+            let is_stencil = rt.view.aspects.contains(crate::TexelAspects::STENCIL);
+
+            let attachment = if is_depth && is_stencil {
+                glow::DEPTH_STENCIL_ATTACHMENT
+            } else if is_depth {
+                glow::DEPTH_ATTACHMENT
+            } else {
+                glow::STENCIL_ATTACHMENT
             };
+
             target_size = rt.view.target_size;
             self.commands.push(super::Command::BindAttachment {
                 attachment,
                 view: rt.view,
             });
-            if let crate::FinishOp::Discard = rt.finish_op {
-                invalidate_attachments.push(attachment);
+            if let crate::FinishOp::Discard = rt.depth_finish_op {
+                invalidate_attachments.push(glow::DEPTH_ATTACHMENT);
+            }
+            if let crate::FinishOp::Discard = rt.stencil_finish_op {
+                invalidate_attachments.push(glow::DEPTH_STENCIL);
             }
         }
 
@@ -231,24 +240,38 @@ impl super::CommandEncoder {
                 self.commands.push(super::Command::ClearColor {
                     draw_buffer: i as u32,
                     color,
-                    ty: super::ColorType::Float, //TODO: get from the format
+                    ty: if rt.view.aspects.contains(crate::TexelAspects::FLOAT) {
+                        super::ColorType::Float
+                    } else if rt.view.aspects.contains(crate::TexelAspects::INT) {
+                        super::ColorType::Sint
+                    } else {
+                        super::ColorType::Uint
+                    },
                 });
             }
         }
+
         if let Some(ref rt) = targets.depth_stencil {
-            if let crate::InitOp::Clear(color) = rt.init_op {
-                self.commands.push(super::Command::ClearDepthStencil {
-                    depth: if rt.view.aspects.contains(crate::TexelAspects::DEPTH) {
-                        Some(color.depth_clear_value())
-                    } else {
-                        None
-                    },
-                    stencil: if rt.view.aspects.contains(crate::TexelAspects::STENCIL) {
-                        Some(color.stencil_clear_value())
-                    } else {
-                        None
-                    },
-                });
+            match (rt.depth_init_op, rt.stencil_init_op) {
+                (crate::InitOp::Clear(depth_value), crate::InitOp::Clear(stencil_value)) => {
+                    self.commands.push(super::Command::ClearDepthStencil {
+                        depth: Some(depth_value),
+                        stencil: Some(stencil_value),
+                    });
+                }
+                (crate::InitOp::Clear(depth_value), _) => {
+                    self.commands.push(super::Command::ClearDepthStencil {
+                        depth: Some(depth_value),
+                        stencil: None,
+                    });
+                }
+                (_, crate::InitOp::Clear(stencil_value)) => {
+                    self.commands.push(super::Command::ClearDepthStencil {
+                        depth: None,
+                        stencil: Some(stencil_value),
+                    });
+                }
+                _ => {}
             }
         }
 
