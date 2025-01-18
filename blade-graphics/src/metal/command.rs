@@ -247,9 +247,22 @@ impl super::CommandEncoder {
                         metal::MTLStoreAction::Store
                     }
                     crate::FinishOp::Discard => metal::MTLStoreAction::DontCare,
-                    crate::FinishOp::ResolveTo(ref view) => {
+                    crate::FinishOp::ResolveTo {
+                        ref view,
+                        mode,
+                        store_original,
+                    } => {
                         at_descriptor.setResolveTexture(Some(view.as_ref()));
-                        metal::MTLStoreAction::MultisampleResolve
+                        assert!(
+                            mode == crate::ResolveMode::Average,
+                            "color attachments has to resolve using average mode"
+                        );
+
+                        if store_original {
+                            metal::MTLStoreAction::StoreAndMultisampleResolve
+                        } else {
+                            metal::MTLStoreAction::MultisampleResolve
+                        }
                     }
                 };
                 at_descriptor.setStoreAction(store_action);
@@ -259,21 +272,48 @@ impl super::CommandEncoder {
                 if rt.view.aspects.contains(crate::TexelAspects::DEPTH) {
                     let at_descriptor = descriptor.depthAttachment();
                     at_descriptor.setTexture(Some(rt.view.as_ref()));
-                    let load_action = match rt.init_op {
+                    let load_action = match rt.depth_init_op {
                         crate::InitOp::Load => metal::MTLLoadAction::Load,
-                        crate::InitOp::Clear(color) => {
-                            let clear_depth = color.depth_clear_value();
-                            at_descriptor.setClearDepth(clear_depth as f64);
+                        crate::InitOp::Clear(clear_value) => {
+                            at_descriptor.setClearDepth(clear_value as f64);
                             metal::MTLLoadAction::Clear
                         }
                         crate::InitOp::DontCare => metal::MTLLoadAction::DontCare,
                     };
-                    let store_action = match rt.finish_op {
+
+                    let store_action = match rt.depth_finish_op {
                         crate::FinishOp::Store | crate::FinishOp::Ignore => {
                             metal::MTLStoreAction::Store
                         }
                         crate::FinishOp::Discard => metal::MTLStoreAction::DontCare,
-                        crate::FinishOp::ResolveTo(_) => panic!("Can't resolve depth texture"),
+                        crate::FinishOp::ResolveTo {
+                            ref view,
+                            mode,
+                            store_original,
+                        } => {
+                            at_descriptor.setResolveTexture(Some(view.as_ref()));
+                            at_descriptor.setDepthResolveFilter(match mode {
+                                crate::ResolveMode::Average => {
+                                    panic!("ResolveMode::Average not supported as depth resolve filter")
+                                }
+
+                                crate::ResolveMode::Sample0 => {
+                                    objc2_metal::MTLMultisampleDepthResolveFilter::Sample0
+                                }
+                                crate::ResolveMode::Min => {
+                                    objc2_metal::MTLMultisampleDepthResolveFilter::Min
+                                }
+                                crate::ResolveMode::Max => {
+                                    objc2_metal::MTLMultisampleDepthResolveFilter::Max
+                                }
+                            });
+
+                            if store_original {
+                                metal::MTLStoreAction::StoreAndMultisampleResolve
+                            } else {
+                                metal::MTLStoreAction::MultisampleResolve
+                            }
+                        }
                     };
                     at_descriptor.setLoadAction(load_action);
                     at_descriptor.setStoreAction(store_action);
@@ -283,21 +323,43 @@ impl super::CommandEncoder {
                     let at_descriptor = descriptor.stencilAttachment();
                     at_descriptor.setTexture(Some(rt.view.as_ref()));
 
-                    let load_action = match rt.init_op {
+                    let load_action = match rt.stencil_init_op {
                         crate::InitOp::Load => metal::MTLLoadAction::Load,
-                        crate::InitOp::Clear(color) => {
-                            let clear_stencil = color.stencil_clear_value();
-                            at_descriptor.setClearStencil(clear_stencil);
+                        crate::InitOp::Clear(clear_value) => {
+                            at_descriptor.setClearStencil(clear_value);
                             metal::MTLLoadAction::Clear
                         }
                         crate::InitOp::DontCare => metal::MTLLoadAction::DontCare,
                     };
-                    let store_action = match rt.finish_op {
+                    let store_action = match rt.stencil_finish_op {
                         crate::FinishOp::Store | crate::FinishOp::Ignore => {
                             metal::MTLStoreAction::Store
                         }
                         crate::FinishOp::Discard => metal::MTLStoreAction::DontCare,
-                        crate::FinishOp::ResolveTo(_) => panic!("Can't resolve stencil texture"),
+                        crate::FinishOp::ResolveTo {
+                            ref view,
+                            mode,
+                            store_original,
+                        } => {
+                            at_descriptor.setResolveTexture(Some(view.as_ref()));
+                            at_descriptor.setStencilResolveFilter(match mode {
+                                crate::ResolveMode::Average
+                                | crate::ResolveMode::Min
+                                | crate::ResolveMode::Max => {
+                                    panic!("'{mode:?}' not supported as stencil resolve filter")
+                                }
+
+                                crate::ResolveMode::Sample0 => {
+                                    objc2_metal::MTLMultisampleStencilResolveFilter::Sample0
+                                }
+                            });
+
+                            if store_original {
+                                metal::MTLStoreAction::StoreAndMultisampleResolve
+                            } else {
+                                metal::MTLStoreAction::MultisampleResolve
+                            }
+                        }
                     };
 
                     at_descriptor.setLoadAction(load_action);
