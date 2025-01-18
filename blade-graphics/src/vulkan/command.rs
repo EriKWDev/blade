@@ -158,61 +158,96 @@ fn make_buffer_image_copy(
     }
 }
 
-fn map_render_target(rt: &crate::RenderTarget) -> vk::RenderingAttachmentInfo<'static> {
-    let mut vk_info = vk::RenderingAttachmentInfo::default()
-        .image_view(rt.view.raw)
-        .image_layout(vk::ImageLayout::GENERAL);
+trait AsVkClear {
+    fn as_vk_clear(self, aspects: crate::TexelAspects) -> vk::ClearValue;
+}
+impl AsVkClear for crate::TextureColor {
+    fn as_vk_clear(self, aspects: crate::TexelAspects) -> vk::ClearValue {
+        let rgba = match self {
+            crate::TextureColor::OpaqueBlack => [0.0, 0.0, 0.0, 0.0],
+            crate::TextureColor::TransparentBlack => [0.0, 0.0, 0.0, 1.0],
+            crate::TextureColor::White => [1.0, 1.0, 1.0, 1.0],
+        };
 
-    match rt.init_op {
-        crate::InitOp::Load => vk_info = vk_info.load_op(vk::AttachmentLoadOp::LOAD),
-        crate::InitOp::DontCare => vk_info = vk_info.load_op(vk::AttachmentLoadOp::DONT_CARE),
-
-        crate::InitOp::Clear(color) => {
-            let cv = if rt.view.aspects.contains(crate::TexelAspects::COLOR) {
-                vk::ClearValue {
-                    color: match color {
-                        crate::TextureColor::TransparentBlack => {
-                            vk::ClearColorValue { float32: [0.0; 4] }
-                        }
-                        crate::TextureColor::OpaqueBlack => vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 1.0],
-                        },
-                        crate::TextureColor::White => vk::ClearColorValue { float32: [1.0; 4] },
-                    },
+        vk::ClearValue {
+            color: if aspects.contains(crate::TexelAspects::FLOAT) {
+                vk::ClearColorValue { float32: rgba }
+            } else if aspects.contains(crate::TexelAspects::INT) {
+                vk::ClearColorValue {
+                    int32: rgba.map(|c| c as i32),
                 }
             } else {
-                vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: color.depth_clear_value(),
-                        stencil: color.stencil_clear_value(),
-                    },
+                vk::ClearColorValue {
+                    uint32: rgba.map(|c| c as u32),
                 }
-            };
+            },
+        }
+    }
+}
+impl AsVkClear for u32 {
+    fn as_vk_clear(self, aspects: crate::TexelAspects) -> vk::ClearValue {
+        debug_assert!(aspects.contains(crate::TexelAspects::STENCIL));
+        vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                stencil: self,
+                depth: 0.0,
+            },
+        }
+    }
+}
+impl AsVkClear for f32 {
+    fn as_vk_clear(self, aspects: crate::TexelAspects) -> vk::ClearValue {
+        debug_assert!(aspects.contains(crate::TexelAspects::DEPTH));
+        vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                stencil: 0,
+                depth: self,
+            },
+        }
+    }
+}
 
-            vk_info = vk_info.load_op(vk::AttachmentLoadOp::CLEAR).clear_value(cv);
+fn map_render_target<V: AsVkClear>(
+    view: crate::TextureView,
+    init_op: crate::InitOp<V>,
+    finish_op: crate::FinishOp,
+) -> vk::RenderingAttachmentInfo<'static> {
+    let mut vk_info = vk::RenderingAttachmentInfo::default()
+        .image_view(view.raw)
+        .image_layout(vk::ImageLayout::GENERAL);
+
+    match init_op {
+        crate::InitOp::Load => vk_info = vk_info.load_op(vk::AttachmentLoadOp::LOAD),
+        crate::InitOp::DontCare => vk_info = vk_info.load_op(vk::AttachmentLoadOp::DONT_CARE),
+        crate::InitOp::Clear(color) => {
+            vk_info = vk_info
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .clear_value(color.as_vk_clear(view.aspects));
         }
     }
 
-    if let crate::FinishOp::ResolveTo(resolve_view) = rt.finish_op {
+    if let crate::FinishOp::ResolveTo { view, mode, .. } = finish_op {
         vk_info = vk_info
-            .resolve_image_view(resolve_view.raw)
+            .resolve_image_view(view.raw)
             .resolve_image_layout(vk::ImageLayout::GENERAL)
-            .resolve_mode(vk::ResolveModeFlags::AVERAGE);
+            .resolve_mode(match mode {
+                crate::ResolveMode::Average => vk::ResolveModeFlags::AVERAGE,
+                crate::ResolveMode::Sample0 => vk::ResolveModeFlags::SAMPLE_ZERO,
+                crate::ResolveMode::Min => vk::ResolveModeFlags::MIN,
+                crate::ResolveMode::Max => vk::ResolveModeFlags::MAX,
+            });
     }
 
-    vk_info.store_op = match rt.finish_op {
+    vk_info.store_op = match finish_op {
         crate::FinishOp::Store => vk::AttachmentStoreOp::STORE,
         crate::FinishOp::Discard => vk::AttachmentStoreOp::DONT_CARE,
         crate::FinishOp::Ignore => vk::AttachmentStoreOp::DONT_CARE,
-        crate::FinishOp::ResolveTo(..) => {
-            /*
-                TODO: DONT_CARE is most optimal in many cases where the msaa texture itself is never read afterwards but only the resolved,
-                      but how can the user specify this in blade?
-                      https://docs.vulkan.org/samples/latest/samples/performance/msaa/README.html#_best_practice_summary
-            */
-
-            // vk::AttachmentStoreOp::STORE
-            vk::AttachmentStoreOp::DONT_CARE
+        crate::FinishOp::ResolveTo { store_original, .. } => {
+            if store_original {
+                vk::AttachmentStoreOp::STORE
+            } else {
+                vk::AttachmentStoreOp::DONT_CARE
+            }
         }
     };
 
@@ -366,10 +401,12 @@ impl super::CommandEncoder {
 
         let mut target_size = [0u16; 2];
         let mut color_attachments = Vec::with_capacity(targets.colors.len());
-        let depth_stencil_attachment;
+        let depth_attachment;
+        let stencil_attachment;
+
         for rt in targets.colors {
             target_size = rt.view.target_size;
-            color_attachments.push(map_render_target(rt));
+            color_attachments.push(map_render_target(rt.view, rt.init_op, rt.finish_op));
         }
 
         let mut rendering_info = vk::RenderingInfoKHR::default()
@@ -378,12 +415,15 @@ impl super::CommandEncoder {
 
         if let Some(rt) = targets.depth_stencil {
             target_size = rt.view.target_size;
-            depth_stencil_attachment = map_render_target(&rt);
+
             if rt.view.aspects.contains(crate::TexelAspects::DEPTH) {
-                rendering_info = rendering_info.depth_attachment(&depth_stencil_attachment);
+                depth_attachment = map_render_target(rt.view, rt.depth_init_op, rt.depth_finish_op);
+                rendering_info = rendering_info.depth_attachment(&depth_attachment);
             }
             if rt.view.aspects.contains(crate::TexelAspects::STENCIL) {
-                rendering_info = rendering_info.stencil_attachment(&depth_stencil_attachment);
+                stencil_attachment =
+                    map_render_target(rt.view, rt.stencil_init_op, rt.stencil_finish_op);
+                rendering_info = rendering_info.stencil_attachment(&stencil_attachment);
             }
         }
 
