@@ -633,7 +633,18 @@ impl ShaderFunction<'_> {
             .entry_points
             .iter()
             .position(|ep| ep.name == self.entry_point)
-            .expect("Entry point not found in the shader")
+            .unwrap_or_else(|| {
+                panic!(
+                    "Entry point '{}' not found in the shader (available are: {:?})",
+                    self.entry_point,
+                    self.shader
+                        .module
+                        .entry_points
+                        .iter()
+                        .map(|e| e.name.clone())
+                        .collect::<Vec<_>>()
+                )
+            })
     }
 }
 
