@@ -1,5 +1,5 @@
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{self as metal, MTLDevice};
+use objc2_metal::{self as metal, MTLDevice, MTLTexture};
 use std::{
     marker::PhantomData,
     ptr,
@@ -40,7 +40,7 @@ impl Frame {
     pub fn texture_view(&self) -> TextureView {
         TextureView {
             raw: Retained::as_ptr(&self.texture) as *mut _,
-            aspects: crate::TexelAspects::COLOR,
+            format: map_pixel_format(self.texture.pixelFormat()),
         }
     }
 }
@@ -117,7 +117,7 @@ impl Texture {
 #[derive(Clone, Copy, Debug, Hash, PartialEq)]
 pub struct TextureView {
     raw: *mut ProtocolObject<dyn metal::MTLTexture>,
-    aspects: crate::TexelAspects,
+    format: crate::TextureFormat,
 }
 
 unsafe impl Send for TextureView {}
@@ -127,7 +127,7 @@ impl Default for TextureView {
     fn default() -> Self {
         Self {
             raw: ptr::null_mut(),
-            aspects: crate::TexelAspects::COLOR,
+            format: crate::TextureFormat::Rgba8Unorm,
         }
     }
 }
@@ -141,11 +141,11 @@ impl TextureView {
     /// Does not keep a reference, need not being destoryed.
     pub fn from_metal_texture(
         raw: &Retained<ProtocolObject<dyn metal::MTLTexture>>,
-        aspects: crate::TexelAspects,
+        format: crate::TextureFormat,
     ) -> Self {
         Self {
             raw: Retained::into_raw(raw.clone()),
-            aspects,
+            format,
         }
     }
 }
@@ -361,6 +361,52 @@ fn map_texture_format(format: crate::TextureFormat) -> metal::MTLPixelFormat {
         Tf::Rgb10a2Unorm => Mpf::RGB10A2Unorm,
         Tf::Rg11b10Ufloat => Mpf::RG11B10Float,
         Tf::Rgb9e5Ufloat => Mpf::RGB9E5Float,
+    }
+}
+
+fn map_pixel_format(format: metal::MTLPixelFormat) -> crate::TextureFormat {
+    use crate::TextureFormat as Tf;
+    use metal::MTLPixelFormat as Mpf;
+    match format {
+        Mpf::R8Unorm => Tf::R8Unorm,
+        Mpf::RG8Unorm => Tf::Rg8Unorm,
+        Mpf::RG8Snorm => Tf::Rg8Snorm,
+        Mpf::RGBA8Unorm => Tf::Rgba8Unorm,
+        Mpf::RGBA8Unorm_sRGB => Tf::Rgba8UnormSrgb,
+        Mpf::BGRA8Unorm => Tf::Bgra8Unorm,
+        Mpf::BGRA8Unorm_sRGB => Tf::Bgra8UnormSrgb,
+        Mpf::RGBA8Snorm => Tf::Rgba8Snorm,
+        Mpf::R16Float => Tf::R16Float,
+        Mpf::RG16Float => Tf::Rg16Float,
+        Mpf::RGBA16Float => Tf::Rgba16Float,
+        Mpf::R32Float => Tf::R32Float,
+        Mpf::RG32Float => Tf::Rg32Float,
+        Mpf::RGBA32Float => Tf::Rgba32Float,
+        Mpf::R32Uint => Tf::R32Uint,
+        Mpf::RG32Uint => Tf::Rg32Uint,
+        Mpf::RGBA32Uint => Tf::Rgba32Uint,
+        Mpf::Depth32Float => Tf::Depth32Float,
+        Mpf::Depth32Float_Stencil8 => Tf::Depth32FloatStencil8Uint,
+        Mpf::Stencil8 => Tf::Stencil8Uint,
+        Mpf::BC1_RGBA => Tf::Bc1Unorm,
+        Mpf::BC1_RGBA_sRGB => Tf::Bc1UnormSrgb,
+        Mpf::BC2_RGBA => Tf::Bc2Unorm,
+        Mpf::BC2_RGBA_sRGB => Tf::Bc2UnormSrgb,
+        Mpf::BC3_RGBA => Tf::Bc3Unorm,
+        Mpf::BC3_RGBA_sRGB => Tf::Bc3UnormSrgb,
+        Mpf::BC4_RUnorm => Tf::Bc4Unorm,
+        Mpf::BC4_RSnorm => Tf::Bc4Snorm,
+        Mpf::BC5_RGUnorm => Tf::Bc5Unorm,
+        Mpf::BC5_RGSnorm => Tf::Bc5Snorm,
+        Mpf::BC6H_RGBUfloat => Tf::Bc6hUfloat,
+        Mpf::BC6H_RGBFloat => Tf::Bc6hFloat,
+        Mpf::BC7_RGBAUnorm => Tf::Bc7Unorm,
+        Mpf::BC7_RGBAUnorm_sRGB => Tf::Bc7UnormSrgb,
+        Mpf::RGB10A2Unorm => Tf::Rgb10a2Unorm,
+        Mpf::RG11B10Float => Tf::Rg11b10Ufloat,
+        Mpf::RGB9E5Float => Tf::Rgb9e5Ufloat,
+
+        _ => unimplemented!(),
     }
 }
 

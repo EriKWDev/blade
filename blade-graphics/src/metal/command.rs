@@ -269,7 +269,9 @@ impl super::CommandEncoder {
             }
 
             if let Some(ref rt) = targets.depth_stencil {
-                if rt.view.aspects.contains(crate::TexelAspects::DEPTH) {
+                let aspects = rt.view.format.aspects();
+
+                if aspects.contains(crate::TexelAspects::DEPTH) {
                     let at_descriptor = descriptor.depthAttachment();
                     at_descriptor.setTexture(Some(rt.view.as_ref()));
                     let load_action = match rt.depth_init_op {
@@ -319,7 +321,7 @@ impl super::CommandEncoder {
                     at_descriptor.setStoreAction(store_action);
                 }
 
-                if rt.view.aspects.contains(crate::TexelAspects::STENCIL) {
+                if aspects.contains(crate::TexelAspects::STENCIL) {
                     let at_descriptor = descriptor.stencilAttachment();
                     at_descriptor.setTexture(Some(rt.view.as_ref()));
 
@@ -997,6 +999,12 @@ fn map_clear_color(color: crate::TextureColor) -> metal::MTLClearColor {
             green: 1.0,
             blue: 1.0,
             alpha: 1.0,
+        },
+        crate::TextureColor::RgbaFloat { rgba: [r, g, b, a] } => metal::MTLClearColor {
+            red: r as _,
+            green: g as _,
+            blue: b as _,
+            alpha: a as _,
         },
     }
 }
