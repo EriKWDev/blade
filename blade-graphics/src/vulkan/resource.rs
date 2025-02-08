@@ -537,7 +537,7 @@ fn map_border_color(border_color: crate::TextureColor) -> vk::BorderColor {
         crate::TextureColor::OpaqueBlack => vk::BorderColor::FLOAT_OPAQUE_BLACK,
         crate::TextureColor::White => vk::BorderColor::FLOAT_OPAQUE_WHITE,
 
-        crate::TextureColor::RgbaFloat { rgba } => {
+        crate::TextureColor::RgbaFloat { rgba: _ } => {
             panic!("TextureColor::RgbaFloat cannot be used for border_color")
         }
     }

@@ -80,6 +80,9 @@ fn map_border_color(color: crate::TextureColor) -> metal::MTLSamplerBorderColor 
         Tc::TransparentBlack => Msbc::TransparentBlack,
         Tc::OpaqueBlack => Msbc::OpaqueBlack,
         Tc::White => Msbc::OpaqueWhite,
+        Tc::RgbaFloat { rgba: _ } => {
+            panic!("TextureColor::RgbaFloat cannot be used for border_color")
+        }
     }
 }
 
@@ -306,7 +309,7 @@ impl crate::traits::ResourceDevice for super::Context {
         }
         super::TextureView {
             raw: Retained::into_raw(object),
-            aspects: desc.format.aspects(),
+            format: desc.format,
         }
     }
 
