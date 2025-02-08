@@ -191,8 +191,9 @@ impl super::CommandEncoder {
             }
         }
         if let Some(ref rt) = targets.depth_stencil {
-            let is_depth = rt.view.aspects.contains(crate::TexelAspects::DEPTH);
-            let is_stencil = rt.view.aspects.contains(crate::TexelAspects::STENCIL);
+            let aspects = rt.view.format.aspects();
+            let is_depth = aspects.contains(crate::TexelAspects::DEPTH);
+            let is_stencil = aspects.contains(crate::TexelAspects::STENCIL);
 
             let attachment = if is_depth && is_stencil {
                 glow::DEPTH_STENCIL_ATTACHMENT
@@ -240,12 +241,10 @@ impl super::CommandEncoder {
                 self.commands.push(super::Command::ClearColor {
                     draw_buffer: i as u32,
                     color,
-                    ty: if rt.view.aspects.contains(crate::TexelAspects::FLOAT) {
-                        super::ColorType::Float
-                    } else if rt.view.aspects.contains(crate::TexelAspects::INT) {
-                        super::ColorType::Sint
-                    } else {
-                        super::ColorType::Uint
+                    ty: match rt.view.format.texel_backing() {
+                        crate::util::TexelBacking::Float => super::ColorType::Float,
+                        crate::util::TexelBacking::UInt => super::ColorType::Uint,
+                        crate::util::TexelBacking::Int => super::ColorType::Sint,
                     },
                 });
             }
@@ -1024,6 +1023,7 @@ impl super::Command {
                     write_mask.contains(crate::ColorWrites::ALPHA),
                 );
             }
+
             Self::ClearColor {
                 draw_buffer,
                 color,
@@ -1037,6 +1037,7 @@ impl super::Command {
                             crate::TextureColor::TransparentBlack => [0.0; 4],
                             crate::TextureColor::OpaqueBlack => [0.0, 0.0, 0.0, 1.0],
                             crate::TextureColor::White => [1.0; 4],
+                            crate::TextureColor::RgbaFloat { rgba } => rgba,
                         },
                     );
                 }
@@ -1048,6 +1049,7 @@ impl super::Command {
                             crate::TextureColor::TransparentBlack => [0; 4],
                             crate::TextureColor::OpaqueBlack => [0, 0, 0, !0],
                             crate::TextureColor::White => [!0; 4],
+                            crate::TextureColor::RgbaFloat { rgba } => rgba.map(|v| v as _),
                         },
                     );
                 }
@@ -1059,6 +1061,7 @@ impl super::Command {
                             crate::TextureColor::TransparentBlack => [0; 4],
                             crate::TextureColor::OpaqueBlack => [0, 0, 0, !0],
                             crate::TextureColor::White => [!0; 4],
+                            crate::TextureColor::RgbaFloat { rgba } => rgba.map(|v| v as _),
                         },
                     );
                 }

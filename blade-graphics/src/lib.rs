@@ -356,11 +356,6 @@ bitflags::bitflags! {
         const COLOR   = 1 << 0;
         const DEPTH   = 1 << 1;
         const STENCIL = 1 << 2;
-
-        const FLOAT   = 1 << 3;
-        const UINT    = 1 << 4;
-        const INT     = 1 << 5;
-        const SRGB    = 1 << 6;
     }
 }
 
@@ -528,6 +523,16 @@ pub enum TextureColor {
     TransparentBlack,
     OpaqueBlack,
     White,
+
+    /// Clear a float texture to a specific color
+    ///
+    /// Some drivers have special fast paths for the colors above, so unless an arbitrary color
+    /// is specifically needed but a clear is still desired, the other options might be faster
+    ///
+    /// This also cannot be used for `border_color` in SamplerDesc
+    RgbaFloat {
+        rgba: [f32; 4],
+    },
 }
 
 #[derive(Debug, Default)]
