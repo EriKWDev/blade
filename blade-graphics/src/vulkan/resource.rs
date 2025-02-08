@@ -342,7 +342,7 @@ impl crate::traits::ResourceDevice for super::Context {
                 (texture.target_size[0] >> desc.subresources.base_mip_level).max(1),
                 (texture.target_size[1] >> desc.subresources.base_mip_level).max(1),
             ],
-            aspects,
+            format: desc.format,
         }
     }
 
@@ -536,5 +536,9 @@ fn map_border_color(border_color: crate::TextureColor) -> vk::BorderColor {
         crate::TextureColor::TransparentBlack => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
         crate::TextureColor::OpaqueBlack => vk::BorderColor::FLOAT_OPAQUE_BLACK,
         crate::TextureColor::White => vk::BorderColor::FLOAT_OPAQUE_WHITE,
+
+        crate::TextureColor::RgbaFloat { rgba } => {
+            panic!("TextureColor::RgbaFloat cannot be used for border_color")
+        }
     }
 }
