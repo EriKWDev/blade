@@ -159,34 +159,40 @@ fn make_buffer_image_copy(
 }
 
 trait AsVkClear {
-    fn as_vk_clear(self, aspects: crate::TexelAspects) -> vk::ClearValue;
+    fn as_vk_clear(self, format: crate::TextureFormat) -> vk::ClearValue;
 }
 impl AsVkClear for crate::TextureColor {
-    fn as_vk_clear(self, aspects: crate::TexelAspects) -> vk::ClearValue {
+    fn as_vk_clear(self, format: crate::TextureFormat) -> vk::ClearValue {
+        let backing = format.texel_backing();
+
         let rgba = match self {
             crate::TextureColor::OpaqueBlack => [0.0, 0.0, 0.0, 0.0],
             crate::TextureColor::TransparentBlack => [0.0, 0.0, 0.0, 1.0],
             crate::TextureColor::White => [1.0, 1.0, 1.0, 1.0],
+            crate::TextureColor::RgbaFloat { rgba } => {
+                if backing != crate::util::TexelBacking::Float {
+                    log::warn!("TextureColor::RgbaFloat used for texture with non-float format '{format:?}'");
+                }
+
+                rgba
+            }
         };
 
         vk::ClearValue {
-            color: if aspects.contains(crate::TexelAspects::FLOAT) {
-                vk::ClearColorValue { float32: rgba }
-            } else if aspects.contains(crate::TexelAspects::INT) {
-                vk::ClearColorValue {
+            color: match backing {
+                crate::util::TexelBacking::Int => vk::ClearColorValue {
                     int32: rgba.map(|c| c as i32),
-                }
-            } else {
-                vk::ClearColorValue {
+                },
+                crate::util::TexelBacking::UInt => vk::ClearColorValue {
                     uint32: rgba.map(|c| c as u32),
-                }
+                },
+                crate::util::TexelBacking::Float => vk::ClearColorValue { float32: rgba },
             },
         }
     }
 }
 impl AsVkClear for u32 {
-    fn as_vk_clear(self, aspects: crate::TexelAspects) -> vk::ClearValue {
-        debug_assert!(aspects.contains(crate::TexelAspects::STENCIL));
+    fn as_vk_clear(self, _format: crate::TextureFormat) -> vk::ClearValue {
         vk::ClearValue {
             depth_stencil: vk::ClearDepthStencilValue {
                 stencil: self,
@@ -196,8 +202,7 @@ impl AsVkClear for u32 {
     }
 }
 impl AsVkClear for f32 {
-    fn as_vk_clear(self, aspects: crate::TexelAspects) -> vk::ClearValue {
-        debug_assert!(aspects.contains(crate::TexelAspects::DEPTH));
+    fn as_vk_clear(self, _format: crate::TextureFormat) -> vk::ClearValue {
         vk::ClearValue {
             depth_stencil: vk::ClearDepthStencilValue {
                 stencil: 0,
@@ -222,7 +227,7 @@ fn map_render_target<V: AsVkClear>(
         crate::InitOp::Clear(color) => {
             vk_info = vk_info
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                .clear_value(color.as_vk_clear(view.aspects));
+                .clear_value(color.as_vk_clear(view.format));
         }
     }
 
@@ -415,12 +420,13 @@ impl super::CommandEncoder {
 
         if let Some(rt) = targets.depth_stencil {
             target_size = rt.view.target_size;
+            let aspects = rt.view.format.aspects();
 
-            if rt.view.aspects.contains(crate::TexelAspects::DEPTH) {
+            if aspects.contains(crate::TexelAspects::DEPTH) {
                 depth_attachment = map_render_target(rt.view, rt.depth_init_op, rt.depth_finish_op);
                 rendering_info = rendering_info.depth_attachment(&depth_attachment);
             }
-            if rt.view.aspects.contains(crate::TexelAspects::STENCIL) {
+            if aspects.contains(crate::TexelAspects::STENCIL) {
                 stencil_attachment =
                     map_render_target(rt.view, rt.stencil_init_op, rt.stencil_finish_op);
                 rendering_info = rendering_info.stencil_attachment(&stencil_attachment);

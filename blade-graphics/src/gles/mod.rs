@@ -96,7 +96,7 @@ pub struct Texture {
 pub struct TextureView {
     inner: TextureInner,
     target_size: [u16; 2],
-    aspects: crate::TexelAspects,
+    format: crate::TextureFormat,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq)]
@@ -158,7 +158,7 @@ impl Frame {
         TextureView {
             inner: self.texture.inner,
             target_size: self.texture.target_size,
-            aspects: crate::TexelAspects::COLOR,
+            format: self.texture.format,
         }
     }
 }

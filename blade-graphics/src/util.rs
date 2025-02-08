@@ -107,13 +107,15 @@ impl super::TextureFormat {
     }
 
     pub const fn aspects(&self) -> super::TexelAspects {
-        let mut aspects = super::TexelAspects::empty();
-        aspects = aspects.union(self.depth_stencil_color());
-        aspects = aspects.union(self.float_int_uint());
-        if self.is_srgb() {
-            aspects = aspects.union(super::TexelAspects::SRGB)
+        match *self {
+            Self::Depth32Float => super::TexelAspects::DEPTH,
+            Self::Depth32FloatStencil8Uint => {
+                super::TexelAspects::DEPTH.union(super::TexelAspects::STENCIL)
+            }
+            Self::Stencil8Uint => super::TexelAspects::STENCIL,
+
+            _ => super::TexelAspects::COLOR,
         }
-        aspects
     }
 
     pub const fn is_srgb(&self) -> bool {
@@ -171,8 +173,7 @@ impl super::TextureFormat {
         }
     }
 
-
-    const fn float_int_uint(&self) -> super::TexelAspects {
+    pub const fn texel_backing(&self) -> TexelBacking {
         match *self {
             crate::TextureFormat::Rg8Snorm
             | crate::TextureFormat::Rgba8Snorm
@@ -181,7 +182,7 @@ impl super::TextureFormat {
             | crate::TextureFormat::Rgba32Uint
             | crate::TextureFormat::Stencil8Uint
             | crate::TextureFormat::Bc4Snorm
-            | crate::TextureFormat::Bc5Snorm => super::TexelAspects::INT,
+            | crate::TextureFormat::Bc5Snorm => TexelBacking::Int,
 
             crate::TextureFormat::R8Unorm
             | crate::TextureFormat::Rg8Unorm
@@ -198,7 +199,7 @@ impl super::TextureFormat {
             | crate::TextureFormat::Bc4Unorm
             | crate::TextureFormat::Bc5Unorm
             | crate::TextureFormat::Bc7Unorm
-            | crate::TextureFormat::Bc7UnormSrgb => super::TexelAspects::UINT,
+            | crate::TextureFormat::Bc7UnormSrgb => TexelBacking::UInt,
 
             crate::TextureFormat::R16Float
             | crate::TextureFormat::Rg16Float
@@ -212,7 +213,7 @@ impl super::TextureFormat {
             | crate::TextureFormat::Bc6hFloat
             | crate::TextureFormat::Rgb10a2Unorm
             | crate::TextureFormat::Rg11b10Ufloat
-            | crate::TextureFormat::Rgb9e5Ufloat => super::TexelAspects::FLOAT,
+            | crate::TextureFormat::Rgb9e5Ufloat => TexelBacking::Float,
         }
     }
 }
@@ -233,6 +234,13 @@ impl super::TextureColor {
             crate::TextureColor::White => 1.0,
         }
     }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Hash)]
+pub enum TexelBacking {
+    Int,
+    UInt,
+    Float,
 }
 
 impl super::ComputePipeline {
