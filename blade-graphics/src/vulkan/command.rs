@@ -180,12 +180,31 @@ impl AsVkClear for crate::TextureColor {
 
         vk::ClearValue {
             color: match backing {
-                crate::util::TexelBacking::Int => vk::ClearColorValue {
-                    int32: rgba.map(|c| c as i32),
-                },
-                crate::util::TexelBacking::UInt => vk::ClearColorValue {
-                    uint32: rgba.map(|c| c as u32),
-                },
+                crate::util::TexelBacking::Int | crate::util::TexelBacking::UInt => {
+                    let max: f32 = match format {
+                        crate::TextureFormat::R8Unorm
+                        | crate::TextureFormat::Rg8Unorm
+                        | crate::TextureFormat::Rg8Snorm
+                        | crate::TextureFormat::Rgba8Unorm
+                        | crate::TextureFormat::Rgba8UnormSrgb
+                        | crate::TextureFormat::Bgra8Unorm
+                        | crate::TextureFormat::Bgra8UnormSrgb
+                        | crate::TextureFormat::Rgba8Snorm => u8::MAX as f32,
+
+                        _ => u32::MAX as _,
+                    };
+
+                    match backing {
+                        crate::util::TexelBacking::Int => vk::ClearColorValue {
+                            int32: rgba.map(|c| (c * max) as i32),
+                        },
+                        crate::util::TexelBacking::UInt => vk::ClearColorValue {
+                            uint32: rgba.map(|c| (c * max) as u32),
+                        },
+
+                        _ => unreachable!(),
+                    }
+                }
                 crate::util::TexelBacking::Float => vk::ClearColorValue { float32: rgba },
             },
         }
