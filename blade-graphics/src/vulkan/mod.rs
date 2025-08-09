@@ -30,6 +30,7 @@ struct Instance {
 #[derive(Clone)]
 struct RayTracingDevice {
     acceleration_structure: khr::acceleration_structure::Device,
+    scratch_buffer_alignment: u64,
 }
 
 #[derive(Clone, Default)]
@@ -154,6 +155,7 @@ pub struct Context {
     physical_device: vk::PhysicalDevice,
     naga_flags: naga::back::spv::WriterFlags,
     shader_debug_path: Option<PathBuf>,
+    min_buffer_alignment: u64,
     instance: Instance,
     entry: ash::Entry,
 }

@@ -312,7 +312,8 @@ impl crate::traits::ResourceDevice for super::Context {
         }
 
         let raw = unsafe { self.device.core.create_buffer(&vk_info, None).unwrap() };
-        let requirements = unsafe { self.device.core.get_buffer_memory_requirements(raw) };
+        let mut requirements = unsafe { self.device.core.get_buffer_memory_requirements(raw) };
+        requirements.alignment = requirements.alignment.max(self.min_buffer_alignment);
         let allocation = self.allocate_memory(requirements, desc.memory);
 
         log::info!(
@@ -685,12 +686,12 @@ fn fetch_external_source(
     device: &super::Device,
     allocation: Allocation,
 ) -> Option<crate::ExternalMemorySource> {
-    let device = device
-        .external_memory
-        .as_ref()
-        .expect("External memory is not supported");
     match allocation.memory_type {
         crate::Memory::External(e) => {
+            let device = device
+                .external_memory
+                .as_ref()
+                .expect("External memory is not supported");
             let memory = allocation.memory;
             let handle_type = external_source_handle_type(e);
 
