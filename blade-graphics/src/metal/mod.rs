@@ -574,10 +574,14 @@ impl Context {
             } else {
                 crate::ShaderVisibility::empty()
             },
+
             sample_count_mask: (0u32..7)
                 .map(|v| 1 << v)
                 .filter(|&count| device.supportsTextureSampleCount(count as _))
                 .sum(),
+
+            multidraw_indirect: true,
+            draw_indexed_indirect_count: false,
         }
     }
 

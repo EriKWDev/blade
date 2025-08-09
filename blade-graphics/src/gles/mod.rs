@@ -446,6 +446,8 @@ impl Context {
         crate::Capabilities {
             ray_query: crate::ShaderVisibility::empty(),
             sample_count_mask: 0x1 | 0x4, //TODO: accurate info
+            multidraw_indirect: false,
+            draw_indexed_indirect_count: false,
         }
     }
 

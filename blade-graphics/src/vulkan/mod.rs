@@ -66,6 +66,7 @@ struct Device {
     command_scope: Option<CommandScopeDevice>,
     timing: Option<TimingDevice>,
     workarounds: Workarounds,
+    supports_multidraw_indirect: bool,
 }
 
 struct MemoryManager {
