@@ -67,6 +67,7 @@ struct Device {
     timing: Option<TimingDevice>,
     workarounds: Workarounds,
     supports_multidraw_indirect: bool,
+    supports_draw_indirect_count: bool,
 }
 
 struct MemoryManager {
