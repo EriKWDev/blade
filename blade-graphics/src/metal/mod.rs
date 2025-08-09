@@ -573,6 +573,8 @@ impl Context {
             } else {
                 crate::ShaderVisibility::empty()
             },
+            multidraw_indirect: true,
+            draw_indexed_indirect_count: false,
         }
     }
 

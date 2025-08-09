@@ -445,6 +445,8 @@ impl Context {
     pub fn capabilities(&self) -> crate::Capabilities {
         crate::Capabilities {
             ray_query: crate::ShaderVisibility::empty(),
+            multidraw_indirect: false,
+            draw_indexed_indirect_count: false,
         }
     }
 

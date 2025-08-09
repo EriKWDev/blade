@@ -1111,14 +1111,14 @@ impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_, '_> {
         }
     }
 
-    fn draw_indirect(&mut self, indirect_buf: crate::BufferPiece) {
+    fn draw_indirect(&mut self, indirect_buf: crate::BufferPiece, draw_count: u32) {
         unsafe {
             self.device.core.cmd_draw_indirect(
                 self.cmd_buf.raw,
                 indirect_buf.buffer.raw,
                 indirect_buf.offset,
-                1,
-                0,
+                draw_count,
+                size_of::<crate::util::DrawIndirectArgs>() as u32,
             );
         }
     }
@@ -1128,8 +1128,10 @@ impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_, '_> {
         index_buf: crate::BufferPiece,
         index_type: crate::IndexType,
         indirect_buf: crate::BufferPiece,
+        draw_count: u32,
     ) {
         let raw_index_type = super::map_index_type(index_type);
+
         unsafe {
             self.device.core.cmd_bind_index_buffer(
                 self.cmd_buf.raw,
@@ -1141,8 +1143,37 @@ impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_, '_> {
                 self.cmd_buf.raw,
                 indirect_buf.buffer.raw,
                 indirect_buf.offset,
-                1,
-                0,
+                draw_count,
+                size_of::<crate::util::DrawIndexedIndirectArgs>() as u32,
+            );
+        }
+    }
+
+    fn draw_indexed_indirect_count(
+        &mut self,
+        index_buf: crate::BufferPiece,
+        index_type: crate::IndexType,
+        indirect_buf: crate::BufferPiece,
+        count_buf: crate::BufferPiece,
+        max_draw_count: u32,
+    ) {
+        let raw_index_type = super::map_index_type(index_type);
+
+        unsafe {
+            self.device.core.cmd_bind_index_buffer(
+                self.cmd_buf.raw,
+                index_buf.buffer.raw,
+                index_buf.offset,
+                raw_index_type,
+            );
+            self.device.core.cmd_draw_indexed_indirect_count(
+                self.cmd_buf.raw,
+                indirect_buf.buffer.raw,
+                indirect_buf.offset,
+                count_buf.buffer.raw,
+                count_buf.offset,
+                max_draw_count,
+                size_of::<crate::util::DrawIndexedIndirectArgs>() as u32,
             );
         }
     }

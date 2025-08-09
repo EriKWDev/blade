@@ -124,6 +124,12 @@ impl From<PlatformError> for NotSupportedError {
 pub struct Capabilities {
     /// Which shader stages support ray queries
     pub ray_query: ShaderVisibility,
+
+    /// If multidraw indirect is supported (supports draw_count other than 0 or 1 in indirect rendering)
+    pub multidraw_indirect: bool,
+
+    /// If draw_indexed_indirect_count is supported
+    pub draw_indexed_indirect_count: bool,
 }
 
 #[derive(Clone, Debug, Default)]

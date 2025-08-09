@@ -51,6 +51,7 @@ struct AdapterCapabilities {
     external_memory: bool,
     timing: bool,
     bugs: SystemBugs,
+    multidraw_indirect: bool,
 }
 
 // See https://github.com/canonical/nvidia-prime/blob/587c5012be9dddcc17ab4d958f10a24fa3342b4d/prime-select#L56
@@ -150,6 +151,7 @@ unsafe fn inspect_adapter(
         vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
     let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
     let mut features2_khr = vk::PhysicalDeviceFeatures2::default()
+        .features(vk::PhysicalDeviceFeatures::default().multi_draw_indirect(true))
         .push_next(&mut inline_uniform_block_features)
         .push_next(&mut timeline_semaphore_features)
         .push_next(&mut dynamic_rendering_features)
@@ -160,6 +162,8 @@ unsafe fn inspect_adapter(
     instance
         .get_physical_device_properties2
         .get_physical_device_features2(phd, &mut features2_khr);
+
+    let multidraw_indirect = features2_khr.features.multi_draw_indirect == vk::TRUE;
 
     if inline_uniform_block_properties.max_inline_uniform_block_size
         < crate::limits::PLAIN_DATA_SIZE
@@ -281,6 +285,7 @@ unsafe fn inspect_adapter(
         external_memory,
         timing,
         bugs,
+        multidraw_indirect,
     })
 }
 
@@ -497,7 +502,15 @@ impl super::Context {
                 dynamic_rendering: vk::TRUE,
                 ..Default::default()
             };
+
+            let mut features = vk::PhysicalDeviceFeatures::default();
+
+            if capabilities.multidraw_indirect {
+                features = features.multi_draw_indirect(true);
+            }
+
             let mut device_create_info = vk::DeviceCreateInfo::default()
+                .enabled_features(&features)
                 .queue_create_infos(&family_infos)
                 .enabled_extension_names(&str_pointers)
                 .push_next(&mut ext_inline_uniform_block)
@@ -624,6 +637,7 @@ impl super::Context {
                     vk::DescriptorPoolCreateFlags::empty()
                 },
             },
+            supports_multidraw_indirect: capabilities.multidraw_indirect,
         };
 
         let memory_manager = {
@@ -761,6 +775,8 @@ impl super::Context {
                 Some(_) => crate::ShaderVisibility::all(),
                 None => crate::ShaderVisibility::empty(),
             },
+            multidraw_indirect: self.device.supports_multidraw_indirect,
+            draw_indexed_indirect_count: true, // supported since vulkan 1.2, we need 1.3
         }
     }
 

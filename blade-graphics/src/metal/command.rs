@@ -927,14 +927,18 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
         }
     }
 
-    fn draw_indirect(&mut self, indirect_buf: crate::BufferPiece) {
-        unsafe {
-            self.encoder
-                .drawPrimitives_indirectBuffer_indirectBufferOffset(
-                    self.primitive_type,
-                    indirect_buf.buffer.as_ref(),
-                    indirect_buf.offset as usize,
-                );
+    fn draw_indirect(&mut self, indirect_buf: crate::BufferPiece, draw_count: u32) {
+        let mut offset = indirect_buf.offset as usize;
+        for _ in 0..draw_count {
+            unsafe {
+                self.encoder
+                    .drawPrimitives_indirectBuffer_indirectBufferOffset(
+                        self.primitive_type,
+                        indirect_buf.buffer.as_ref(),
+                        offset,
+                    );
+            }
+            offset += size_of::<crate::util::DrawIndirectArgs>();
         }
     }
 
@@ -943,18 +947,35 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
         index_buf: crate::BufferPiece,
         index_type: crate::IndexType,
         indirect_buf: crate::BufferPiece,
+        draw_count: u32,
     ) {
         let raw_index_type = super::map_index_type(index_type);
-        unsafe {
-            self.encoder.drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
-            self.primitive_type,
-            raw_index_type,
-            index_buf.buffer.as_ref(),
-            index_buf.offset as usize,
-            indirect_buf.buffer.as_ref(),
-            indirect_buf.offset as usize,
-        );
+
+        let mut offset = indirect_buf.offset as usize;
+        for _ in 0..draw_count {
+            unsafe {
+                self.encoder.drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
+                    self.primitive_type,
+                    raw_index_type,
+                    index_buf.buffer.as_ref(),
+                    index_buf.offset as usize,
+                    indirect_buf.buffer.as_ref(),
+                    offset,
+                );
+            }
+            offset += size_of::<crate::util::DrawIndexedIndirectArgs>();
         }
+    }
+
+    fn draw_indexed_indirect_count(
+        &mut self,
+        _index_buf: crate::BufferPiece,
+        _index_type: crate::IndexType,
+        _indirect_buf: crate::BufferPiece,
+        _count_buf: crate::BufferPiece,
+        _max_draw_count: u32,
+    ) {
+        unimplemented!()
     }
 }
 

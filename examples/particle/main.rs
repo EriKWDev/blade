@@ -240,9 +240,9 @@ impl Example {
                                 view: frame_view,
                                 mode: gpu::ResolveMode::Average,
                                 store_original: false,
-                            },
-                        }
-                    ],
+                            }
+                        },
+                    }],
                     depth_stencil: None,
                 },
             ) {
