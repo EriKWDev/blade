@@ -13,7 +13,10 @@ struct CompiledShader<'a> {
 }
 
 impl super::Context {
-    fn make_spv_options(&self, data_layouts: &[&crate::ShaderDataLayout]) -> spv::Options {
+    fn make_spv_options<'a>(
+        &'a self,
+        data_layouts: &[&crate::ShaderDataLayout],
+    ) -> spv::Options<'a> {
         // collect all the array bindings into overrides
         let mut binding_map = spv::BindingMap::default();
         for (group_index, layout) in data_layouts.iter().enumerate() {
@@ -53,14 +56,14 @@ impl super::Context {
         }
     }
 
-    fn load_shader(
-        &self,
+    fn load_shader<'a>(
+        &'a self,
         sf: crate::ShaderFunction,
         naga_options_base: &spv::Options,
         group_layouts: &[&crate::ShaderDataLayout],
         group_infos: &mut [crate::ShaderDataInfo],
         vertex_fetch_states: &[crate::VertexFetchState],
-    ) -> CompiledShader {
+    ) -> CompiledShader<'a> {
         let ep_index = sf.entry_point_index();
         let ep = &sf.shader.module.entry_points[ep_index];
         let ep_info = sf.shader.info.get_entry_point(ep_index);
@@ -89,14 +92,14 @@ impl super::Context {
             };
             let mut hasher = DefaultHasher::new();
             sf.shader.source.hash(&mut hasher);
-            file_path = temp_dir.join(format!("{}-{:x}.wgsl", sf.entry_point, hasher.finish()));
-            log::debug!("Dumping processed shader code to: {}", file_path.display());
+            let fp = temp_dir.join(format!("{}-{:x}.wgsl", sf.entry_point, hasher.finish()));
+            file_path = fp.to_string_lossy().to_string();
+            log::debug!("Dumping processed shader code to: {}", file_path);
             let _ = fs::write(&file_path, &sf.shader.source);
-
             naga_options_debug = naga_options_base.clone();
             naga_options_debug.debug_info = Some(naga::back::spv::DebugInfo {
                 source_code: &sf.shader.source,
-                file_name: &file_path,
+                file_name: file_path.as_str().into(),
                 //TODO: switch to WGSL once NSight Graphics recognizes it
                 language: naga::back::spv::SourceLanguage::GLSL,
             });
