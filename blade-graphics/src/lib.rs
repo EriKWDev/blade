@@ -124,6 +124,12 @@ impl From<PlatformError> for NotSupportedError {
 pub struct Capabilities {
     /// Which shader stages support ray queries
     pub ray_query: ShaderVisibility,
+
+    /// If multidraw indirect is supported (supports draw_count other than 0 or 1 in indirect rendering)
+    pub multidraw_indirect: bool,
+
+    /// If draw_indexed_indirect_count is supported
+    pub draw_indexed_indirect_count: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -350,11 +356,12 @@ pub struct TexelBlockInfo {
 }
 
 bitflags::bitflags! {
+    #[rustfmt::skip]
     #[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq)]
     pub struct TexelAspects: u8 {
-        const COLOR = 0x1;
-        const DEPTH = 0x2;
-        const STENCIL = 0x4;
+        const COLOR   = 1 << 0;
+        const DEPTH   = 1 << 1;
+        const STENCIL = 1 << 2;
     }
 }
 
@@ -522,6 +529,16 @@ pub enum TextureColor {
     TransparentBlack,
     OpaqueBlack,
     White,
+
+    /// Clear a float texture to a specific color
+    ///
+    /// Some drivers have special fast paths for the colors above, so unless an arbitrary color
+    /// is specifically needed but a clear is still desired, the other options might be faster
+    ///
+    /// This also cannot be used for `border_color` in SamplerDesc
+    RgbaFloat {
+        rgba: [f32; 4],
+    },
 }
 
 #[derive(Debug, Default)]
@@ -627,7 +644,18 @@ impl ShaderFunction<'_> {
             .entry_points
             .iter()
             .position(|ep| ep.name == self.entry_point)
-            .expect("Entry point not found in the shader")
+            .unwrap_or_else(|| {
+                panic!(
+                    "Entry point '{}' not found in the shader (available are: {:?})",
+                    self.entry_point,
+                    self.shader
+                        .module
+                        .entry_points
+                        .iter()
+                        .map(|e| e.name.clone())
+                        .collect::<Vec<_>>()
+                )
+            })
     }
 }
 
@@ -1086,9 +1114,29 @@ impl Default for MultisampleState {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum InitOp {
+pub struct RenderTarget {
+    pub view: TextureView,
+    pub init_op: InitOp<TextureColor>,
+    pub finish_op: FinishOp,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DepthStencilRenderTarget {
+    pub view: TextureView,
+
+    /// only applied if view has the DEPTH aspect
+    pub depth_init_op: InitOp<f32>,
+    pub depth_finish_op: FinishOp,
+
+    /// only applied if view has the STENCIL aspect
+    pub stencil_init_op: InitOp<u32>,
+    pub stencil_finish_op: FinishOp,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum InitOp<V> {
     Load,
-    Clear(TextureColor),
+    Clear(V),
     DontCare,
 }
 
@@ -1096,23 +1144,38 @@ pub enum InitOp {
 pub enum FinishOp {
     Store,
     Discard,
-    /// The texture specified here will be stored but it is undefined what
-    /// happens to the original render target
-    ResolveTo(TextureView),
-    Ignore,
-}
+    ResolveTo {
+        view: TextureView,
 
-#[derive(Debug)]
-pub struct RenderTarget {
-    pub view: TextureView,
-    pub init_op: InitOp,
-    pub finish_op: FinishOp,
+        /// ResolveMode::Average is 'color msaa resolve', and 'ResolveMode::Sample0' is
+        /// normal 'depth/stencil msaa resolve'
+        ///
+        /// Other modes are only supported if requested or if on vulkan version >= 1.2
+        mode: ResolveMode,
+
+        // Unless you explicitly require the underlying msaa texture after this resolve to keep
+        // the samples, it can often be more efficient to leave this 'false'
+        store_original: bool,
+    },
+    Ignore,
 }
 
 #[derive(Debug)]
 pub struct RenderTargetSet<'a> {
     pub colors: &'a [RenderTarget],
-    pub depth_stencil: Option<RenderTarget>,
+    pub depth_stencil: Option<DepthStencilRenderTarget>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolveMode {
+    /// Default for MSAA color resolve
+    Average,
+
+    /// Default for depth/stencil resolve
+    Sample0,
+
+    Min,
+    Max,
 }
 
 /// Mechanism used to acquire frames and display them on screen.

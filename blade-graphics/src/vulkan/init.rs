@@ -51,6 +51,8 @@ struct AdapterCapabilities {
     external_memory: bool,
     timing: bool,
     bugs: SystemBugs,
+    multidraw_indirect: bool,
+    draw_indirect_count: bool,
 }
 
 // See https://github.com/canonical/nvidia-prime/blob/587c5012be9dddcc17ab4d958f10a24fa3342b4d/prime-select#L56
@@ -113,6 +115,7 @@ unsafe fn inspect_adapter(
         .iter()
         .map(|ext_prop| ffi::CStr::from_ptr(ext_prop.extension_name.as_ptr()))
         .collect::<Vec<_>>();
+
     for extension in REQUIRED_DEVICE_EXTENSIONS {
         if !supported_extensions.contains(extension) {
             log::warn!(
@@ -122,6 +125,8 @@ unsafe fn inspect_adapter(
             return None;
         }
     }
+
+    let draw_indirect_count = supported_extensions.contains(&vk::AMD_DRAW_INDIRECT_COUNT_NAME);
 
     let bugs = SystemBugs {
         //Note: this is somewhat broad across X11/Wayland and different drivers.
@@ -160,6 +165,8 @@ unsafe fn inspect_adapter(
     instance
         .get_physical_device_properties2
         .get_physical_device_features2(phd, &mut features2_khr);
+
+    let multidraw_indirect = features2_khr.features.multi_draw_indirect == vk::TRUE;
 
     if inline_uniform_block_properties.max_inline_uniform_block_size
         < crate::limits::PLAIN_DATA_SIZE
@@ -281,6 +288,8 @@ unsafe fn inspect_adapter(
         external_memory,
         timing,
         bugs,
+        multidraw_indirect,
+        draw_indirect_count,
     })
 }
 
@@ -479,6 +488,9 @@ impl super::Context {
                 #[cfg(not(target_os = "windows"))]
                 device_extensions.push(vk::KHR_EXTERNAL_MEMORY_FD_NAME);
             }
+            if capabilities.draw_indirect_count {
+                device_extensions.push(vk::KHR_DRAW_INDIRECT_COUNT_NAME);
+            }
 
             let str_pointers = device_extensions
                 .iter()
@@ -497,7 +509,15 @@ impl super::Context {
                 dynamic_rendering: vk::TRUE,
                 ..Default::default()
             };
+
+            let mut features = vk::PhysicalDeviceFeatures::default();
+
+            if capabilities.multidraw_indirect {
+                features = features.multi_draw_indirect(true);
+            }
+
             let mut device_create_info = vk::DeviceCreateInfo::default()
+                .enabled_features(&features)
                 .queue_create_infos(&family_infos)
                 .enabled_extension_names(&str_pointers)
                 .push_next(&mut ext_inline_uniform_block)
@@ -624,6 +644,8 @@ impl super::Context {
                     vk::DescriptorPoolCreateFlags::empty()
                 },
             },
+            supports_multidraw_indirect: capabilities.multidraw_indirect,
+            supports_draw_indirect_count: capabilities.draw_indirect_count,
         };
 
         let memory_manager = {
@@ -761,6 +783,8 @@ impl super::Context {
                 Some(_) => crate::ShaderVisibility::all(),
                 None => crate::ShaderVisibility::empty(),
             },
+            multidraw_indirect: self.device.supports_multidraw_indirect,
+            draw_indexed_indirect_count: self.device.supports_draw_indirect_count,
         }
     }
 

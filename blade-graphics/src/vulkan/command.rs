@@ -158,61 +158,120 @@ fn make_buffer_image_copy(
     }
 }
 
-fn map_render_target(rt: &crate::RenderTarget) -> vk::RenderingAttachmentInfo<'static> {
+trait AsVkClear {
+    fn as_vk_clear(self, format: crate::TextureFormat) -> vk::ClearValue;
+}
+impl AsVkClear for crate::TextureColor {
+    fn as_vk_clear(self, format: crate::TextureFormat) -> vk::ClearValue {
+        let backing = format.texel_backing();
+
+        let rgba = match self {
+            crate::TextureColor::OpaqueBlack => [0.0, 0.0, 0.0, 0.0],
+            crate::TextureColor::TransparentBlack => [0.0, 0.0, 0.0, 1.0],
+            crate::TextureColor::White => [1.0, 1.0, 1.0, 1.0],
+            crate::TextureColor::RgbaFloat { rgba } => {
+                if backing != crate::util::TexelBacking::Float {
+                    log::warn!("TextureColor::RgbaFloat used for texture with non-float format '{format:?}'");
+                }
+
+                rgba
+            }
+        };
+
+        vk::ClearValue {
+            color: match backing {
+                crate::util::TexelBacking::Int | crate::util::TexelBacking::UInt => {
+                    let max: f32 = match format {
+                        crate::TextureFormat::R8Unorm
+                        | crate::TextureFormat::Rg8Unorm
+                        | crate::TextureFormat::Rg8Snorm
+                        | crate::TextureFormat::Rgba8Unorm
+                        | crate::TextureFormat::Rgba8UnormSrgb
+                        | crate::TextureFormat::Bgra8Unorm
+                        | crate::TextureFormat::Bgra8UnormSrgb
+                        | crate::TextureFormat::Rgba8Snorm => u8::MAX as f32,
+
+                        _ => u32::MAX as _,
+                    };
+
+                    match backing {
+                        crate::util::TexelBacking::Int => vk::ClearColorValue {
+                            int32: rgba.map(|c| (c * max) as i32),
+                        },
+                        crate::util::TexelBacking::UInt => vk::ClearColorValue {
+                            uint32: rgba.map(|c| (c * max) as u32),
+                        },
+
+                        _ => unreachable!(),
+                    }
+                }
+                crate::util::TexelBacking::Float => vk::ClearColorValue { float32: rgba },
+            },
+        }
+    }
+}
+impl AsVkClear for u32 {
+    fn as_vk_clear(self, _format: crate::TextureFormat) -> vk::ClearValue {
+        vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                stencil: self,
+                depth: 0.0,
+            },
+        }
+    }
+}
+impl AsVkClear for f32 {
+    fn as_vk_clear(self, _format: crate::TextureFormat) -> vk::ClearValue {
+        vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                stencil: 0,
+                depth: self,
+            },
+        }
+    }
+}
+
+fn map_render_target<V: AsVkClear>(
+    view: crate::TextureView,
+    init_op: crate::InitOp<V>,
+    finish_op: crate::FinishOp,
+) -> vk::RenderingAttachmentInfo<'static> {
     let mut vk_info = vk::RenderingAttachmentInfo::default()
-        .image_view(rt.view.raw)
+        .image_view(view.raw)
         .image_layout(vk::ImageLayout::GENERAL);
 
-    match rt.init_op {
+    match init_op {
         crate::InitOp::Load => vk_info = vk_info.load_op(vk::AttachmentLoadOp::LOAD),
         crate::InitOp::DontCare => vk_info = vk_info.load_op(vk::AttachmentLoadOp::DONT_CARE),
-
         crate::InitOp::Clear(color) => {
-            let cv = if rt.view.aspects.contains(crate::TexelAspects::COLOR) {
-                vk::ClearValue {
-                    color: match color {
-                        crate::TextureColor::TransparentBlack => {
-                            vk::ClearColorValue { float32: [0.0; 4] }
-                        }
-                        crate::TextureColor::OpaqueBlack => vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 1.0],
-                        },
-                        crate::TextureColor::White => vk::ClearColorValue { float32: [1.0; 4] },
-                    },
-                }
-            } else {
-                vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: color.depth_clear_value(),
-                        stencil: color.stencil_clear_value(),
-                    },
-                }
-            };
-
-            vk_info = vk_info.load_op(vk::AttachmentLoadOp::CLEAR).clear_value(cv);
+            vk_info = vk_info
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .clear_value(color.as_vk_clear(view.format));
         }
     }
 
-    if let crate::FinishOp::ResolveTo(resolve_view) = rt.finish_op {
+    if let crate::FinishOp::ResolveTo { view, mode, .. } = finish_op {
         vk_info = vk_info
-            .resolve_image_view(resolve_view.raw)
+            .resolve_image_view(view.raw)
             .resolve_image_layout(vk::ImageLayout::GENERAL)
-            .resolve_mode(vk::ResolveModeFlags::AVERAGE);
+            .resolve_mode(match mode {
+                crate::ResolveMode::Average => vk::ResolveModeFlags::AVERAGE,
+                crate::ResolveMode::Sample0 => vk::ResolveModeFlags::SAMPLE_ZERO,
+                crate::ResolveMode::Min => vk::ResolveModeFlags::MIN,
+                crate::ResolveMode::Max => vk::ResolveModeFlags::MAX,
+            });
     }
 
-    vk_info.store_op = match rt.finish_op {
+    vk_info.store_op = match finish_op {
         crate::FinishOp::Store => vk::AttachmentStoreOp::STORE,
         crate::FinishOp::Discard => vk::AttachmentStoreOp::DONT_CARE,
         crate::FinishOp::Ignore => vk::AttachmentStoreOp::DONT_CARE,
-        crate::FinishOp::ResolveTo(..) => {
-            /*
-                TODO: DONT_CARE is most optimal in many cases where the msaa texture itself is never read afterwards but only the resolved,
-                      but how can the user specify this in blade?
-                      https://docs.vulkan.org/samples/latest/samples/performance/msaa/README.html#_best_practice_summary
-            */
-
-            // vk::AttachmentStoreOp::STORE
-            vk::AttachmentStoreOp::DONT_CARE
+        crate::FinishOp::ResolveTo { store_original, .. } => {
+            if store_original {
+                vk::AttachmentStoreOp::STORE
+            } else {
+                vk::AttachmentStoreOp::DONT_CARE
+            }
         }
     };
 
@@ -366,10 +425,12 @@ impl super::CommandEncoder {
 
         let mut target_size = [0u16; 2];
         let mut color_attachments = Vec::with_capacity(targets.colors.len());
-        let depth_stencil_attachment;
+        let depth_attachment;
+        let stencil_attachment;
+
         for rt in targets.colors {
             target_size = rt.view.target_size;
-            color_attachments.push(map_render_target(rt));
+            color_attachments.push(map_render_target(rt.view, rt.init_op, rt.finish_op));
         }
 
         let mut rendering_info = vk::RenderingInfoKHR::default()
@@ -378,12 +439,16 @@ impl super::CommandEncoder {
 
         if let Some(rt) = targets.depth_stencil {
             target_size = rt.view.target_size;
-            depth_stencil_attachment = map_render_target(&rt);
-            if rt.view.aspects.contains(crate::TexelAspects::DEPTH) {
-                rendering_info = rendering_info.depth_attachment(&depth_stencil_attachment);
+            let aspects = rt.view.format.aspects();
+
+            if aspects.contains(crate::TexelAspects::DEPTH) {
+                depth_attachment = map_render_target(rt.view, rt.depth_init_op, rt.depth_finish_op);
+                rendering_info = rendering_info.depth_attachment(&depth_attachment);
             }
-            if rt.view.aspects.contains(crate::TexelAspects::STENCIL) {
-                rendering_info = rendering_info.stencil_attachment(&depth_stencil_attachment);
+            if aspects.contains(crate::TexelAspects::STENCIL) {
+                stencil_attachment =
+                    map_render_target(rt.view, rt.stencil_init_op, rt.stencil_finish_op);
+                rendering_info = rendering_info.stencil_attachment(&stencil_attachment);
             }
         }
 
@@ -1046,14 +1111,14 @@ impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_, '_> {
         }
     }
 
-    fn draw_indirect(&mut self, indirect_buf: crate::BufferPiece) {
+    fn draw_indirect(&mut self, indirect_buf: crate::BufferPiece, draw_count: u32) {
         unsafe {
             self.device.core.cmd_draw_indirect(
                 self.cmd_buf.raw,
                 indirect_buf.buffer.raw,
                 indirect_buf.offset,
-                1,
-                0,
+                draw_count,
+                size_of::<crate::util::DrawIndirectArgs>() as u32,
             );
         }
     }
@@ -1063,8 +1128,10 @@ impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_, '_> {
         index_buf: crate::BufferPiece,
         index_type: crate::IndexType,
         indirect_buf: crate::BufferPiece,
+        draw_count: u32,
     ) {
         let raw_index_type = super::map_index_type(index_type);
+
         unsafe {
             self.device.core.cmd_bind_index_buffer(
                 self.cmd_buf.raw,
@@ -1076,8 +1143,37 @@ impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_, '_> {
                 self.cmd_buf.raw,
                 indirect_buf.buffer.raw,
                 indirect_buf.offset,
-                1,
-                0,
+                draw_count,
+                size_of::<crate::util::DrawIndexedIndirectArgs>() as u32,
+            );
+        }
+    }
+
+    fn draw_indexed_indirect_count(
+        &mut self,
+        index_buf: crate::BufferPiece,
+        index_type: crate::IndexType,
+        indirect_buf: crate::BufferPiece,
+        count_buf: crate::BufferPiece,
+        max_draw_count: u32,
+    ) {
+        let raw_index_type = super::map_index_type(index_type);
+
+        unsafe {
+            self.device.core.cmd_bind_index_buffer(
+                self.cmd_buf.raw,
+                index_buf.buffer.raw,
+                index_buf.offset,
+                raw_index_type,
+            );
+            self.device.core.cmd_draw_indexed_indirect_count(
+                self.cmd_buf.raw,
+                indirect_buf.buffer.raw,
+                indirect_buf.offset,
+                count_buf.buffer.raw,
+                count_buf.offset,
+                max_draw_count,
+                size_of::<crate::util::DrawIndexedIndirectArgs>() as u32,
             );
         }
     }

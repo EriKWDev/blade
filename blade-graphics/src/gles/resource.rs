@@ -283,7 +283,7 @@ impl crate::traits::ResourceDevice for super::Context {
         super::TextureView {
             inner: texture.inner,
             target_size: texture.target_size,
-            aspects: desc.format.aspects(),
+            format: desc.format,
         }
     }
 
@@ -302,6 +302,7 @@ impl crate::traits::ResourceDevice for super::Context {
             None | Some(crate::TextureColor::TransparentBlack) => [0.0; 4],
             Some(crate::TextureColor::OpaqueBlack) => [0.0, 0.0, 0.0, 1.0],
             Some(crate::TextureColor::White) => [1.0; 4],
+            Some(crate::TextureColor::RgbaFloat { rgba }) => rgba,
         };
 
         let raw = unsafe { gl.create_sampler().unwrap() };

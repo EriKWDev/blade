@@ -16,12 +16,13 @@ base64 = "0.21"
 bitflags = "2"
 bytemuck = { version = "1", features = ["derive"] }
 choir = "0.7"
-egui = "0.29"
+egui = "0.30"
 glam = { version = "0.28", features = ["mint"] }
 gltf = { version = "1.1", default-features = false }
 log = "0.4"
 mint = "0.5"
-naga = { version = "25.0", features = ["wgsl-in"] }
+# naga = { version = "23.1.0", features = ["wgsl-in"] }
+naga = { version = "26", features = ["wgsl-in"] }
 profiling = "1"
 slab = "0.4"
 strum = { version = "0.26", features = ["derive"] }
@@ -72,10 +73,8 @@ blade-macros = { version = "0.3", path = "blade-macros" }
 bytemuck = { workspace = true }
 choir = { workspace = true }
 egui = { workspace = true }
-egui-winit = { version = "0.29", default-features = false, features = [
-    "links",
-] }
-transform-gizmo-egui = "0.4"
+egui-winit = { version="0.30", default-features=false, features=["links"] }
+transform-gizmo-egui = { git = "https://github.com/urholaukkarinen/transform-gizmo", rev = "3211d78964b3f79132f2ce73a1c774a9224a4712" }
 env_logger = "0.11"
 glam = { workspace = true }
 log = { workspace = true }

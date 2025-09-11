@@ -66,6 +66,8 @@ struct Device {
     command_scope: Option<CommandScopeDevice>,
     timing: Option<TimingDevice>,
     workarounds: Workarounds,
+    supports_multidraw_indirect: bool,
+    supports_draw_indirect_count: bool,
 }
 
 struct MemoryManager {
@@ -134,7 +136,7 @@ impl Frame {
         TextureView {
             raw: self.internal.view,
             target_size: self.swapchain.target_size,
-            aspects: crate::TexelAspects::COLOR,
+            format: self.swapchain.format,
         }
     }
 }
@@ -234,11 +236,21 @@ impl Default for Texture {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq)]
 pub struct TextureView {
     raw: vk::ImageView,
     target_size: [u16; 2],
-    aspects: crate::TexelAspects,
+    format: crate::TextureFormat,
+}
+
+impl Default for TextureView {
+    fn default() -> Self {
+        Self {
+            raw: vk::ImageView::default(),
+            target_size: [0; 2],
+            format: crate::TextureFormat::Rgba8Unorm,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq)]

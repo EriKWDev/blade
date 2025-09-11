@@ -185,24 +185,34 @@ impl super::CommandEncoder {
             if let crate::FinishOp::Discard = rt.finish_op {
                 invalidate_attachments.push(attachment);
             }
-            if let crate::FinishOp::ResolveTo(to) = rt.finish_op {
+            if let crate::FinishOp::ResolveTo { view: to, .. } = rt.finish_op {
                 self.commands
                     .push(super::Command::BlitFramebuffer { from: rt.view, to });
             }
         }
         if let Some(ref rt) = targets.depth_stencil {
-            let attachment = match rt.view.aspects {
-                crate::TexelAspects::DEPTH => glow::DEPTH_ATTACHMENT,
-                crate::TexelAspects::STENCIL => glow::STENCIL_ATTACHMENT,
-                _ => glow::DEPTH_STENCIL_ATTACHMENT,
+            let aspects = rt.view.format.aspects();
+            let is_depth = aspects.contains(crate::TexelAspects::DEPTH);
+            let is_stencil = aspects.contains(crate::TexelAspects::STENCIL);
+
+            let attachment = if is_depth && is_stencil {
+                glow::DEPTH_STENCIL_ATTACHMENT
+            } else if is_depth {
+                glow::DEPTH_ATTACHMENT
+            } else {
+                glow::STENCIL_ATTACHMENT
             };
+
             target_size = rt.view.target_size;
             self.commands.push(super::Command::BindAttachment {
                 attachment,
                 view: rt.view,
             });
-            if let crate::FinishOp::Discard = rt.finish_op {
-                invalidate_attachments.push(attachment);
+            if let crate::FinishOp::Discard = rt.depth_finish_op {
+                invalidate_attachments.push(glow::DEPTH_ATTACHMENT);
+            }
+            if let crate::FinishOp::Discard = rt.stencil_finish_op {
+                invalidate_attachments.push(glow::DEPTH_STENCIL);
             }
         }
 
@@ -231,24 +241,36 @@ impl super::CommandEncoder {
                 self.commands.push(super::Command::ClearColor {
                     draw_buffer: i as u32,
                     color,
-                    ty: super::ColorType::Float, //TODO: get from the format
+                    ty: match rt.view.format.texel_backing() {
+                        crate::util::TexelBacking::Float => super::ColorType::Float,
+                        crate::util::TexelBacking::UInt => super::ColorType::Uint,
+                        crate::util::TexelBacking::Int => super::ColorType::Sint,
+                    },
                 });
             }
         }
+
         if let Some(ref rt) = targets.depth_stencil {
-            if let crate::InitOp::Clear(color) = rt.init_op {
-                self.commands.push(super::Command::ClearDepthStencil {
-                    depth: if rt.view.aspects.contains(crate::TexelAspects::DEPTH) {
-                        Some(color.depth_clear_value())
-                    } else {
-                        None
-                    },
-                    stencil: if rt.view.aspects.contains(crate::TexelAspects::STENCIL) {
-                        Some(color.stencil_clear_value())
-                    } else {
-                        None
-                    },
-                });
+            match (rt.depth_init_op, rt.stencil_init_op) {
+                (crate::InitOp::Clear(depth_value), crate::InitOp::Clear(stencil_value)) => {
+                    self.commands.push(super::Command::ClearDepthStencil {
+                        depth: Some(depth_value),
+                        stencil: Some(stencil_value),
+                    });
+                }
+                (crate::InitOp::Clear(depth_value), _) => {
+                    self.commands.push(super::Command::ClearDepthStencil {
+                        depth: Some(depth_value),
+                        stencil: None,
+                    });
+                }
+                (_, crate::InitOp::Clear(stencil_value)) => {
+                    self.commands.push(super::Command::ClearDepthStencil {
+                        depth: None,
+                        stencil: Some(stencil_value),
+                    });
+                }
+                _ => {}
             }
         }
 
@@ -537,7 +559,7 @@ impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_> {
         });
     }
 
-    fn draw_indirect(&mut self, _indirect_buf: crate::BufferPiece) {
+    fn draw_indirect(&mut self, _indirect_buf: crate::BufferPiece, _draw_count: u32) {
         unimplemented!()
     }
 
@@ -546,6 +568,18 @@ impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_> {
         _index_buf: crate::BufferPiece,
         _index_type: crate::IndexType,
         _indirect_buf: crate::BufferPiece,
+        _draw_count: u32,
+    ) {
+        unimplemented!()
+    }
+
+    fn draw_indexed_indirect_count(
+        &mut self,
+        _index_buf: crate::BufferPiece,
+        _index_type: crate::IndexType,
+        _indirect_buf: crate::BufferPiece,
+        _count_buf: crate::BufferPiece,
+        _max_draw_count: u32,
     ) {
         unimplemented!()
     }
@@ -1001,6 +1035,7 @@ impl super::Command {
                     write_mask.contains(crate::ColorWrites::ALPHA),
                 );
             }
+
             Self::ClearColor {
                 draw_buffer,
                 color,
@@ -1014,6 +1049,7 @@ impl super::Command {
                             crate::TextureColor::TransparentBlack => [0.0; 4],
                             crate::TextureColor::OpaqueBlack => [0.0, 0.0, 0.0, 1.0],
                             crate::TextureColor::White => [1.0; 4],
+                            crate::TextureColor::RgbaFloat { rgba } => rgba,
                         },
                     );
                 }
@@ -1025,6 +1061,7 @@ impl super::Command {
                             crate::TextureColor::TransparentBlack => [0; 4],
                             crate::TextureColor::OpaqueBlack => [0, 0, 0, !0],
                             crate::TextureColor::White => [!0; 4],
+                            crate::TextureColor::RgbaFloat { rgba } => rgba.map(|v| v as _),
                         },
                     );
                 }
@@ -1036,6 +1073,7 @@ impl super::Command {
                             crate::TextureColor::TransparentBlack => [0; 4],
                             crate::TextureColor::OpaqueBlack => [0, 0, 0, !0],
                             crate::TextureColor::White => [!0; 4],
+                            crate::TextureColor::RgbaFloat { rgba } => rgba.map(|v| v as _),
                         },
                     );
                 }

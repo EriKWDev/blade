@@ -247,57 +247,121 @@ impl super::CommandEncoder {
                         metal::MTLStoreAction::Store
                     }
                     crate::FinishOp::Discard => metal::MTLStoreAction::DontCare,
-                    crate::FinishOp::ResolveTo(ref view) => {
+                    crate::FinishOp::ResolveTo {
+                        ref view,
+                        mode,
+                        store_original,
+                    } => {
                         at_descriptor.setResolveTexture(Some(view.as_ref()));
-                        metal::MTLStoreAction::MultisampleResolve
+                        assert!(
+                            mode == crate::ResolveMode::Average,
+                            "color attachments has to resolve using average mode"
+                        );
+
+                        if store_original {
+                            metal::MTLStoreAction::StoreAndMultisampleResolve
+                        } else {
+                            metal::MTLStoreAction::MultisampleResolve
+                        }
                     }
                 };
                 at_descriptor.setStoreAction(store_action);
             }
 
             if let Some(ref rt) = targets.depth_stencil {
-                if rt.view.aspects.contains(crate::TexelAspects::DEPTH) {
+                let aspects = rt.view.format.aspects();
+
+                if aspects.contains(crate::TexelAspects::DEPTH) {
                     let at_descriptor = descriptor.depthAttachment();
                     at_descriptor.setTexture(Some(rt.view.as_ref()));
-                    let load_action = match rt.init_op {
+                    let load_action = match rt.depth_init_op {
                         crate::InitOp::Load => metal::MTLLoadAction::Load,
-                        crate::InitOp::Clear(color) => {
-                            let clear_depth = color.depth_clear_value();
-                            at_descriptor.setClearDepth(clear_depth as f64);
+                        crate::InitOp::Clear(clear_value) => {
+                            at_descriptor.setClearDepth(clear_value as f64);
                             metal::MTLLoadAction::Clear
                         }
                         crate::InitOp::DontCare => metal::MTLLoadAction::DontCare,
                     };
-                    let store_action = match rt.finish_op {
+
+                    let store_action = match rt.depth_finish_op {
                         crate::FinishOp::Store | crate::FinishOp::Ignore => {
                             metal::MTLStoreAction::Store
                         }
                         crate::FinishOp::Discard => metal::MTLStoreAction::DontCare,
-                        crate::FinishOp::ResolveTo(_) => panic!("Can't resolve depth texture"),
+                        crate::FinishOp::ResolveTo {
+                            ref view,
+                            mode,
+                            store_original,
+                        } => {
+                            at_descriptor.setResolveTexture(Some(view.as_ref()));
+                            at_descriptor.setDepthResolveFilter(match mode {
+                                crate::ResolveMode::Average => {
+                                    panic!("ResolveMode::Average not supported as depth resolve filter")
+                                }
+
+                                crate::ResolveMode::Sample0 => {
+                                    objc2_metal::MTLMultisampleDepthResolveFilter::Sample0
+                                }
+                                crate::ResolveMode::Min => {
+                                    objc2_metal::MTLMultisampleDepthResolveFilter::Min
+                                }
+                                crate::ResolveMode::Max => {
+                                    objc2_metal::MTLMultisampleDepthResolveFilter::Max
+                                }
+                            });
+
+                            if store_original {
+                                metal::MTLStoreAction::StoreAndMultisampleResolve
+                            } else {
+                                metal::MTLStoreAction::MultisampleResolve
+                            }
+                        }
                     };
                     at_descriptor.setLoadAction(load_action);
                     at_descriptor.setStoreAction(store_action);
                 }
 
-                if rt.view.aspects.contains(crate::TexelAspects::STENCIL) {
+                if aspects.contains(crate::TexelAspects::STENCIL) {
                     let at_descriptor = descriptor.stencilAttachment();
                     at_descriptor.setTexture(Some(rt.view.as_ref()));
 
-                    let load_action = match rt.init_op {
+                    let load_action = match rt.stencil_init_op {
                         crate::InitOp::Load => metal::MTLLoadAction::Load,
-                        crate::InitOp::Clear(color) => {
-                            let clear_stencil = color.stencil_clear_value();
-                            at_descriptor.setClearStencil(clear_stencil);
+                        crate::InitOp::Clear(clear_value) => {
+                            at_descriptor.setClearStencil(clear_value);
                             metal::MTLLoadAction::Clear
                         }
                         crate::InitOp::DontCare => metal::MTLLoadAction::DontCare,
                     };
-                    let store_action = match rt.finish_op {
+                    let store_action = match rt.stencil_finish_op {
                         crate::FinishOp::Store | crate::FinishOp::Ignore => {
                             metal::MTLStoreAction::Store
                         }
                         crate::FinishOp::Discard => metal::MTLStoreAction::DontCare,
-                        crate::FinishOp::ResolveTo(_) => panic!("Can't resolve stencil texture"),
+                        crate::FinishOp::ResolveTo {
+                            ref view,
+                            mode,
+                            store_original,
+                        } => {
+                            at_descriptor.setResolveTexture(Some(view.as_ref()));
+                            at_descriptor.setStencilResolveFilter(match mode {
+                                crate::ResolveMode::Average
+                                | crate::ResolveMode::Min
+                                | crate::ResolveMode::Max => {
+                                    panic!("'{mode:?}' not supported as stencil resolve filter")
+                                }
+
+                                crate::ResolveMode::Sample0 => {
+                                    objc2_metal::MTLMultisampleStencilResolveFilter::Sample0
+                                }
+                            });
+
+                            if store_original {
+                                metal::MTLStoreAction::StoreAndMultisampleResolve
+                            } else {
+                                metal::MTLStoreAction::MultisampleResolve
+                            }
+                        }
                     };
 
                     at_descriptor.setLoadAction(load_action);
@@ -863,14 +927,18 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
         }
     }
 
-    fn draw_indirect(&mut self, indirect_buf: crate::BufferPiece) {
-        unsafe {
-            self.encoder
-                .drawPrimitives_indirectBuffer_indirectBufferOffset(
-                    self.primitive_type,
-                    indirect_buf.buffer.as_ref(),
-                    indirect_buf.offset as usize,
-                );
+    fn draw_indirect(&mut self, indirect_buf: crate::BufferPiece, draw_count: u32) {
+        let mut offset = indirect_buf.offset as usize;
+        for _ in 0..draw_count {
+            unsafe {
+                self.encoder
+                    .drawPrimitives_indirectBuffer_indirectBufferOffset(
+                        self.primitive_type,
+                        indirect_buf.buffer.as_ref(),
+                        offset,
+                    );
+            }
+            offset += size_of::<crate::util::DrawIndirectArgs>();
         }
     }
 
@@ -879,18 +947,35 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
         index_buf: crate::BufferPiece,
         index_type: crate::IndexType,
         indirect_buf: crate::BufferPiece,
+        draw_count: u32,
     ) {
         let raw_index_type = super::map_index_type(index_type);
-        unsafe {
-            self.encoder.drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
-            self.primitive_type,
-            raw_index_type,
-            index_buf.buffer.as_ref(),
-            index_buf.offset as usize,
-            indirect_buf.buffer.as_ref(),
-            indirect_buf.offset as usize,
-        );
+
+        let mut offset = indirect_buf.offset as usize;
+        for _ in 0..draw_count {
+            unsafe {
+                self.encoder.drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
+                    self.primitive_type,
+                    raw_index_type,
+                    index_buf.buffer.as_ref(),
+                    index_buf.offset as usize,
+                    indirect_buf.buffer.as_ref(),
+                    offset,
+                );
+            }
+            offset += size_of::<crate::util::DrawIndexedIndirectArgs>();
         }
+    }
+
+    fn draw_indexed_indirect_count(
+        &mut self,
+        _index_buf: crate::BufferPiece,
+        _index_type: crate::IndexType,
+        _indirect_buf: crate::BufferPiece,
+        _count_buf: crate::BufferPiece,
+        _max_draw_count: u32,
+    ) {
+        unimplemented!()
     }
 }
 
@@ -935,6 +1020,12 @@ fn map_clear_color(color: crate::TextureColor) -> metal::MTLClearColor {
             green: 1.0,
             blue: 1.0,
             alpha: 1.0,
+        },
+        crate::TextureColor::RgbaFloat { rgba: [r, g, b, a] } => metal::MTLClearColor {
+            red: r as _,
+            green: g as _,
+            blue: b as _,
+            alpha: a as _,
         },
     }
 }
