@@ -7,6 +7,7 @@ impl From<naga::ShaderStage> for super::ShaderVisibility {
             naga::ShaderStage::Compute => Self::COMPUTE,
             naga::ShaderStage::Vertex => Self::VERTEX,
             naga::ShaderStage::Fragment => Self::FRAGMENT,
+
             _ => Self::empty(),
         }
     }
@@ -18,7 +19,8 @@ impl super::Context {
         desc: super::ShaderDesc,
     ) -> Result<super::Shader, &'static str> {
         let module = naga::front::wgsl::parse_str(desc.source).map_err(|e| {
-            e.emit_to_stderr_with_path(desc.source, "");
+            let err = e.emit_to_string_with_path(desc.source, "");
+            eprintln!("{err}");
             "compilation failed"
         })?;
 
@@ -153,7 +155,7 @@ impl super::Shader {
                         naga::TypeInner::Sampler { .. } => {
                             (crate::ShaderBinding::Sampler, naga::StorageAccess::empty())
                         }
-                        naga::TypeInner::AccelerationStructure { vertex_return: _ } => (
+                        naga::TypeInner::AccelerationStructure { .. } => (
                             crate::ShaderBinding::AccelerationStructure,
                             naga::StorageAccess::empty(),
                         ),
@@ -264,9 +266,9 @@ impl super::Shader {
                         }
                         let binding = naga::Binding::Location {
                             location: attribute_mappings.len() as u32,
+                            blend_src: None,
                             interpolation: None,
                             sampling: None,
-                            blend_src: None,
                         };
                         for (buffer_index, vertex_fetch) in fetch_states.iter().enumerate() {
                             for (attribute_index, &(at_name, _)) in
