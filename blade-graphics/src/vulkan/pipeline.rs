@@ -92,14 +92,13 @@ impl super::Context {
             };
             let mut hasher = DefaultHasher::new();
             sf.shader.source.hash(&mut hasher);
-            let fp = temp_dir.join(format!("{}-{:x}.wgsl", sf.entry_point, hasher.finish()));
-            file_path = fp.to_string_lossy().to_string();
-            log::debug!("Dumping processed shader code to: {}", file_path);
+            file_path = temp_dir.join(format!("{}-{:x}.wgsl", sf.entry_point, hasher.finish()));
+            log::debug!("Dumping processed shader code to: {}", file_path.display());
             let _ = fs::write(&file_path, &sf.shader.source);
             naga_options_debug = naga_options_base.clone();
             naga_options_debug.debug_info = Some(naga::back::spv::DebugInfo {
                 source_code: &sf.shader.source,
-                file_name: file_path.as_str().into(),
+                file_name: file_path.as_path().into(),
                 //TODO: switch to WGSL once NSight Graphics recognizes it
                 language: naga::back::spv::SourceLanguage::GLSL,
             });
