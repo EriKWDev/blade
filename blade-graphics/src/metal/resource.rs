@@ -11,7 +11,7 @@ fn map_texture_usage(usage: crate::TextureUsage) -> metal::MTLTextureUsage {
 
     mtl_usage.set(
         metal::MTLTextureUsage::RenderTarget,
-        usage.intersects(Tu::TARGET),
+        usage.intersects(Tu::TARGET | Tu::TRANSIENT),
     );
     mtl_usage.set(
         metal::MTLTextureUsage::ShaderRead,
@@ -311,6 +311,7 @@ impl crate::traits::ResourceDevice for super::Context {
         super::TextureView {
             raw: Retained::into_raw(object),
             format: desc.format,
+            aspects: desc.aspects.unwrap_or(desc.format.aspects()),
         }
     }
 

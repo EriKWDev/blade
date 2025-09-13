@@ -196,6 +196,7 @@ impl<const N: usize> RenderTarget<N> {
                         array_layer_count: NonZeroU32::new(1),
                         ..Default::default()
                     },
+                    aspects: None,
                 },
             );
         }

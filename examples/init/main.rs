@@ -39,6 +39,7 @@ impl EnvMapSampler {
                 format,
                 dimension: gpu::ViewDimension::D2,
                 subresources: &gpu::TextureSubresources::default(),
+                aspects: None,
             },
         );
 

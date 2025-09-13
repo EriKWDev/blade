@@ -406,6 +406,7 @@ impl blade_asset::Baker for Baker {
                 format: image.format.0,
                 dimension: blade_graphics::ViewDimension::D2,
                 subresources: &Default::default(),
+                aspects: None,
             },
         );
         self.pending_operations

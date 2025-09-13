@@ -121,6 +121,7 @@ impl EnvironmentMap {
                 format,
                 dimension: blade_graphics::ViewDimension::D2,
                 subresources: &Default::default(),
+                aspects: None,
             },
         );
         for base_mip_level in 0..mip_level_count {
@@ -135,6 +136,7 @@ impl EnvironmentMap {
                         mip_level_count: NonZeroU32::new(1),
                         ..Default::default()
                     },
+                    aspects: None,
                 },
             );
             self.weight_mips.push(view);

@@ -93,6 +93,7 @@ impl Example {
                 format: TARGET_FORMAT,
                 dimension: gpu::ViewDimension::D2,
                 subresources: &gpu::TextureSubresources::default(),
+                aspects: None,
             },
         );
 

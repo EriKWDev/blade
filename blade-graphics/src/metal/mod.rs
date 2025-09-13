@@ -41,6 +41,7 @@ impl Frame {
         TextureView {
             raw: Retained::as_ptr(&self.texture) as *mut _,
             format: map_pixel_format(self.texture.pixelFormat()),
+            aspects: crate::TexelAspects::COLOR,
         }
     }
 }
@@ -118,6 +119,7 @@ impl Texture {
 pub struct TextureView {
     raw: *mut ProtocolObject<dyn metal::MTLTexture>,
     format: crate::TextureFormat,
+    aspects: crate::TexelAspects,
 }
 
 unsafe impl Send for TextureView {}
@@ -128,6 +130,7 @@ impl Default for TextureView {
         Self {
             raw: ptr::null_mut(),
             format: crate::TextureFormat::Rgba8Unorm,
+            aspects: crate::TextureFormat::Rgba8Unorm.aspects(),
         }
     }
 }
@@ -146,6 +149,7 @@ impl TextureView {
         Self {
             raw: Retained::into_raw(raw.clone()),
             format,
+            aspects: format.aspects(),
         }
     }
 }

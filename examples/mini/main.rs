@@ -79,6 +79,7 @@ fn main() {
                         base_array_layer: 0,
                         array_layer_count: None,
                     },
+                    aspects: None,
                 },
             )
         })

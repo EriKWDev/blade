@@ -149,6 +149,7 @@ impl Example {
                 format: gpu::TextureFormat::Rgba8Unorm,
                 dimension: gpu::ViewDimension::D2,
                 subresources: &Default::default(),
+                aspects: None,
             },
         );
 

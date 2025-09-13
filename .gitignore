@@ -3,6 +3,10 @@
 /target-vk
 /Cargo.lock
 
+/blade-graphics/target
+/blade-graphics/target-gl
+/blade-graphics/target-vk
+
 /asset-cache
 /blade-asset/cooked
 /_failure.wgsl

@@ -436,6 +436,7 @@ bitflags::bitflags! {
         const TARGET = 1 << 1;
         const RESOURCE = 1 << 2;
         const STORAGE = 1 << 3;
+        const TRANSIENT = 1 << 4;
     }
 }
 
@@ -466,6 +467,14 @@ pub struct TextureViewDesc<'a> {
     pub format: TextureFormat,
     pub dimension: ViewDimension,
     pub subresources: &'a TextureSubresources,
+
+    /// optional explicit aspects
+    ///
+    /// if None is specified, format.aspects() is assumed
+    ///
+    /// can be used to create separate DEPTH and STENCIL views for
+    /// sampling a special depth+stencil format in a shader
+    pub aspects: Option<TexelAspects>,
 }
 
 bitflags::bitflags! {
@@ -874,9 +883,7 @@ impl Default for StencilFaceState {
 }
 
 /// State of the stencil operation (fixed-pipeline stage).
-///
-/// For use in [`DepthStencilState`].
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Default, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StencilState {
     /// Front face mode.
     pub front: StencilFaceState,
@@ -1128,11 +1135,9 @@ pub struct RenderTarget {
 pub struct DepthStencilRenderTarget {
     pub view: TextureView,
 
-    /// only applied if view has the DEPTH aspect
     pub depth_init_op: InitOp<f32>,
     pub depth_finish_op: FinishOp,
 
-    /// only applied if view has the STENCIL aspect
     pub stencil_init_op: InitOp<u32>,
     pub stencil_finish_op: FinishOp,
 }

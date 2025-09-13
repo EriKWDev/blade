@@ -91,6 +91,7 @@ impl GuiTexture {
                 format,
                 dimension: blade_graphics::ViewDimension::D2,
                 subresources: &blade_graphics::TextureSubresources::default(),
+                aspects: None,
             },
         );
         let sampler = context.create_sampler(blade_graphics::SamplerDesc {
@@ -179,7 +180,7 @@ impl GuiPainter {
                 topology: blade_graphics::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
-            depth_stencil: None, //TODO?
+            depth_stencil: None,
             fragment: Some(shader.at("fs_main")),
             color_targets: &[blade_graphics::ColorTargetState {
                 format: info.format,

@@ -505,8 +505,12 @@ impl crate::traits::ShaderDevice for super::Context {
             let depth_stencil = match desc.depth_stencil {
                 Some(ref ds) => {
                     let raw_format = super::map_texture_format(ds.format);
-                    descriptor.setDepthAttachmentPixelFormat(raw_format);
-                    if ds.format.aspects().contains(crate::TexelAspects::STENCIL) {
+                    let aspects = ds.format.aspects();
+
+                    if aspects.contains(crate::TexelAspects::DEPTH) {
+                        descriptor.setDepthAttachmentPixelFormat(raw_format);
+                    }
+                    if aspects.contains(crate::TexelAspects::STENCIL) {
                         descriptor.setStencilAttachmentPixelFormat(raw_format);
                     }
 
@@ -521,7 +525,6 @@ impl crate::traits::ShaderDevice for super::Context {
                 }
                 None => None,
             };
-
             if !desc.name.is_empty() {
                 descriptor.setLabel(Some(&NSString::from_str(desc.name)));
             }

@@ -476,7 +476,7 @@ impl super::Context {
         inner.egl.unmake_current();
     }
 
-    pub(super) fn lock(&self) -> ContextLock {
+    pub(super) fn lock(&self) -> ContextLock<'_> {
         let inner = self.platform.inner.lock().unwrap();
         inner.egl.make_current();
         ContextLock { guard: inner }

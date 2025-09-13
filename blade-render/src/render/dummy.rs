@@ -39,6 +39,7 @@ impl DummyResources {
                 format: blade_graphics::TextureFormat::Rgba8Unorm,
                 dimension: blade_graphics::ViewDimension::D2,
                 subresources: &blade_graphics::TextureSubresources::default(),
+                aspects: None,
             },
         );
         let black_texture = gpu.create_texture(blade_graphics::TextureDesc {
@@ -59,6 +60,7 @@ impl DummyResources {
                 format: blade_graphics::TextureFormat::Rgba8Unorm,
                 dimension: blade_graphics::ViewDimension::D2,
                 subresources: &blade_graphics::TextureSubresources::default(),
+                aspects: None,
             },
         );
         let red_texture = gpu.create_texture(blade_graphics::TextureDesc {
@@ -79,6 +81,7 @@ impl DummyResources {
                 format: blade_graphics::TextureFormat::Rgba8Unorm,
                 dimension: blade_graphics::ViewDimension::D2,
                 subresources: &blade_graphics::TextureSubresources::default(),
+                aspects: None,
             },
         );
 

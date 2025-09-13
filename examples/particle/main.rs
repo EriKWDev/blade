@@ -90,6 +90,7 @@ impl Example {
                     format,
                     dimension: gpu::ViewDimension::D2,
                     subresources: &Default::default(),
+                    aspects: None,
                 },
             );
 

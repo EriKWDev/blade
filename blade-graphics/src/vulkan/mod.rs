@@ -138,6 +138,7 @@ impl Frame {
             raw: self.internal.view,
             target_size: self.swapchain.target_size,
             format: self.swapchain.format,
+            aspects: self.swapchain.format.aspects(),
         }
     }
 }
@@ -218,6 +219,7 @@ pub struct TextureView {
     raw: vk::ImageView,
     target_size: [u16; 2],
     format: crate::TextureFormat,
+    aspects: crate::TexelAspects,
 }
 
 impl Default for TextureView {
@@ -226,6 +228,7 @@ impl Default for TextureView {
             raw: vk::ImageView::default(),
             target_size: [0; 2],
             format: crate::TextureFormat::Rgba8Unorm,
+            aspects: crate::TextureFormat::Rgba8Unorm.aspects(),
         }
     }
 }
@@ -701,7 +704,7 @@ impl Device {
     fn map_acceleration_structure_meshes(
         &self,
         meshes: &[crate::AccelerationStructureMesh],
-    ) -> BottomLevelAccelerationStructureInput {
+    ) -> BottomLevelAccelerationStructureInput<'_> {
         let mut total_primitive_count = 0;
         let mut max_primitive_counts = Vec::with_capacity(meshes.len());
         let mut build_range_infos = Vec::with_capacity(meshes.len());
