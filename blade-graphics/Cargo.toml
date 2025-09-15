@@ -12,7 +12,7 @@ repository = "https://github.com/kvark/blade"
 [dependencies]
 bitflags = { workspace = true }
 bytemuck = { workspace = true }
-codespan-reporting = "0.12"
+codespan-reporting = { version="0.12", default-features=false, features=["termcolor"] }
 hidden-trait = "0.1"
 log = { workspace = true }
 mint = { workspace = true }
