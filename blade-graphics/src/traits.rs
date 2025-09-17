@@ -109,9 +109,12 @@ pub trait AccelerationStructureEncoder {
 }
 
 pub trait RenderEncoder {
+    type BufferPiece: Send + Sync + Clone + Copy + Debug;
+
     fn set_scissor_rect(&mut self, rect: &super::ScissorRect);
     fn set_viewport(&mut self, viewport: &super::Viewport);
     fn set_stencil_reference(&mut self, reference: u32);
+    fn bind_vertex(&mut self, index: u32, vertex_buf: Self::BufferPiece);
 }
 
 pub trait PipelineEncoder {
@@ -126,10 +129,6 @@ pub trait ComputePipelineEncoder: PipelineEncoder {
 }
 
 pub trait RenderPipelineEncoder: PipelineEncoder + RenderEncoder {
-    type BufferPiece: Send + Sync + Clone + Copy + Debug;
-
-    //Note: does this need to be available outside of the pipeline?
-    fn bind_vertex(&mut self, index: u32, vertex_buf: Self::BufferPiece);
     fn draw(
         &mut self,
         first_vertex: u32,

@@ -323,6 +323,8 @@ impl super::PassEncoder<'_, super::ComputePipeline> {
 
 #[hidden_trait::expose]
 impl crate::traits::RenderEncoder for super::PassEncoder<'_, super::RenderPipeline> {
+    type BufferPiece = crate::BufferPiece;
+
     fn set_scissor_rect(&mut self, rect: &crate::ScissorRect) {
         self.commands.push(super::Command::SetScissor(rect.clone()));
     }
@@ -334,6 +336,24 @@ impl crate::traits::RenderEncoder for super::PassEncoder<'_, super::RenderPipeli
 
     fn set_stencil_reference(&mut self, reference: u32) {
         unimplemented!()
+    }
+
+    fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
+        assert_eq!(index, 0);
+        self.commands.push(super::Command::BindVertex {
+            buffer: vertex_buf.buffer.raw,
+        });
+        for (i, info) in self.vertex_attributes.iter().enumerate() {
+            self.commands.push(super::Command::SetVertexAttribute {
+                index: i as u32,
+                format: info.attrib.format,
+                offset: (vertex_buf.offset + info.attrib.offset as u64)
+                    .try_into()
+                    .unwrap(),
+                stride: info.stride,
+                instanced: info.instanced,
+            });
+        }
     }
 }
 
@@ -487,6 +507,8 @@ impl crate::traits::ComputePipelineEncoder for super::PipelineEncoder<'_> {
 
 #[hidden_trait::expose]
 impl crate::traits::RenderEncoder for super::PipelineEncoder<'_> {
+    type BufferPiece = crate::BufferPiece;
+
     fn set_scissor_rect(&mut self, rect: &crate::ScissorRect) {
         self.commands.push(super::Command::SetScissor(rect.clone()));
     }
@@ -499,11 +521,6 @@ impl crate::traits::RenderEncoder for super::PipelineEncoder<'_> {
     fn set_stencil_reference(&mut self, reference: u32) {
         unimplemented!()
     }
-}
-
-#[hidden_trait::expose]
-impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_> {
-    type BufferPiece = crate::BufferPiece;
 
     fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
         assert_eq!(index, 0);
@@ -522,7 +539,10 @@ impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_> {
             });
         }
     }
+}
 
+#[hidden_trait::expose]
+impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_> {
     fn draw(
         &mut self,
         start_vertex: u32,

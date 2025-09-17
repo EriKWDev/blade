@@ -934,6 +934,8 @@ impl crate::Viewport {
 
 #[hidden_trait::expose]
 impl crate::traits::RenderEncoder for super::RenderCommandEncoder<'_> {
+    type BufferPiece = crate::BufferPiece;
+
     fn set_scissor_rect(&mut self, rect: &crate::ScissorRect) {
         let vk_scissor = rect.to_vk();
         unsafe {
@@ -960,6 +962,17 @@ impl crate::traits::RenderEncoder for super::RenderCommandEncoder<'_> {
                 reference,
             )
         };
+    }
+
+    fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
+        unsafe {
+            self.device.core.cmd_bind_vertex_buffers(
+                self.cmd_buf.raw,
+                index,
+                &[vertex_buf.buffer.raw],
+                &[vertex_buf.offset],
+            );
+        }
     }
 }
 
@@ -1023,6 +1036,8 @@ impl crate::traits::ComputePipelineEncoder for super::PipelineEncoder<'_, '_> {
 
 #[hidden_trait::expose]
 impl crate::traits::RenderEncoder for super::PipelineEncoder<'_, '_> {
+    type BufferPiece = crate::BufferPiece;
+
     fn set_scissor_rect(&mut self, rect: &crate::ScissorRect) {
         let vk_scissor = rect.to_vk();
         unsafe {
@@ -1030,6 +1045,17 @@ impl crate::traits::RenderEncoder for super::PipelineEncoder<'_, '_> {
                 .core
                 .cmd_set_scissor(self.cmd_buf.raw, 0, &[vk_scissor])
         };
+    }
+
+    fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
+        unsafe {
+            self.device.core.cmd_bind_vertex_buffers(
+                self.cmd_buf.raw,
+                index,
+                &[vertex_buf.buffer.raw],
+                &[vertex_buf.offset],
+            );
+        }
     }
 
     fn set_viewport(&mut self, viewport: &crate::Viewport) {
@@ -1054,19 +1080,6 @@ impl crate::traits::RenderEncoder for super::PipelineEncoder<'_, '_> {
 
 #[hidden_trait::expose]
 impl crate::traits::RenderPipelineEncoder for super::PipelineEncoder<'_, '_> {
-    type BufferPiece = crate::BufferPiece;
-
-    fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
-        unsafe {
-            self.device.core.cmd_bind_vertex_buffers(
-                self.cmd_buf.raw,
-                index,
-                &[vertex_buf.buffer.raw],
-                &[vertex_buf.offset],
-            );
-        }
-    }
-
     fn draw(
         &mut self,
         start_vertex: u32,

@@ -684,16 +684,26 @@ impl crate::Viewport {
 
 #[hidden_trait::expose]
 impl crate::traits::RenderEncoder for super::RenderCommandEncoder<'_> {
+    type BufferPiece = crate::BufferPiece;
+
     fn set_scissor_rect(&mut self, rect: &crate::ScissorRect) {
         self.raw.setScissorRect(rect.to_metal());
     }
-
     fn set_viewport(&mut self, viewport: &crate::Viewport) {
         self.raw.setViewport(viewport.to_metal());
     }
-
     fn set_stencil_reference(&mut self, stencil_reference: u32) {
         self.raw.setStencilReferenceValue(stencil_reference);
+    }
+
+    fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
+        unsafe {
+            self.raw.setVertexBuffer_offset_atIndex(
+                Some(vertex_buf.buffer.as_ref()),
+                vertex_buf.offset as usize,
+                index as usize,
+            );
+        }
     }
 }
 
@@ -822,6 +832,8 @@ impl crate::traits::PipelineEncoder for super::RenderPipelineContext<'_> {
 
 #[hidden_trait::expose]
 impl crate::traits::RenderEncoder for super::RenderPipelineContext<'_> {
+    type BufferPiece = crate::BufferPiece;
+
     fn set_scissor_rect(&mut self, rect: &crate::ScissorRect) {
         self.encoder.setScissorRect(rect.to_metal());
     }
@@ -831,11 +843,6 @@ impl crate::traits::RenderEncoder for super::RenderPipelineContext<'_> {
     fn set_stencil_reference(&mut self, stencil_reference: u32) {
         self.encoder.setStencilReferenceValue(stencil_reference);
     }
-}
-
-#[hidden_trait::expose]
-impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
-    type BufferPiece = crate::BufferPiece;
 
     fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
         unsafe {
@@ -846,7 +853,10 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
             );
         }
     }
+}
 
+#[hidden_trait::expose]
+impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
     fn draw(
         &mut self,
         first_vertex: u32,
