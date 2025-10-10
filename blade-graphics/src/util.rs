@@ -224,6 +224,7 @@ impl super::TextureColor {
             crate::TextureColor::TransparentBlack => 0,
             crate::TextureColor::OpaqueBlack => !0,
             crate::TextureColor::White => !0,
+            crate::TextureColor::RgbaFloat { rgba } => rgba[0] as u32,
         }
     }
 
@@ -232,6 +233,7 @@ impl super::TextureColor {
             crate::TextureColor::TransparentBlack => 0.0,
             crate::TextureColor::OpaqueBlack => 0.0,
             crate::TextureColor::White => 1.0,
+            crate::TextureColor::RgbaFloat { rgba } => rgba[0],
         }
     }
 }
