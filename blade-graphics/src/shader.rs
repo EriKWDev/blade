@@ -28,7 +28,8 @@ impl super::Context {
 
         // Bindings are set up at pipeline creation, ignore here
         let flags = naga::valid::ValidationFlags::all() ^ naga::valid::ValidationFlags::BINDINGS;
-        let mut caps = naga::valid::Capabilities::empty();
+        // let mut caps = naga::valid::Capabilities::empty();
+        let mut caps = naga::valid::Capabilities::all();
         caps.set(
             naga::valid::Capabilities::RAY_QUERY | naga::valid::Capabilities::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
             !device_caps.ray_query.is_empty(),
