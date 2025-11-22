@@ -32,6 +32,8 @@ impl super::Context {
                             rb,
                             spv::BindingInfo {
                                 binding_array_size: Some(count),
+                                descriptor_set: group_index as _,
+                                binding: binding_index as _,
                             },
                         );
                     }
@@ -53,6 +55,8 @@ impl super::Context {
             zero_initialize_workgroup_memory: spv::ZeroInitializeWorkgroupMemoryMode::None,
             force_loop_bounding: false,
             debug_info: None,
+            fake_missing_bindings: true,
+            use_storage_input_output_16: true,
         }
     }
 
@@ -84,6 +88,7 @@ impl super::Context {
             entry_point: sf.entry_point.to_string(),
         };
         let file_path;
+        let file_path_name;
         let mut naga_options_debug;
         let naga_options = if let Some(ref temp_dir) = self.shader_debug_path {
             use std::{
@@ -93,12 +98,13 @@ impl super::Context {
             let mut hasher = DefaultHasher::new();
             sf.shader.source.hash(&mut hasher);
             file_path = temp_dir.join(format!("{}-{:x}.wgsl", sf.entry_point, hasher.finish()));
+            file_path_name = format!("{}", file_path.display());
             log::debug!("Dumping processed shader code to: {}", file_path.display());
             let _ = fs::write(&file_path, &sf.shader.source);
             naga_options_debug = naga_options_base.clone();
             naga_options_debug.debug_info = Some(naga::back::spv::DebugInfo {
                 source_code: &sf.shader.source,
-                file_name: file_path.as_path().into(),
+                file_name: &file_path_name,
                 //TODO: switch to WGSL once NSight Graphics recognizes it
                 language: naga::back::spv::SourceLanguage::GLSL,
             });
