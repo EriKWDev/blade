@@ -19,7 +19,7 @@ mint = { workspace = true }
 naga = { workspace = true }
 raw-window-handle = "0.6"
 once_cell = "1"
-aftermath = { optional=true, git="https://github.com/ErikWDev/aftermath_sys", rev="722418acf3ec3a2598f5fe09218c7b65e8f9a06b" }
+aftermath = { optional=true, git="https://github.com/ErikWDev/aftermath_sys", rev="7ee391270816f8bf98057d1a6bc2db69a392458f" }
 
 [features]
 default = []

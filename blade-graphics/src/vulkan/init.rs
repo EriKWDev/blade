@@ -22,6 +22,10 @@ const REQUIRED_DEVICE_EXTENSIONS: &[&ffi::CStr] = &[
     vk::KHR_TIMELINE_SEMAPHORE_NAME,
     vk::KHR_DESCRIPTOR_UPDATE_TEMPLATE_NAME,
     vk::KHR_DYNAMIC_RENDERING_NAME,
+    #[cfg(feature = "aftermath")]
+    vk::NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_NAME,
+    #[cfg(feature = "aftermath")]
+    vk::NV_DEVICE_DIAGNOSTICS_CONFIG_NAME,
 ];
 
 #[derive(Debug)]
@@ -296,7 +300,10 @@ unsafe fn inspect_adapter(
 impl super::Context {
     pub unsafe fn init(desc: crate::ContextDesc) -> Result<Self, NotSupportedError> {
         #[cfg(feature = "aftermath")]
-        let aftermath = aftermath::Aftermath::new(aftermath::DefaultAftermathCallbacks);
+        let aftermath = {
+            log::info!("Initializing nvidia aftermath");
+            aftermath::Aftermath::new(aftermath::DefaultAftermathCallbacks)
+        };
 
         let entry = match ash::Entry::load() {
             Ok(entry) => entry,
