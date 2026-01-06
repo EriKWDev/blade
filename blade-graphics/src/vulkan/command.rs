@@ -491,6 +491,17 @@ impl super::CommandEncoder {
     }
 
     pub(super) fn check_gpu_crash<T>(&self, ret: Result<T, vk::Result>) -> Option<T> {
+        #[cfg(feature = "aftermath")]
+        {
+            if ret.is_err() {
+                let status =
+                    aftermath::Status::wait_for_status(Some(std::time::Duration::from_secs(5)));
+                if status != aftermath::Status::Finished {
+                    eprintln!("Unexpected aftermath crash dump status: {status:?}");
+                }
+            }
+        };
+
         match ret {
             Ok(value) => Some(value),
             Err(vk::Result::ERROR_DEVICE_LOST) => match self.crash_handler {

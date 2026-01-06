@@ -295,6 +295,9 @@ unsafe fn inspect_adapter(
 
 impl super::Context {
     pub unsafe fn init(desc: crate::ContextDesc) -> Result<Self, NotSupportedError> {
+        #[cfg(feature = "aftermath")]
+        let aftermath = aftermath::Aftermath::new(aftermath::DefaultAftermathCallbacks);
+
         let entry = match ash::Entry::load() {
             Ok(entry) => entry,
             Err(err) => {
@@ -360,6 +363,7 @@ impl super::Context {
                 vk::EXT_DEBUG_UTILS_NAME,
                 vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES2_NAME,
             ];
+
             if desc.presentation {
                 instance_extensions.push(vk::KHR_SURFACE_NAME);
                 instance_extensions.push(vk::KHR_GET_SURFACE_CAPABILITIES2_NAME);
@@ -455,6 +459,7 @@ impl super::Context {
             let family_infos = [family_info];
 
             let mut device_extensions = REQUIRED_DEVICE_EXTENSIONS.to_vec();
+
             if desc.presentation {
                 device_extensions.push(vk::KHR_SWAPCHAIN_NAME);
             }
@@ -494,6 +499,12 @@ impl super::Context {
                 device_extensions.push(vk::KHR_DRAW_INDIRECT_COUNT_NAME);
             }
 
+            #[cfg(feature = "aftermath")]
+            {
+                device_extensions.push(vk::NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_NAME);
+                device_extensions.push(vk::NV_DEVICE_DIAGNOSTICS_CONFIG_NAME);
+            };
+
             let str_pointers = device_extensions
                 .iter()
                 .map(|&s| s.as_ptr())
@@ -525,6 +536,20 @@ impl super::Context {
                 .push_next(&mut ext_inline_uniform_block)
                 .push_next(&mut khr_timeline_semaphore)
                 .push_next(&mut khr_dynamic_rendering);
+
+            #[cfg(feature = "aftermath")]
+            let mut ext_nv_diagnostics = vk::DeviceDiagnosticsConfigCreateInfoNV {
+                flags: vk::DeviceDiagnosticsConfigFlagsNV::empty()
+                    | vk::DeviceDiagnosticsConfigFlagsNV::ENABLE_AUTOMATIC_CHECKPOINTS
+                    | vk::DeviceDiagnosticsConfigFlagsNV::ENABLE_RESOURCE_TRACKING
+                    | vk::DeviceDiagnosticsConfigFlagsNV::ENABLE_SHADER_DEBUG_INFO,
+                ..Default::default()
+            };
+
+            #[cfg(feature = "aftermath")]
+            {
+                device_create_info = device_create_info.push_next(&mut ext_nv_diagnostics);
+            };
 
             let mut ext_descriptor_indexing;
             let mut khr_buffer_device_address;
@@ -766,6 +791,9 @@ impl super::Context {
                     .framebuffer_depth_sample_counts,
             instance,
             entry,
+
+            #[cfg(feature = "aftermath")]
+            aftermath,
         })
     }
 

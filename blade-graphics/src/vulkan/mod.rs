@@ -163,6 +163,8 @@ pub struct Context {
     sample_count_flags: vk::SampleCountFlags,
     instance: Instance,
     entry: ash::Entry,
+    #[cfg(feature = "aftermath")]
+    aftermath: aftermath::Aftermath,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq)]
