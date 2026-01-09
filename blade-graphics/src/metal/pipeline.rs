@@ -283,7 +283,8 @@ impl super::Context {
                 .collect(),
             bounds_check_policies: naga::proc::BoundsCheckPolicies::default(),
             zero_initialize_workgroup_memory: false,
-            force_loop_bounding: false,
+            force_loop_bounding: true,
+            // force_loop_bounding: false,
         };
 
         let pipeline_options = msl::PipelineOptions {
@@ -306,6 +307,10 @@ impl super::Context {
         let options = metal::MTLCompileOptions::new();
         options.setLanguageVersion(self.info.language_version);
         options.setPreserveInvariance(true);
+        unsafe {
+            options.setMathMode(objc2_metal::MTLMathMode::Fast);
+            options.setMathFloatingPointFunctions(objc2_metal::MTLMathFloatingPointFunctions::Fast);
+        }
 
         let library = self
             .device
