@@ -277,14 +277,15 @@ impl super::Context {
             ),
             inline_samplers: Default::default(),
             spirv_cross_compatibility: false,
-            fake_missing_bindings: true,
+            // fake_missing_bindings: true,
+            fake_missing_bindings: false,
             per_entry_point_map: Some((sf.entry_point.to_string(), naga_resources))
                 .into_iter()
                 .collect(),
             bounds_check_policies: naga::proc::BoundsCheckPolicies::default(),
             zero_initialize_workgroup_memory: false,
-            force_loop_bounding: true,
-            // force_loop_bounding: false,
+            // force_loop_bounding: true,
+            force_loop_bounding: false,
         };
 
         let pipeline_options = msl::PipelineOptions {

@@ -31,7 +31,10 @@ impl super::Context {
         // let mut caps = naga::valid::Capabilities::empty();
         let mut caps = naga::valid::Capabilities::all();
         caps.set(
-            naga::valid::Capabilities::RAY_QUERY | naga::valid::Capabilities::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+            naga::valid::Capabilities::RAY_QUERY
+                | naga::valid::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+                | naga::valid::Capabilities::STORAGE_TEXTURE_BINDING_ARRAY_NON_UNIFORM_INDEXING
+                | naga::valid::Capabilities::STORAGE_BUFFER_BINDING_ARRAY_NON_UNIFORM_INDEXING,
             !device_caps.ray_query.is_empty(),
         );
         let info = naga::valid::Validator::new(flags, caps)
@@ -274,6 +277,7 @@ impl super::Shader {
                             blend_src: None,
                             interpolation: None,
                             sampling: None,
+                            per_primitive: false,
                         };
                         for (buffer_index, vertex_fetch) in fetch_states.iter().enumerate() {
                             for (attribute_index, &(at_name, _)) in
@@ -306,6 +310,7 @@ impl super::Shader {
                                 interpolation: None,
                                 sampling: None,
                                 blend_src: None,
+                                per_primitive: false,
                             });
                             location += 1;
                         }
