@@ -57,6 +57,7 @@ impl super::Context {
             debug_info: None,
             fake_missing_bindings: true,
             use_storage_input_output_16: true,
+            ray_query_initialization_tracking: false,
         }
     }
 
