@@ -306,12 +306,14 @@ impl super::Context {
 
         let source_string = NSString::from_str(&source);
         let options = metal::MTLCompileOptions::new();
+
         options.setLanguageVersion(self.info.language_version);
         options.setPreserveInvariance(true);
-        unsafe {
-            options.setMathMode(objc2_metal::MTLMathMode::Fast);
-            options.setMathFloatingPointFunctions(objc2_metal::MTLMathFloatingPointFunctions::Fast);
-        }
+
+        // unsafe {
+        //     options.setMathMode(objc2_metal::MTLMathMode::Fast);
+        //     options.setMathFloatingPointFunctions(objc2_metal::MTLMathFloatingPointFunctions::Fast);
+        // }
 
         let library = self
             .device
