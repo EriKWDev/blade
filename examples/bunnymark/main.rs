@@ -84,6 +84,7 @@ impl Example {
                 capture: false,
                 overlay: true,
                 device_id: 0,
+                force_no_inline_uniform_blocks: false,
             })
             .unwrap()
         };

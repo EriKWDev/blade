@@ -105,6 +105,8 @@ pub struct ContextDesc {
     pub overlay: bool,
     /// Force selection of a specific Device ID, unless 0.
     pub device_id: u32,
+    /// Force usage of uniform buffer objects rather than inline uniform blocks on vulkan
+    pub force_no_inline_uniform_blocks: bool,
 }
 
 #[derive(Debug)]
