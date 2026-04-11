@@ -206,9 +206,9 @@ impl super::Context {
         };
 
         let (requested_frame_count, mode_preferences) = match config.display_sync {
-            crate::DisplaySync::Block => (3, [vk::PresentModeKHR::FIFO].as_slice()),
+            crate::DisplaySync::Block => (4, [vk::PresentModeKHR::FIFO].as_slice()),
             crate::DisplaySync::Recent => (
-                3,
+                4,
                 [
                     vk::PresentModeKHR::MAILBOX,
                     vk::PresentModeKHR::FIFO_RELAXED,
@@ -218,7 +218,9 @@ impl super::Context {
             ),
             crate::DisplaySync::Tear => (2, [vk::PresentModeKHR::IMMEDIATE].as_slice()),
         };
-        let effective_frame_count = requested_frame_count.max(capabilities.min_image_count);
+
+        let effective_frame_count =
+            requested_frame_count.clamp(capabilities.min_image_count, capabilities.max_image_count);
 
         let present_modes = unsafe {
             khr_surface

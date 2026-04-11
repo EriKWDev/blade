@@ -1,5 +1,57 @@
 Changelog for *Blade* project
 
+## blade-graphics-0.8.2 (TBD)
+
+- metal: enable fast math, skip debug groups in production
+- add `ComputeCommandEncoder::barrier()` for inline compute-to-compute synchronization within a pass
+
+## blade-graphics-0.8.1 (28 Mar 2026)
+
+- new API for enumerating device availability
+- bumped the max pass count to 1000 for better ML compatibility
+
+## blade-graphics-0.8, blade-util-0.3, blade-egui-0.7, blade-particle-0.1, blade-asset-0.2.1, blade-engine-0.1 (26 Mar 2026)
+
+- examples:
+  - moved some of the old example code into GPU tests
+  - new "info" example to show supported GPUs
+  - new Asteroids XR example 
+- graphics:
+  - OpenXR / Android support (tested on Quest 3S)
+  - option to disable ray tracing initialization
+  - separate `Capabilities` flag for binding arrays, including TLAS arrays
+  - cooperative matrix operations support (auto-detected via `Capabilities`)
+  - `wait_for` now returns `Result<bool, DeviceError>` instead of `bool`,
+    distinguishing timeout from device-lost errors
+  - `memory_stats()` API for querying VRAM budget/usage (via `VK_EXT_memory_budget`)
+  - `Buffer::size()` accessor on all backends
+    - debug bounds check on `BufferPiece::data()`
+  - `PlatformError` is now a unified opaque type across all backends
+  - `ComputePipelineBase` trait exposes `get_workgroup_size()` for generic code
+  - `NotSupportedError`, `DeviceError`, and `PlatformError` implement `Display` + `Error`
+  - vk: set `MUTABLE_FORMAT` on depth+stencil textures for flexible view creation
+  - vk: graceful handling of surface acquire errors instead of panicking
+  - vk: reject GPUs that cannot present in Intel+NVIDIA PRIME configurations
+  - egl: use DMA-BUF sharing with different displays for presentation
+  - vk: uniform buffer fallback for buggy Qualcomm devices
+  - metal: fix lifetimes of acceleration structures
+- particle:
+  - new crate forged from the original particle example
+- asset:
+  - support procedural assets
+- engine:
+  - moved the engine from "blade" itself, reserving it for future use
+  - choice between ray-tracing and rasterization rendering pipelines
+  - first-class XR support
+
+## blade-graphics-0.7.1 (22 Feb 2026)
+
+- vk: make us compatible with Mesa's LavaPipe
+
+## blade-egui-0.7 (21 Feb 2026)
+
+- update to egui-0.33 and blade-graphics-0.7
+
 ## blade-graphics-0.7 (27 Sep 2025)
 
 - graphics

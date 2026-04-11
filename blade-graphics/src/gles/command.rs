@@ -304,6 +304,11 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
 }
 
 impl super::PassEncoder<'_, super::ComputePipeline> {
+    /// Insert a compute-to-compute memory barrier within the current pass.
+    pub fn barrier(&mut self) {
+        self.commands.push(super::Command::Barrier);
+    }
+
     pub fn with<'b>(
         &'b mut self,
         pipeline: &'b super::ComputePipeline,
@@ -996,15 +1001,159 @@ impl super::Command {
                         Some(raw),
                     );
                 }
-                super::TextureInner::Texture { raw, target } => {
-                    let mip_level = 0; //TODO
-                    gl.framebuffer_texture_2d(
-                        glow::DRAW_FRAMEBUFFER,
-                        attachment,
-                        target,
-                        Some(raw),
-                        mip_level,
+                Self::SetSingleColorTarget(i, blend, write_mask) => {
+                    if let Some(blend_state) = blend {
+                        gl.enable_draw_buffer(glow::BLEND, i);
+                        gl.blend_func_separate_draw_buffer(
+                            i,
+                            blend_state.color.src_factor.to_gles(),
+                            blend_state.color.dst_factor.to_gles(),
+                            blend_state.alpha.src_factor.to_gles(),
+                            blend_state.alpha.dst_factor.to_gles(),
+                        );
+                        gl.blend_equation_draw_buffer(i, blend_state.color.operation.to_gles());
+                    } else {
+                        gl.disable_draw_buffer(glow::BLEND, i);
+                    }
+                    gl.color_mask_draw_buffer(
+                        i,
+                        write_mask.contains(crate::ColorWrites::RED),
+                        write_mask.contains(crate::ColorWrites::GREEN),
+                        write_mask.contains(crate::ColorWrites::BLUE),
+                        write_mask.contains(crate::ColorWrites::ALPHA),
                     );
+                }
+
+                Self::ClearColor {
+                    draw_buffer,
+                    color,
+                    ty,
+                } => match ty {
+                    super::ColorType::Float => {
+                        gl.clear_buffer_f32_slice(
+                            glow::COLOR,
+                            draw_buffer,
+                            &match color {
+                                crate::TextureColor::TransparentBlack => [0.0; 4],
+                                crate::TextureColor::OpaqueBlack => [0.0, 0.0, 0.0, 1.0],
+                                crate::TextureColor::White => [1.0; 4],
+                            },
+                        );
+                    }
+                    super::ColorType::Uint => {
+                        gl.clear_buffer_u32_slice(
+                            glow::COLOR,
+                            draw_buffer,
+                            &match color {
+                                crate::TextureColor::TransparentBlack => [0; 4],
+                                crate::TextureColor::OpaqueBlack => [0, 0, 0, !0],
+                                crate::TextureColor::White => [!0; 4],
+                            },
+                        );
+                    }
+                    super::ColorType::Sint => {
+                        gl.clear_buffer_i32_slice(
+                            glow::COLOR,
+                            draw_buffer,
+                            &match color {
+                                crate::TextureColor::TransparentBlack => [0; 4],
+                                crate::TextureColor::OpaqueBlack => [0, 0, 0, !0],
+                                crate::TextureColor::White => [!0; 4],
+                            },
+                        );
+                    }
+                },
+                Self::ClearDepthStencil { depth, stencil } => match (depth, stencil) {
+                    (Some(d), Some(s)) => {
+                        gl.clear_buffer_depth_stencil(glow::DEPTH_STENCIL, 0, d, s as i32)
+                    }
+                    (Some(d), None) => gl.clear_buffer_f32_slice(glow::DEPTH, 0, &[d]),
+                    (None, Some(s)) => gl.clear_buffer_i32_slice(glow::STENCIL, 0, &[s as i32]),
+                    (None, None) => (),
+                },
+                Self::Barrier => {
+                    gl.memory_barrier(
+                        glow::SHADER_STORAGE_BARRIER_BIT
+                            | glow::BUFFER_UPDATE_BARRIER_BIT
+                            | glow::UNIFORM_BARRIER_BIT,
+                    );
+                }
+                Self::SetViewport(ref vp) => {
+                    gl.viewport(vp.x as i32, vp.y as i32, vp.w as i32, vp.h as i32);
+                    gl.depth_range_f32(vp.depth.start, vp.depth.end);
+                }
+                Self::SetScissor(ref rect) => {
+                    gl.scissor(rect.x, rect.y, rect.w as i32, rect.h as i32);
+                }
+                Self::SetStencilFunc {
+                    face: _,
+                    function: _,
+                    reference: _,
+                    read_mask: _,
+                } => unimplemented!(),
+                Self::SetStencilOps {
+                    face: _,
+                    write_mask: _,
+                    //ops: crate::StencilOps,
+                } => unimplemented!(),
+                //SetDepth(DepthState),
+                //SetDepthBias(wgt::DepthBiasState),
+                //ConfigureDepthStencil(crate::FormatAspects),
+                Self::SetProgram(raw_program) => {
+                    gl.use_program(Some(raw_program));
+                }
+                Self::UnsetProgram => {
+                    gl.use_program(None);
+                }
+                //SetPrimitive(PrimitiveState),
+                Self::SetBlendConstant([r, g, b, a]) => gl.blend_color(r, g, b, a),
+                Self::SetColorTarget {
+                    draw_buffer_index: _,
+                    //desc: ColorTargetDesc,
+                } => unimplemented!(),
+                Self::BindUniform { slot, offset, size } => {
+                    gl.bind_buffer_range(
+                        glow::UNIFORM_BUFFER,
+                        slot,
+                        Some(ec.plain_buffer),
+                        offset as i32,
+                        size as i32,
+                    );
+                }
+                Self::BindVertex { buffer } => {
+                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
+                }
+                Self::SetVertexAttribute {
+                    index,
+                    format,
+                    offset,
+                    stride,
+                    instanced,
+                } => {
+                    let (data_size, data_type) = format.describe();
+                    match data_type {
+                        glow::FLOAT => gl.vertex_attrib_pointer_f32(
+                            index, data_size, data_type, false, stride, offset,
+                        ),
+                        glow::INT | glow::UNSIGNED_INT => gl
+                            .vertex_attrib_pointer_i32(index, data_size, data_type, stride, offset),
+                        _ => unreachable!(),
+                    }
+                    gl.vertex_attrib_divisor(index, if instanced { 1 } else { 0 });
+                    gl.enable_vertex_attrib_array(index);
+                }
+                Self::DisableVertexAttributes { count } => {
+                    for index in 0..count {
+                        gl.disable_vertex_attrib_array(index);
+                    }
+                }
+                Self::BindBuffer {
+                    target,
+                    slot,
+                    ref buffer,
+                    size,
+                } => {
+                    gl.bind_buffer_range(target, Some(raw), mip_level);
                 }
             },
             Self::InvalidateAttachment(attachment) => {
