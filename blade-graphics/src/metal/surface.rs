@@ -127,6 +127,12 @@ impl super::Context {
             crate::DisplaySync::Recent | crate::DisplaySync::Tear => false,
         };
 
+        let maximum_drawable = if config.requested_num_frames == 0 {
+            3u32
+        } else {
+            config.requested_num_frames.clamp(2, 3)
+        };
+
         unsafe {
             surface.render_layer.setOpaque(!config.transparent);
             surface.render_layer.setDevice(Some(device.as_ref()));
@@ -136,7 +142,9 @@ impl super::Context {
             surface
                 .render_layer
                 .setFramebufferOnly(config.usage == crate::TextureUsage::TARGET);
-            surface.render_layer.setMaximumDrawableCount(3);
+            surface
+                .render_layer
+                .setMaximumDrawableCount(maximum_drawable as _);
             surface.render_layer.setDrawableSize(CGSize {
                 width: config.size.width as f64,
                 height: config.size.height as f64,

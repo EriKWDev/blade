@@ -205,10 +205,20 @@ impl super::Context {
             )
         };
 
+        let num_frames = if config.requested_num_frames == 0 {
+            match config.display_sync {
+                crate::DisplaySync::Block => 3,
+                crate::DisplaySync::Recent => 3,
+                crate::DisplaySync::Tear => 2,
+            }
+        } else {
+            config.requested_num_frames
+        };
+
         let (requested_frame_count, mode_preferences) = match config.display_sync {
-            crate::DisplaySync::Block => (4, [vk::PresentModeKHR::FIFO].as_slice()),
+            crate::DisplaySync::Block => (num_frames, [vk::PresentModeKHR::FIFO].as_slice()),
             crate::DisplaySync::Recent => (
-                4,
+                num_frames,
                 [
                     vk::PresentModeKHR::MAILBOX,
                     vk::PresentModeKHR::FIFO_RELAXED,
@@ -216,7 +226,7 @@ impl super::Context {
                 ]
                 .as_slice(),
             ),
-            crate::DisplaySync::Tear => (2, [vk::PresentModeKHR::IMMEDIATE].as_slice()),
+            crate::DisplaySync::Tear => (num_frames, [vk::PresentModeKHR::IMMEDIATE].as_slice()),
         };
 
         let effective_frame_count =

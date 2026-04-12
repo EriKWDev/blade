@@ -403,6 +403,7 @@ impl Engine {
             color_space: gpu::ColorSpace::Linear,
             transparent: false,
             allow_exclusive_full_screen: true,
+            requested_num_frames: 0, // auto
         }
     }
 

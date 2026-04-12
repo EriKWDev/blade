@@ -1223,6 +1223,9 @@ pub struct SurfaceConfig {
     pub color_space: ColorSpace,
     pub transparent: bool,
     pub allow_exclusive_full_screen: bool,
+    /// the requested number of frames in the swapchain. On metal has to be 2 or 3, on vulkan will be clamped to what device supports
+    /// '0' for automatic
+    pub requested_num_frames: u32,
 }
 
 #[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq)]
