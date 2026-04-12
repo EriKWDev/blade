@@ -187,7 +187,7 @@ unsafe fn inspect_adapter(
     let mut inline_uniform_blocks = has_inline_ub && properties.vendor_id != db::qualcomm::VENDOR;
 
     if desc.force_no_inline_uniform_blocks {
-        inline_uniform_blocks = true;
+        inline_uniform_blocks = false;
     }
 
     if !inline_uniform_blocks {
