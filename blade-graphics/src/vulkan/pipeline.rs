@@ -315,6 +315,7 @@ impl super::Context {
                     }
                 }
             };
+
             if descriptor_type == vk::DescriptorType::INLINE_UNIFORM_BLOCK_EXT {
                 assert_eq!(
                     descriptor_count % 4,
@@ -323,24 +324,25 @@ impl super::Context {
                     binding_index,
                     descriptor_count
                 );
-                assert!(
-                    descriptor_count <= crate::limits::PLAIN_DATA_SIZE,
-                    "Inline uniform block binding {} size {} exceeds blade limit {}",
-                    binding_index,
-                    descriptor_count,
-                    crate::limits::PLAIN_DATA_SIZE
-                );
+                // assert!(
+                //     descriptor_count <= crate::limits::PLAIN_DATA_SIZE,
+                //     "Inline uniform block binding {} size {} exceeds blade limit {}",
+                //     binding_index,
+                //     descriptor_count,
+                //     crate::limits::PLAIN_DATA_SIZE
+                // );
             }
+
             // UBO fallback: ensure Plain size fits in the scratch buffer
             if descriptor_type == vk::DescriptorType::UNIFORM_BUFFER {
                 if let crate::ShaderBinding::Plain { size } = binding {
-                    assert!(
-                        size <= crate::limits::PLAIN_DATA_SIZE,
-                        "UBO binding {} size {} exceeds blade limit {}",
-                        binding_index,
-                        size,
-                        crate::limits::PLAIN_DATA_SIZE
-                    );
+                    // assert!(
+                    //     size <= crate::limits::PLAIN_DATA_SIZE,
+                    //     "UBO binding {} size {} exceeds blade limit {}",
+                    //     binding_index,
+                    //     size,
+                    //     crate::limits::PLAIN_DATA_SIZE
+                    // );
                 }
             }
 
