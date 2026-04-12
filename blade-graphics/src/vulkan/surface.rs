@@ -229,8 +229,10 @@ impl super::Context {
             crate::DisplaySync::Tear => (num_frames, [vk::PresentModeKHR::IMMEDIATE].as_slice()),
         };
 
-        let effective_frame_count =
-            requested_frame_count.clamp(capabilities.min_image_count, capabilities.max_image_count);
+        let mut effective_frame_count = requested_frame_count.max(capabilities.min_image_count);
+        if capabilities.max_image_count != 0 {
+            effective_frame_count = effective_frame_count.min(capabilities.max_image_count);
+        }
 
         let present_modes = unsafe {
             khr_surface
