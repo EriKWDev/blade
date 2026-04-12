@@ -969,7 +969,7 @@ fn main() {
 
                             //HACK: https://github.com/urholaukkarinen/egui-gizmo/issues/29
                             if example.have_objects_changed
-                                && egui_winit.egui_ctx().wants_pointer_input()
+                                && egui_winit.egui_ctx().egui_wants_pointer_input()
                             {
                                 drag_start = None;
                             }

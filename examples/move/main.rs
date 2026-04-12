@@ -250,7 +250,7 @@ impl Game {
             .tessellate(egui_output.shapes, egui_output.pixels_per_point);
         self.engine.render(
             &self.camera.inner.into(),
-            &primitives,
+            primitives.as_slice(),
             &egui_output.textures_delta,
             self.window.inner_size(),
             self.window.scale_factor() as f32,

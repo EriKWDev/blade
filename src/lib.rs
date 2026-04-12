@@ -525,7 +525,6 @@ impl Engine {
         }
     }
 
-    #[profiling::function]
     pub fn render(
         &mut self,
         camera: &FrameCamera,
@@ -534,6 +533,8 @@ impl Engine {
         physical_size: winit::dpi::PhysicalSize<u32>,
         scale_factor: f32,
     ) {
+        profiling::function_scope!();
+
         if self.track_hot_reloads {
             self.renderer.hot_reload(
                 &self.asset_hub,

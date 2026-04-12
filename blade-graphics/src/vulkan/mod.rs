@@ -496,8 +496,14 @@ impl crate::traits::CommandDevice for Context {
     }
 
     fn submit(&self, encoder: &mut CommandEncoder) -> SyncPoint {
+        profiling::function_scope!();
+
         let raw_cmd_buf = encoder.finish();
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = {
+            profiling::scope!("lock queue");
+            self.queue.lock().unwrap()
+        };
+
         queue.last_progress += 1;
         let progress = queue.last_progress;
         let command_buffers = [raw_cmd_buf];
@@ -524,6 +530,7 @@ impl crate::traits::CommandDevice for Context {
             .signal_semaphores(&signal_semaphores_all[..num_signal_sepahores])
             .push_next(&mut timeline_info);
         let ret = unsafe {
+            profiling::scope!("submit to queue");
             self.device
                 .core
                 .queue_submit(queue.raw, &[vk_info], vk::Fence::null())

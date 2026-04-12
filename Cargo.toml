@@ -74,10 +74,10 @@ blade-macros = { version = "0.3", path = "blade-macros" }
 bytemuck = { workspace = true }
 choir = { workspace = true }
 egui = { workspace = true }
-egui-winit = { version = "0.32", default-features = false, features = [
+egui-winit = { version = "0.34", default-features = false, features = [
     "links",
 ] }
-transform-gizmo-egui = "0.7"
+transform-gizmo-egui = "0.9"
 env_logger = "0.11"
 glam = { workspace = true }
 log = { workspace = true }

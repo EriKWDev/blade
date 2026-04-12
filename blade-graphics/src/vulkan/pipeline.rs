@@ -17,6 +17,8 @@ impl super::Context {
         &'a self,
         data_layouts: &[&crate::ShaderDataLayout],
     ) -> spv::Options<'a> {
+        profiling::function_scope!();
+
         // collect all the array bindings into overrides
         let mut binding_map = spv::BindingMap::default();
         for (group_index, layout) in data_layouts.iter().enumerate() {
@@ -69,6 +71,8 @@ impl super::Context {
         group_infos: &mut [crate::ShaderDataInfo],
         vertex_fetch_states: &[crate::VertexFetchState],
     ) -> CompiledShader<'a> {
+        profiling::function_scope!();
+
         let ep_index = sf.entry_point_index();
         let ep = &sf.shader.module.entry_points[ep_index];
         let ep_info = sf.shader.info.get_entry_point(ep_index);
@@ -114,8 +118,55 @@ impl super::Context {
             naga_options_base
         };
 
-        let spv =
+        let mut spv =
             spv::write_vec(&module, &module_info, naga_options, Some(&pipeline_options)).unwrap();
+
+        // let use_spirv_optimizer = false;
+        // if use_spirv_optimizer {
+        //     profiling::scope!("run spirv-optimizer");
+        //     use spirv_tools::opt::Optimizer;
+        //     let opt = {
+        //         profiling::scope!("Create spirv_tools optimizer");
+        //         let mut opt = spirv_tools::opt::create(Some(spirv_tools::TargetEnv::Vulkan_1_3));
+        //         opt.register_performance_passes();
+        //         opt
+        //     };
+        //     let opt_res = {
+        //         profiling::scope!("run spirv_tools optimizer on shader");
+        //         opt.optimize(
+        //             &spv,
+        //             &mut |msg: spirv_tools::error::Message| {
+        //                 let m = format_args!(
+        //                     "[ shader:{}:{}:{} ] {}",
+        //                     sf.entry_point, msg.line, msg.column, msg.message
+        //                 );
+        //                 match msg.level {
+        //                     spirv_tools::error::MessageLevel::Fatal => panic!(),
+        //                     spirv_tools::error::MessageLevel::InternalError => panic!(),
+        //                     spirv_tools::error::MessageLevel::Error => log::error!("{}", m),
+        //                     spirv_tools::error::MessageLevel::Warning => log::warn!("{}", m),
+        //                     spirv_tools::error::MessageLevel::Info => log::info!("{}", m),
+        //                     spirv_tools::error::MessageLevel::Debug => log::debug!("{}", m),
+        //                 }
+        //             },
+        //             Some(spirv_tools::opt::Options {
+        //                 validator_options: None,
+        //                 max_id_bound: None,
+        //                 preserve_bindings: true,
+        //                 preserve_spec_constants: false,
+        //             }),
+        //         )
+        //     };
+        //     match opt_res {
+        //         Ok(it) => {
+        //             spv.clear();
+        //             spv.extend_from_slice(it.as_words());
+        //         }
+        //         Err(err) => {
+        //             log::error!("Error during shader optimization using spirv_tools::opt: {err:?}");
+        //         }
+        //     }
+        // }
 
         if let Some(dump_prefix) = DUMP_PREFIX {
             let mut file_name = String::new();
@@ -134,6 +185,7 @@ impl super::Context {
         let vk_info = vk::ShaderModuleCreateInfo::default().code(&spv);
 
         let vk_module = unsafe {
+            profiling::scope!("create vulkan shader module");
             self.device
                 .core
                 .create_shader_module(&vk_info, None)
@@ -354,6 +406,8 @@ impl crate::traits::ShaderDevice for super::Context {
     type RenderPipeline = super::RenderPipeline;
 
     fn create_compute_pipeline(&self, desc: crate::ComputePipelineDesc) -> super::ComputePipeline {
+        profiling::function_scope!();
+
         let mut group_infos = desc
             .data_layouts
             .iter()
@@ -417,6 +471,8 @@ impl crate::traits::ShaderDevice for super::Context {
     }
 
     fn create_render_pipeline(&self, desc: crate::RenderPipelineDesc) -> super::RenderPipeline {
+        profiling::function_scope!();
+
         let mut group_infos = desc
             .data_layouts
             .iter()

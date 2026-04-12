@@ -280,6 +280,7 @@ fn map_render_target<V: AsVkClear>(
 }
 
 fn end_pass(device: &super::Device, cmd_buf: vk::CommandBuffer) {
+    profiling::function_scope!();
     if device.command_scope.is_some() {
         unsafe {
             device.debug_utils.cmd_end_debug_utils_label(cmd_buf);
@@ -328,6 +329,7 @@ impl super::CommandEncoder {
     }
 
     fn begin_pass(&mut self, label: &str) {
+        profiling::function_scope!();
         self.barrier();
         self.add_marker(label);
         self.add_timestamp(label);
@@ -349,6 +351,8 @@ impl super::CommandEncoder {
     }
 
     pub(super) fn finish(&mut self) -> vk::CommandBuffer {
+        profiling::function_scope!();
+
         self.barrier();
         self.add_marker("finish");
         let cmd_buf = self.buffers.first_mut().unwrap();
@@ -368,6 +372,7 @@ impl super::CommandEncoder {
     }
 
     fn barrier(&mut self) {
+        profiling::function_scope!();
         let wa = &self.device.workarounds;
         let barrier = vk::MemoryBarrier {
             src_access_mask: vk::AccessFlags::MEMORY_WRITE | wa.extra_sync_src_access,
@@ -533,6 +538,8 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
     type Frame = super::Frame;
 
     fn start(&mut self) {
+        profiling::function_scope!();
+
         self.buffers.rotate_left(1);
         let cmd_buf = self.buffers.first_mut().unwrap();
         self.device
@@ -614,6 +621,8 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
     }
 
     fn present(&mut self, frame: super::Frame) {
+        profiling::function_scope!();
+
         let image_index = match frame.image_index {
             Some(index) => index,
             None => {
@@ -670,6 +679,7 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
 
     fn fill_buffer(&mut self, dst: crate::BufferPiece, size: u64, value: u8) {
         let value_u32 = (value as u32) * 0x1010101;
+
         unsafe {
             self.device
                 .core
@@ -761,6 +771,7 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
 
 impl Drop for super::TransferCommandEncoder<'_> {
     fn drop(&mut self) {
+        profiling::function_scope!();
         end_pass(self.device, self.raw);
     }
 }
@@ -852,6 +863,7 @@ impl crate::traits::AccelerationStructureEncoder
 
 impl Drop for super::AccelerationStructureCommandEncoder<'_> {
     fn drop(&mut self) {
+        profiling::function_scope!();
         end_pass(self.device, self.raw);
     }
 }
@@ -861,6 +873,7 @@ impl<'a> super::ComputeCommandEncoder<'a> {
         &'b mut self,
         pipeline: &'p super::ComputePipeline,
     ) -> super::PipelineEncoder<'b, 'p> {
+        profiling::function_scope!();
         let bind_point = vk::PipelineBindPoint::COMPUTE;
         unsafe {
             self.device
@@ -879,6 +892,7 @@ impl<'a> super::ComputeCommandEncoder<'a> {
 
 impl Drop for super::ComputeCommandEncoder<'_> {
     fn drop(&mut self) {
+        profiling::function_scope!();
         end_pass(self.device, self.cmd_buf.raw);
     }
 }
@@ -888,6 +902,7 @@ impl<'a> super::RenderCommandEncoder<'a> {
         &'b mut self,
         pipeline: &'p super::RenderPipeline,
     ) -> super::PipelineEncoder<'b, 'p> {
+        profiling::function_scope!();
         let bind_point = vk::PipelineBindPoint::GRAPHICS;
         unsafe {
             self.device
@@ -906,6 +921,7 @@ impl<'a> super::RenderCommandEncoder<'a> {
 
 impl Drop for super::RenderCommandEncoder<'_> {
     fn drop(&mut self) {
+        profiling::function_scope!();
         unsafe {
             self.device
                 .dynamic_rendering

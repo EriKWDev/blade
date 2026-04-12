@@ -272,6 +272,7 @@ impl super::Shader {
                             );
                             continue;
                         }
+
                         let binding = naga::Binding::Location {
                             location: attribute_mappings.len() as u32,
                             blend_src: None,
@@ -279,6 +280,7 @@ impl super::Shader {
                             sampling: None,
                             per_primitive: false,
                         };
+
                         for (buffer_index, vertex_fetch) in fetch_states.iter().enumerate() {
                             for (attribute_index, &(at_name, _)) in
                                 vertex_fetch.layout.attributes.iter().enumerate()
