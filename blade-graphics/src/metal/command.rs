@@ -218,6 +218,12 @@ impl super::CommandEncoder {
         }
     }
 
+    pub fn set_auto_barriers(&mut self, auto_barriers: bool) {
+        let _ = auto_barriers;
+    }
+
+    pub fn barrier(&mut self) {}
+
     pub fn render(
         &mut self,
         label: &str,

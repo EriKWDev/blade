@@ -330,6 +330,7 @@ pub struct CommandEncoder {
     crash_handler: Option<CrashHandler>,
     temp_label: Vec<u8>,
     timings: crate::Timings,
+    auto_barriers: bool,
 }
 pub struct TransferCommandEncoder<'a> {
     raw: vk::CommandBuffer,
@@ -466,6 +467,7 @@ impl crate::traits::CommandDevice for Context {
             crash_handler,
             temp_label: Vec::new(),
             timings: Default::default(),
+            auto_barriers: true,
         }
     }
 

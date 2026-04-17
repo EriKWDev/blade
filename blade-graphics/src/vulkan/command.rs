@@ -363,7 +363,9 @@ impl super::CommandEncoder {
 
     fn begin_pass(&mut self, label: &str) {
         profiling::function_scope!();
-        self.barrier();
+        if self.auto_barriers {
+            self.barrier();
+        }
         self.add_marker(label);
         self.add_timestamp(label);
 
@@ -386,7 +388,9 @@ impl super::CommandEncoder {
     pub(super) fn finish(&mut self) -> vk::CommandBuffer {
         profiling::function_scope!();
 
-        self.barrier();
+        if self.auto_barriers {
+            self.barrier();
+        }
         self.add_marker("finish");
         let cmd_buf = self.buffers.first_mut().unwrap();
         unsafe {
@@ -404,7 +408,11 @@ impl super::CommandEncoder {
         cmd_buf.raw
     }
 
-    fn barrier(&mut self) {
+    pub fn set_auto_barriers(&mut self, auto_barriers: bool) {
+        self.auto_barriers = auto_barriers;
+    }
+
+    pub fn barrier(&mut self) {
         profiling::function_scope!();
         let wa = &self.device.workarounds;
         let barrier = vk::MemoryBarrier {
