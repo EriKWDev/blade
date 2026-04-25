@@ -1,6 +1,6 @@
 [package]
 name = "blade-helpers"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Helper classes for Blade apps"
 keywords = ["graphics", "engine"]
@@ -12,7 +12,7 @@ repository = "https://github.com/kvark/blade"
 [features]
 
 [dependencies]
-blade-render = { version = "0.4", path = "../blade-render" }
+blade-render = { workspace = true }
 egui = { workspace = true }
 glam = { workspace = true }
 mint = { workspace = true }

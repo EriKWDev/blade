@@ -12,6 +12,16 @@ members = [
 exclude = []
 
 [workspace.dependencies]
+blade-graphics = { path = "blade-graphics", version = "0.8" }
+blade-util = { path = "blade-util", version = "0.4.1" }
+blade-egui = { path = "blade-egui", version = "0.8.1" }
+blade-particle = { path = "blade-particle", version = "0.1" }
+blade-macros = { path = "blade-macros", version = "0.3" }
+blade-helpers = { path = "blade-helpers", version = "0.2" }
+blade-asset = { path = "blade-asset", version = "0.2.1" }
+blade-render = { path = "blade-render", version = "0.5" }
+blade-engine = { path = "blade-engine", version = "0.1" }
+
 base64 = "0.21"
 bitflags = "2"
 bytemuck = { version = "1", features = ["derive"] }
@@ -46,11 +56,11 @@ readme = "docs/README.md"
 [features]
 
 [dependencies]
-blade-asset = { version = "0.2", path = "blade-asset" }
-blade-egui = { version = "0.6", path = "blade-egui" }
-blade-graphics = { version = "0.7", path = "blade-graphics" }
-blade-helpers = { version = "0.1", path = "blade-helpers" }
-blade-util = { version = "0.3", path = "blade-util" }
+blade-asset = { workspace = true }
+blade-egui = { workspace = true }
+blade-graphics = { workspace = true }
+blade-helpers = { workspace = true }
+blade-util = { workspace = true }
 base64 = { workspace = true }
 choir = { workspace = true }
 colorsys = "0.6"
@@ -67,7 +77,7 @@ slab = "0.4"
 winit = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-blade-render = { version = "0.4", path = "blade-render" }
+blade-render = { version = "0.5", path = "blade-render" }
 
 [dev-dependencies]
 blade-macros = { version = "0.3", path = "blade-macros" }

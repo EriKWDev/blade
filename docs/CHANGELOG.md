@@ -2,6 +2,27 @@ Changelog for *Blade* project
 
 ## blade-graphics-0.8.2 (TBD)
 
+- vk: support `VK_EXT_external_memory_host` — enable the extension, query memory-type compatibility via `vkGetMemoryHostPointerPropertiesEXT`, and round allocation size to `minImportedHostPointerAlignment` so `Memory::External(HostAllocation)` imports succeed on drivers that expose the extension
+
+## blade-egui-0.8.2, blade-util-0.4.1 (25 Apr 2026)
+
+- fix leaking textures and non-reusable buffers in egui workflow
+
+## blade-graphics-0.8.4 (17 Apr 2026)
+
+- vk: use driver API version for instance creation
+- vk: drop unnecessary `UNIFORM_READ` from intra-pass compute barrier
+- vk: log leaked GPU memory blocks by name on context teardown
+
+## blade-graphics-0.8.3 (17 Apr 2026)
+
+- vk: fix descriptor over-allocation for uniform data
+
+## blade-graphics-0.8.2 (14 Apr 2026)
+
+- add `ComputeCommandEncoder::barrier()` for inline compute-to-compute synchronization within a pass
+- enable `naga::valid::Capabilities::SUBGROUP` for shader validation
+- vulkan: fall back to UBO for larger uniform blocks on all systems
 - metal: enable fast math, skip debug groups in production
 - add `ComputeCommandEncoder::barrier()` for inline compute-to-compute synchronization within a pass
 
