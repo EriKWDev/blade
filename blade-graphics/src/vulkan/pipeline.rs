@@ -376,6 +376,73 @@ impl super::Context {
     }
 }
 
+fn get_pipeline_statistics_raw(
+    ctx: &super::Context,
+    raw: vk::Pipeline,
+) -> Vec<crate::PipelineExecutableInfo> {
+    let Some(ref ext) = ctx.device.pipeline_executable_properties else {
+        return Vec::new();
+    };
+
+    let pipeline_info = vk::PipelineInfoKHR::default().pipeline(raw);
+    let executables = match unsafe { ext.get_pipeline_executable_properties(&pipeline_info) } {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    executables
+        .iter()
+        .enumerate()
+        .map(|(i, exec)| {
+            let name = exec
+                .name_as_c_str()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+
+            let exec_info = vk::PipelineExecutableInfoKHR::default()
+                .pipeline(raw)
+                .executable_index(i as u32);
+
+            let statistics = unsafe { ext.get_pipeline_executable_statistics(&exec_info) }
+                .unwrap_or_default()
+                .iter()
+                .map(|stat| {
+                    let stat_name = stat
+                        .name_as_c_str()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let stat_desc = stat
+                        .description_as_c_str()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let value = unsafe {
+                        match stat.format {
+                            vk::PipelineExecutableStatisticFormatKHR::BOOL32 => {
+                                if stat.value.b32 != 0 { 1.0 } else { 0.0 }
+                            }
+                            vk::PipelineExecutableStatisticFormatKHR::INT64 => {
+                                stat.value.i64 as f64
+                            }
+                            vk::PipelineExecutableStatisticFormatKHR::UINT64 => {
+                                stat.value.u64 as f64
+                            }
+                            vk::PipelineExecutableStatisticFormatKHR::FLOAT64 => stat.value.f64,
+                            _ => 0.0,
+                        }
+                    };
+                    crate::PipelineStatistic {
+                        name: stat_name,
+                        description: stat_desc,
+                        value,
+                    }
+                })
+                .collect();
+
+            crate::PipelineExecutableInfo { name, statistics }
+        })
+        .collect()
+}
+
 #[hidden_trait::expose]
 impl crate::traits::ShaderDevice for super::Context {
     type ComputePipeline = super::ComputePipeline;
@@ -442,71 +509,17 @@ impl crate::traits::ShaderDevice for super::Context {
         }
     }
 
-    fn get_pipeline_statistics(
+    fn get_compute_pipeline_statistics(
         &self,
         pipeline: &super::ComputePipeline,
     ) -> Vec<crate::PipelineExecutableInfo> {
-        let Some(ref ext) = self.device.pipeline_executable_properties else {
-            return Vec::new();
-        };
-
-        let pipeline_info = vk::PipelineInfoKHR::default().pipeline(pipeline.raw);
-        let executables = match unsafe { ext.get_pipeline_executable_properties(&pipeline_info) } {
-            Ok(e) => e,
-            Err(_) => return Vec::new(),
-        };
-
-        executables
-            .iter()
-            .enumerate()
-            .map(|(i, exec)| {
-                let name = exec
-                    .name_as_c_str()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-
-                let exec_info = vk::PipelineExecutableInfoKHR::default()
-                    .pipeline(pipeline.raw)
-                    .executable_index(i as u32);
-
-                let statistics = unsafe { ext.get_pipeline_executable_statistics(&exec_info) }
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|stat| {
-                        let stat_name = stat
-                            .name_as_c_str()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let stat_desc = stat
-                            .description_as_c_str()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let value = unsafe {
-                            match stat.format {
-                                vk::PipelineExecutableStatisticFormatKHR::BOOL32 => {
-                                    if stat.value.b32 != 0 { 1.0 } else { 0.0 }
-                                }
-                                vk::PipelineExecutableStatisticFormatKHR::INT64 => {
-                                    stat.value.i64 as f64
-                                }
-                                vk::PipelineExecutableStatisticFormatKHR::UINT64 => {
-                                    stat.value.u64 as f64
-                                }
-                                vk::PipelineExecutableStatisticFormatKHR::FLOAT64 => stat.value.f64,
-                                _ => 0.0,
-                            }
-                        };
-                        crate::PipelineStatistic {
-                            name: stat_name,
-                            description: stat_desc,
-                            value,
-                        }
-                    })
-                    .collect();
-
-                crate::PipelineExecutableInfo { name, statistics }
-            })
-            .collect()
+        get_pipeline_statistics_raw(self, pipeline.raw)
+    }
+    fn get_render_pipeline_statistics(
+        &self,
+        pipeline: &super::RenderPipeline,
+    ) -> Vec<crate::PipelineExecutableInfo> {
+        get_pipeline_statistics_raw(self, pipeline.raw)
     }
 
     fn destroy_compute_pipeline(&self, pipeline: &mut super::ComputePipeline) {

@@ -345,9 +345,16 @@ impl crate::traits::ShaderDevice for super::Context {
         super::ComputePipeline { inner, wg_size }
     }
 
-    fn get_pipeline_statistics(
+    fn get_compute_pipeline_statistics(
         &self,
         _pipeline: &super::ComputePipeline,
+    ) -> Vec<crate::PipelineExecutableInfo> {
+        Vec::new()
+    }
+
+    fn get_render_pipeline_statistics(
+        &self,
+        _pipeline: &super::RenderPipeline,
     ) -> Vec<crate::PipelineExecutableInfo> {
         Vec::new()
     }

@@ -382,7 +382,7 @@ impl crate::traits::ShaderDevice for super::Context {
         })
     }
 
-    fn get_pipeline_statistics(
+    fn get_compute_pipeline_statistics(
         &self,
         pipeline: &super::ComputePipeline,
     ) -> Vec<crate::PipelineExecutableInfo> {
@@ -405,6 +405,16 @@ impl crate::traits::ShaderDevice for super::Context {
                     value: pipeline.raw.staticThreadgroupMemoryLength() as f64,
                 },
             ],
+        }]
+    }
+
+    fn get_render_pipeline_statistics(
+        &self,
+        pipeline: &super::RenderPipeline,
+    ) -> Vec<crate::PipelineExecutableInfo> {
+        vec![crate::PipelineExecutableInfo {
+            name: pipeline.name.clone(),
+            statistics: vec![], // TODO: Can we get anything useful here?
         }]
     }
 
