@@ -416,17 +416,17 @@ impl crate::traits::CommandDevice for Context {
                     vk::QueryPool::null()
                 };
                 let scratch = if !self.device.inline_uniform_blocks {
-                    const SCRATCH_SIZE: u64 = 1 << 20; // 1 MiB
+                    let size = desc.extra.ubo_scratch_size;
                     let buf = self.create_buffer(crate::BufferDesc {
                         name: "_scratch",
-                        size: SCRATCH_SIZE,
+                        size,
                         memory: crate::Memory::Shared,
                     });
                     Some(ScratchBuffer {
                         raw: buf.raw,
                         memory_handle: buf.memory_handle,
                         mapped: buf.mapped_data,
-                        capacity: SCRATCH_SIZE,
+                        capacity: size,
                         offset: 0,
                         alignment: self.min_uniform_buffer_offset_alignment,
                     })

@@ -17,6 +17,7 @@ impl FramePacer {
         let encoder = context.create_command_encoder(blade_graphics::CommandEncoderDesc {
             name: "main",
             buffer_count: 2,
+            extra: Default::default(),
         });
         Self {
             frame_index: 0,

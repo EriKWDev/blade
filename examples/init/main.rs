@@ -201,6 +201,7 @@ fn main() {
     let mut command_encoder = context.create_command_encoder(gpu::CommandEncoderDesc {
         name: "init",
         buffer_count: 1,
+            extra: Default::default(),
     });
     command_encoder.start();
     let mut dummy = blade_render::DummyResources::new(&mut command_encoder, &context);

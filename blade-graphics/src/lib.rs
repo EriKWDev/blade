@@ -756,12 +756,31 @@ pub enum CommandType {
     General,
 }
 
+/// Backend-specific and optional settings for a command encoder.
+/// Implements `Default` so callers that don't need to tune anything
+/// can write `extra: Default::default()`.
+#[derive(Clone, Debug)]
+pub struct CommandEncoderExtra {
+    /// Size in bytes of the per-buffer UBO scratch allocation used as a
+    /// fallback when inline uniform blocks are not available (Vulkan only).
+    pub ubo_scratch_size: u64,
+}
+
+impl Default for CommandEncoderExtra {
+    fn default() -> Self {
+        Self {
+            ubo_scratch_size: 1 << 20, // 1 MiB
+        }
+    }
+}
+
 pub struct CommandEncoderDesc<'a> {
     pub name: &'a str,
     /// Number of buffers that this encoder needs to keep alive.
     /// For example, one buffer is being run on GPU while the
     /// other is being actively encoded, which makes 2.
     pub buffer_count: u32,
+    pub extra: CommandEncoderExtra,
 }
 
 pub struct ComputePipelineDesc<'a> {
