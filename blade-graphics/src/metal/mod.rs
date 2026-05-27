@@ -651,7 +651,7 @@ impl crate::traits::CommandDevice for Context {
 
     fn destroy_command_encoder(&self, _command_encoder: &mut CommandEncoder) {}
 
-    fn submit(&self, encoder: &mut CommandEncoder, _wait_for: Option<&SyncPoint>) -> SyncPoint {
+    fn submit(&self, encoder: &mut CommandEncoder, _after: Option<&SyncPoint>) -> SyncPoint {
         use metal::MTLCommandBuffer as _;
         let cmd_buf = encoder.finish();
         cmd_buf.commit();

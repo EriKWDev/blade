@@ -46,7 +46,7 @@ pub trait CommandDevice {
     fn submit(
         &self,
         encoder: &mut Self::CommandEncoder,
-        wait_for: Option<&Self::SyncPoint>,
+        after: Option<&Self::SyncPoint>,
     ) -> Self::SyncPoint;
     fn wait_for(&self, sp: &Self::SyncPoint, timeout_ms: u32) -> bool;
 }
