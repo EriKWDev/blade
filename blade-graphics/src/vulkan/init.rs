@@ -8,8 +8,32 @@ mod db {
     pub mod intel {
         pub const VENDOR: u32 = 0x8086;
     }
+    pub mod nvidia {
+        pub const VENDOR: u32 = 0x10DE;
+    }
+    pub mod amd {
+        pub const VENDOR: u32 = 0x1002;
+    }
+    pub mod arm {
+        pub const VENDOR: u32 = 0x13B5;
+    }
     pub mod qualcomm {
         pub const VENDOR: u32 = 0x5143;
+    }
+    pub mod apple {
+        pub const VENDOR: u32 = 0x106B;
+    }
+}
+
+fn map_vendor(vendor_id: u32) -> crate::GpuVendor {
+    match vendor_id {
+        db::intel::VENDOR => crate::GpuVendor::Intel,
+        db::nvidia::VENDOR => crate::GpuVendor::Nvidia,
+        db::amd::VENDOR => crate::GpuVendor::Amd,
+        db::arm::VENDOR => crate::GpuVendor::Arm,
+        db::qualcomm::VENDOR => crate::GpuVendor::Qualcomm,
+        db::apple::VENDOR => crate::GpuVendor::Apple,
+        _ => crate::GpuVendor::Unknown,
     }
 }
 mod layer {
@@ -62,6 +86,7 @@ struct AdapterCapabilities {
     multidraw_indirect: bool,
     draw_indirect_count: bool,
     present_wait: bool,
+    vendor: crate::GpuVendor,
 }
 
 // See https://github.com/canonical/nvidia-prime/blob/587c5012be9dddcc17ab4d958f10a24fa3342b4d/prime-select#L56
@@ -329,6 +354,7 @@ unsafe fn inspect_adapter(
         multidraw_indirect,
         draw_indirect_count,
         present_wait,
+        vendor: map_vendor(properties.vendor_id),
     })
 }
 
@@ -743,6 +769,7 @@ impl super::Context {
             },
             supports_multidraw_indirect: capabilities.multidraw_indirect,
             supports_draw_indirect_count: capabilities.draw_indirect_count,
+            vendor: capabilities.vendor,
         };
 
         let memory_manager = {
@@ -893,6 +920,7 @@ impl super::Context {
             multidraw_indirect: self.device.supports_multidraw_indirect,
             draw_indexed_indirect_count: self.device.supports_draw_indirect_count,
             present_wait: self.device.present_wait.is_some(),
+            vendor: self.device.vendor.clone(),
         }
     }
 

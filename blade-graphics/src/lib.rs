@@ -122,6 +122,19 @@ impl From<PlatformError> for NotSupportedError {
     }
 }
 
+/// Best-effort GPU vendor identification.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum GpuVendor {
+    Intel,
+    Nvidia,
+    Amd,
+    Arm,
+    Qualcomm,
+    Apple,
+    #[default]
+    Unknown,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Capabilities {
     /// Which shader stages support ray queries
@@ -135,6 +148,9 @@ pub struct Capabilities {
 
     /// If draw_indexed_indirect_count is supported
     pub draw_indexed_indirect_count: bool,
+
+    /// Best-effort GPU vendor identification.
+    pub vendor: GpuVendor,
 
     /// If VK_KHR_present_wait is supported (Vulkan only).
     /// When true, `Context::wait_for_present` will block until the frame is actually displayed,

@@ -71,6 +71,7 @@ struct Device {
     workarounds: Workarounds,
     supports_multidraw_indirect: bool,
     supports_draw_indirect_count: bool,
+    vendor: crate::GpuVendor,
 }
 
 struct MemoryManager {

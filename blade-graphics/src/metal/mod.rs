@@ -587,6 +587,7 @@ impl Context {
             multidraw_indirect: true,
             draw_indexed_indirect_count: false,
             present_wait: false,
+            vendor: crate::GpuVendor::Apple,
         }
     }
 
