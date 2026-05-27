@@ -61,6 +61,7 @@ struct AdapterCapabilities {
     bugs: SystemBugs,
     multidraw_indirect: bool,
     draw_indirect_count: bool,
+    present_wait: bool,
 }
 
 // See https://github.com/canonical/nvidia-prime/blob/587c5012be9dddcc17ab4d958f10a24fa3342b4d/prime-select#L56
@@ -162,6 +163,8 @@ unsafe fn inspect_adapter(
     let mut acceleration_structure_features =
         vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
     let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
+    let mut present_id_features = vk::PhysicalDevicePresentIdFeaturesKHR::default();
+    let mut present_wait_features = vk::PhysicalDevicePresentWaitFeaturesKHR::default();
     let mut features2_khr = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut inline_uniform_block_features)
         .push_next(&mut timeline_semaphore_features)
@@ -169,7 +172,9 @@ unsafe fn inspect_adapter(
         .push_next(&mut descriptor_indexing_features)
         .push_next(&mut buffer_device_address_features)
         .push_next(&mut acceleration_structure_features)
-        .push_next(&mut ray_query_features);
+        .push_next(&mut ray_query_features)
+        .push_next(&mut present_id_features)
+        .push_next(&mut present_wait_features);
     instance
         .get_physical_device_properties2
         .get_physical_device_features2(phd, &mut features2_khr);
@@ -284,6 +289,15 @@ unsafe fn inspect_adapter(
     let shader_info = supported_extensions.contains(&vk::AMD_SHADER_INFO_NAME);
     let full_screen_exclusive = supported_extensions.contains(&vk::EXT_FULL_SCREEN_EXCLUSIVE_NAME);
 
+    let present_wait = desc.presentation
+        && supported_extensions.contains(&vk::KHR_PRESENT_ID_NAME)
+        && supported_extensions.contains(&vk::KHR_PRESENT_WAIT_NAME)
+        && present_id_features.present_id != 0
+        && present_wait_features.present_wait != 0;
+    if present_wait {
+        log::info!("VK_KHR_present_wait is supported");
+    }
+
     let device_information = crate::DeviceInformation {
         is_software_emulated: properties.device_type == vk::PhysicalDeviceType::CPU,
         device_name: ffi::CStr::from_ptr(properties.device_name.as_ptr())
@@ -314,6 +328,7 @@ unsafe fn inspect_adapter(
         bugs,
         multidraw_indirect,
         draw_indirect_count,
+        present_wait,
     })
 }
 
@@ -527,6 +542,10 @@ impl super::Context {
             if capabilities.draw_indirect_count {
                 device_extensions.push(vk::KHR_DRAW_INDIRECT_COUNT_NAME);
             }
+            if capabilities.present_wait {
+                device_extensions.push(vk::KHR_PRESENT_ID_NAME);
+                device_extensions.push(vk::KHR_PRESENT_WAIT_NAME);
+            }
 
             #[cfg(feature = "aftermath")]
             {
@@ -551,6 +570,14 @@ impl super::Context {
                 dynamic_rendering: vk::TRUE,
                 ..Default::default()
             };
+            let mut khr_present_id = vk::PhysicalDevicePresentIdFeaturesKHR {
+                present_id: vk::TRUE,
+                ..Default::default()
+            };
+            let mut khr_present_wait = vk::PhysicalDevicePresentWaitFeaturesKHR {
+                present_wait: vk::TRUE,
+                ..Default::default()
+            };
 
             let mut features = vk::PhysicalDeviceFeatures::default();
 
@@ -566,6 +593,11 @@ impl super::Context {
                 .push_next(&mut khr_dynamic_rendering);
             if capabilities.inline_uniform_blocks {
                 device_create_info = device_create_info.push_next(&mut ext_inline_uniform_block);
+            }
+            if capabilities.present_wait {
+                device_create_info = device_create_info
+                    .push_next(&mut khr_present_id)
+                    .push_next(&mut khr_present_wait);
             }
 
             #[cfg(feature = "aftermath")]
@@ -668,6 +700,11 @@ impl super::Context {
                 use khr::external_memory_win32::Device;
 
                 Some(Device::new(&instance.core, &device_core))
+            } else {
+                None
+            },
+            present_wait: if capabilities.present_wait {
+                Some(khr::present_wait::Device::new(&instance.core, &device_core))
             } else {
                 None
             },
@@ -855,6 +892,7 @@ impl super::Context {
             sample_count_mask: self.sample_count_flags.as_raw(),
             multidraw_indirect: self.device.supports_multidraw_indirect,
             draw_indexed_indirect_count: self.device.supports_draw_indirect_count,
+            present_wait: self.device.present_wait.is_some(),
         }
     }
 

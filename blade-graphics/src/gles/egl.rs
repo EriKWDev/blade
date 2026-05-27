@@ -541,6 +541,11 @@ impl super::Surface {
             },
         }
     }
+
+    /// GLES does not support VK_KHR_present_wait. Always returns 0.
+    pub fn last_present_id(&self) -> u64 {
+        0
+    }
 }
 
 unsafe fn find_library(paths: &[&str]) -> Option<libloading::Library> {

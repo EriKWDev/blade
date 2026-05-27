@@ -28,6 +28,11 @@ impl super::Surface {
         });
         super::Frame { drawable, texture }
     }
+
+    /// Metal does not support VK_KHR_present_wait. Always returns 0.
+    pub fn last_present_id(&self) -> u64 {
+        0
+    }
 }
 
 impl super::Context {

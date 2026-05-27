@@ -22,6 +22,8 @@ impl super::Surface {
 
     pub fn acquire_frame(&mut self) -> super::Frame {
         let acquire_semaphore = self.next_semaphore;
+        let present_id = self.next_present_id;
+        self.next_present_id += 1;
         match unsafe {
             self.device.acquire_next_image(
                 self.swapchain.raw,
@@ -39,6 +41,7 @@ impl super::Surface {
                     internal: self.frames[index as usize],
                     swapchain: self.swapchain,
                     image_index: Some(index),
+                    present_id,
                 }
             }
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
@@ -47,10 +50,19 @@ impl super::Surface {
                     internal: self.frames[0],
                     swapchain: self.swapchain,
                     image_index: None,
+                    present_id: 0,
                 }
             }
             Err(other) => panic!("Aquire image error {}", other),
         }
+    }
+
+    /// Returns the present ID of the most recently submitted present, or 0 if none yet.
+    ///
+    /// Call this after [`Context::submit`] on an encoder that called [`CommandEncoder::present`]
+    /// to get the ID to pass to [`Context::wait_for_present`].
+    pub fn last_present_id(&self) -> u64 {
+        self.next_present_id.saturating_sub(1)
     }
 }
 
@@ -136,6 +148,7 @@ impl super::Context {
                 target_size: [0; 2],
             },
             full_screen_exclusive: fullscreen_exclusive_ext.full_screen_exclusive_supported != 0,
+            next_present_id: 1,
         })
     }
 
@@ -360,6 +373,7 @@ impl super::Context {
         unsafe {
             surface.deinit_swapchain(&self.device.core);
         }
+        surface.next_present_id = 1;
 
         let images = unsafe { surface.device.get_swapchain_images(raw_swapchain).unwrap() };
         let target_size = [config.size.width as u16, config.size.height as u16];

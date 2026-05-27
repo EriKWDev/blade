@@ -448,7 +448,18 @@ impl Context {
             sample_count_mask: 0x1 | 0x4, //TODO: accurate info
             multidraw_indirect: false,
             draw_indexed_indirect_count: false,
+            present_wait: false,
         }
+    }
+
+    /// GLES does not support VK_KHR_present_wait. Always returns true immediately.
+    pub fn wait_for_present(
+        &self,
+        _surface: &Surface,
+        _present_id: u64,
+        _timeout_ms: u32,
+    ) -> bool {
+        true
     }
 
     pub fn device_information(&self) -> &crate::DeviceInformation {

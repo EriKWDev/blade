@@ -135,6 +135,11 @@ pub struct Capabilities {
 
     /// If draw_indexed_indirect_count is supported
     pub draw_indexed_indirect_count: bool,
+
+    /// If VK_KHR_present_wait is supported (Vulkan only).
+    /// When true, `Context::wait_for_present` will block until the frame is actually displayed,
+    /// enabling CPU-side vsync pacing independent of `vkAcquireNextImageKHR` blocking behaviour.
+    pub present_wait: bool,
 }
 
 #[derive(Clone, Debug, Default)]

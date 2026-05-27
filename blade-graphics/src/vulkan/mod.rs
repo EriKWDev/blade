@@ -65,6 +65,7 @@ struct Device {
     external_memory: Option<ash::khr::external_memory_win32::Device>,
     #[cfg(not(target_os = "windows"))]
     external_memory: Option<ash::khr::external_memory_fd::Device>,
+    present_wait: Option<khr::present_wait::Device>,
     command_scope: Option<CommandScopeDevice>,
     timing: Option<TimingDevice>,
     workarounds: Workarounds,
@@ -107,6 +108,9 @@ pub struct Surface {
     next_semaphore: vk::Semaphore,
     swapchain: Swapchain,
     full_screen_exclusive: bool,
+    /// Monotonically increasing ID assigned to each vkQueuePresentKHR call.
+    /// Used with VK_KHR_present_wait to block until a specific frame is displayed.
+    next_present_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -115,6 +119,8 @@ struct Presentation {
     image_index: u32,
     acquire_semaphore: vk::Semaphore,
     present_semaphore: vk::Semaphore,
+    /// The present ID assigned at acquire time (0 = not tracked).
+    present_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -122,6 +128,8 @@ pub struct Frame {
     swapchain: Swapchain,
     image_index: Option<u32>,
     internal: InternalFrame,
+    /// Present ID to assign when this frame is submitted for display (0 = not tracked).
+    present_id: u64,
 }
 
 impl Frame {
@@ -575,11 +583,23 @@ impl crate::traits::CommandDevice for Context {
             let swapchains = [presentation.swapchain];
             let image_indices = [presentation.image_index];
             let wait_semaphores = [presentation.present_semaphore];
-            let present_info = vk::PresentInfoKHR::default()
-                .swapchains(&swapchains)
-                .image_indices(&image_indices)
-                .wait_semaphores(&wait_semaphores);
-            let ret = unsafe { khr_swapchain.queue_present(queue.raw, &present_info) };
+            let ret = if self.device.present_wait.is_some() && presentation.present_id != 0 {
+                let present_ids = [presentation.present_id];
+                let mut present_id_info =
+                    vk::PresentIdKHR::default().present_ids(&present_ids);
+                let present_info = vk::PresentInfoKHR::default()
+                    .swapchains(&swapchains)
+                    .image_indices(&image_indices)
+                    .wait_semaphores(&wait_semaphores)
+                    .push_next(&mut present_id_info);
+                unsafe { khr_swapchain.queue_present(queue.raw, &present_info) }
+            } else {
+                let present_info = vk::PresentInfoKHR::default()
+                    .swapchains(&swapchains)
+                    .image_indices(&image_indices)
+                    .wait_semaphores(&wait_semaphores);
+                unsafe { khr_swapchain.queue_present(queue.raw, &present_info) }
+            };
             let _ = encoder.check_gpu_crash(ret);
         }
 
@@ -601,6 +621,28 @@ impl crate::traits::CommandDevice for Context {
                 .timeline_semaphore
                 .wait_semaphores(&wait_info, timeout_ns)
                 .is_ok()
+        }
+    }
+}
+
+impl Context {
+    /// Blocks until the present with the given ID has been displayed on the surface.
+    ///
+    /// Returns `true` if the present completed within the timeout, `false` if it timed out.
+    /// If VK_KHR_present_wait is not supported, returns `true` immediately.
+    ///
+    /// `present_id` is obtained from [`Surface::last_present_id`] after submitting the
+    /// encoder that calls [`CommandEncoder::present`].
+    pub fn wait_for_present(&self, surface: &Surface, present_id: u64, timeout_ms: u32) -> bool {
+        match self.device.present_wait {
+            Some(ref pw) => {
+                let timeout_ns = map_timeout(timeout_ms);
+                unsafe {
+                    pw.wait_for_present(surface.swapchain.raw, present_id, timeout_ns)
+                        .is_ok()
+                }
+            }
+            None => true,
         }
     }
 }

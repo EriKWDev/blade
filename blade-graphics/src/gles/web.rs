@@ -39,6 +39,11 @@ impl super::Surface {
             },
         }
     }
+
+    /// GLES/WebGL does not support VK_KHR_present_wait. Always returns 0.
+    pub fn last_present_id(&self) -> u64 {
+        0
+    }
 }
 
 impl PlatformContext {

@@ -586,7 +586,18 @@ impl Context {
 
             multidraw_indirect: true,
             draw_indexed_indirect_count: false,
+            present_wait: false,
         }
+    }
+
+    /// Metal serializes presentation implicitly; always returns true immediately.
+    pub fn wait_for_present(
+        &self,
+        _surface: &Surface,
+        _present_id: u64,
+        _timeout_ms: u32,
+    ) -> bool {
+        true
     }
 
     pub fn device_information(&self) -> &crate::DeviceInformation {
