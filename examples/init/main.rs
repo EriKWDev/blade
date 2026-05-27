@@ -226,7 +226,7 @@ fn main() {
         &context,
     );
     env_sampler.accumulate(&mut command_encoder, env_map.main_view, env_map.weight_view);
-    let sync_point = context.submit(&mut command_encoder);
+    let sync_point = context.submit(&mut command_encoder, None);
 
     context.wait_for(&sync_point, !0);
     context.destroy_command_encoder(&mut command_encoder);

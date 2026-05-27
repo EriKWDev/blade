@@ -168,7 +168,7 @@ fn main() {
             },
         );
     }
-    let sync_point = context.submit(&mut command_encoder);
+    let sync_point = context.submit(&mut command_encoder, None);
 
     let ok = context.wait_for(&sync_point, 1000);
     assert!(ok);

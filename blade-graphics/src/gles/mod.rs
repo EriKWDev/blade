@@ -507,7 +507,7 @@ impl crate::traits::CommandDevice for Context {
         }
     }
 
-    fn submit(&self, encoder: &mut CommandEncoder) -> SyncPoint {
+    fn submit(&self, encoder: &mut CommandEncoder, _wait_for: Option<&SyncPoint>) -> SyncPoint {
         use glow::HasContext as _;
 
         let fence = {

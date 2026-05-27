@@ -216,7 +216,7 @@ impl Example {
         if let mut transfer = command_encoder.transfer("init texture") {
             transfer.copy_buffer_to_texture(upload_buffer.into(), 4, texture.into(), extent);
         }
-        let sync_point = context.submit(&mut command_encoder);
+        let sync_point = context.submit(&mut command_encoder, None);
         context.wait_for(&sync_point, !0);
 
         context.destroy_buffer(upload_buffer);
@@ -341,7 +341,7 @@ impl Example {
             }
         }
         self.command_encoder.present(frame);
-        let sync_point = self.context.submit(&mut self.command_encoder);
+        let sync_point = self.context.submit(&mut self.command_encoder, None);
         if let Some(sp) = self.prev_sync_point.take() {
             self.context.wait_for(&sp, !0);
         }

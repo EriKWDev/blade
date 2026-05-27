@@ -154,7 +154,7 @@ impl Example {
         });
         command_encoder.start();
         particle_system.reset(&mut command_encoder);
-        let sync_point = context.submit(&mut command_encoder);
+        let sync_point = context.submit(&mut command_encoder, None);
 
         Self {
             command_encoder,
@@ -268,7 +268,7 @@ impl Example {
         }
 
         self.command_encoder.present(frame);
-        let sync_point = self.context.submit(&mut self.command_encoder);
+        let sync_point = self.context.submit(&mut self.command_encoder, None);
         self.gui_painter.after_submit(&sync_point);
 
         if let Some(sp) = self.prev_sync_point.take() {
@@ -314,7 +314,7 @@ impl Example {
                         self.particle_system.params = old_params;
                         self.command_encoder.start();
                         self.particle_system.reset(&mut self.command_encoder);
-                        let sp = self.context.submit(&mut self.command_encoder);
+                        let sp = self.context.submit(&mut self.command_encoder, None);
                         self.context.wait_for(&sp, !0);
 
                         if let Some(msaa_view) = self.msaa_view.take() {

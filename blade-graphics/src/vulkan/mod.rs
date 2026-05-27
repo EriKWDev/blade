@@ -507,7 +507,11 @@ impl crate::traits::CommandDevice for Context {
         };
     }
 
-    fn submit(&self, encoder: &mut CommandEncoder) -> SyncPoint {
+    fn submit(
+        &self,
+        encoder: &mut CommandEncoder,
+        after: Option<&SyncPoint>,
+    ) -> SyncPoint {
         profiling::function_scope!();
 
         let raw_cmd_buf = encoder.finish();
@@ -519,27 +523,44 @@ impl crate::traits::CommandDevice for Context {
         queue.last_progress += 1;
         let progress = queue.last_progress;
         let command_buffers = [raw_cmd_buf];
-        let wait_values_all = [0];
-        let mut wait_semaphores_all = [vk::Semaphore::null()];
-        let wait_stages = [vk::PipelineStageFlags::ALL_COMMANDS];
+
+        // Up to 2 wait semaphores: optional sync-point (timeline) + optional acquire (binary).
+        let mut num_wait = 0usize;
+        let mut wait_semaphores_all = [vk::Semaphore::null(); 2];
+        let mut wait_values_all = [0u64; 2];
+        let mut wait_stages_all = [vk::PipelineStageFlags::empty(); 2];
+
+        if let Some(sp) = after {
+            wait_semaphores_all[num_wait] = queue.timeline_semaphore;
+            wait_values_all[num_wait] = sp.progress;
+            wait_stages_all[num_wait] = vk::PipelineStageFlags::ALL_COMMANDS;
+            num_wait += 1;
+        }
+
         let mut signal_semaphores_all = [queue.timeline_semaphore, vk::Semaphore::null()];
         let signal_values_all = [progress, 0];
-        let (num_wait_semaphores, num_signal_sepahores) = match encoder.present {
+        let num_signal = match encoder.present {
             Some(ref presentation) => {
-                wait_semaphores_all[0] = presentation.acquire_semaphore;
+                wait_semaphores_all[num_wait] = presentation.acquire_semaphore;
+                wait_values_all[num_wait] = 0; // binary semaphore, value ignored
+                wait_stages_all[num_wait] = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::COMPUTE_SHADER
+                    | vk::PipelineStageFlags::TRANSFER;
+                num_wait += 1;
                 signal_semaphores_all[1] = presentation.present_semaphore;
-                (1, 2)
+                2
             }
-            None => (0, 1),
+            None => 1,
         };
+
         let mut timeline_info = vk::TimelineSemaphoreSubmitInfo::default()
-            .wait_semaphore_values(&wait_values_all[..num_wait_semaphores])
-            .signal_semaphore_values(&signal_values_all[..num_signal_sepahores]);
+            .wait_semaphore_values(&wait_values_all[..num_wait])
+            .signal_semaphore_values(&signal_values_all[..num_signal]);
         let vk_info = vk::SubmitInfo::default()
             .command_buffers(&command_buffers)
-            .wait_semaphores(&wait_semaphores_all[..num_wait_semaphores])
-            .wait_dst_stage_mask(&wait_stages[..num_wait_semaphores])
-            .signal_semaphores(&signal_semaphores_all[..num_signal_sepahores])
+            .wait_semaphores(&wait_semaphores_all[..num_wait])
+            .wait_dst_stage_mask(&wait_stages_all[..num_wait])
+            .signal_semaphores(&signal_semaphores_all[..num_signal])
             .push_next(&mut timeline_info);
         let ret = unsafe {
             profiling::scope!("submit to queue");

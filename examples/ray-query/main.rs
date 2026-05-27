@@ -227,7 +227,7 @@ impl Example {
                 scratch_buffer.at(tlas_scratch_offset),
             );
         }
-        let sync_point = context.submit(&mut command_encoder);
+        let sync_point = context.submit(&mut command_encoder, None);
 
         context.wait_for(&sync_point, !0);
         context.destroy_buffer(vertex_buf);
@@ -322,7 +322,7 @@ impl Example {
         }
 
         self.command_encoder.present(frame);
-        let sync_point = self.context.submit(&mut self.command_encoder);
+        let sync_point = self.context.submit(&mut self.command_encoder, None);
 
         if let Some(sp) = self.prev_sync_point.take() {
             self.context.wait_for(&sp, !0);

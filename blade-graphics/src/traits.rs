@@ -43,7 +43,11 @@ pub trait CommandDevice {
 
     fn create_command_encoder(&self, desc: super::CommandEncoderDesc) -> Self::CommandEncoder;
     fn destroy_command_encoder(&self, encoder: &mut Self::CommandEncoder);
-    fn submit(&self, encoder: &mut Self::CommandEncoder) -> Self::SyncPoint;
+    fn submit(
+        &self,
+        encoder: &mut Self::CommandEncoder,
+        wait_for: Option<&Self::SyncPoint>,
+    ) -> Self::SyncPoint;
     fn wait_for(&self, sp: &Self::SyncPoint, timeout_ms: u32) -> bool;
 }
 
