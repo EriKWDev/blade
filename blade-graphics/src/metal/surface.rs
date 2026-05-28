@@ -113,7 +113,7 @@ impl super::Context {
     }
 
     pub fn reconfigure_surface(&self, surface: &mut super::Surface, config: crate::SurfaceConfig) {
-        let device = self.device.lock().unwrap();
+        let device = &self.device.0;
         surface.info = crate::SurfaceInfo {
             format: match config.color_space {
                 crate::ColorSpace::Linear => crate::TextureFormat::Bgra8UnormSrgb,

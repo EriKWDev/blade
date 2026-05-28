@@ -94,8 +94,7 @@ impl super::Context {
         let descriptor = super::make_bottom_level_acceleration_structure_desc(meshes);
         let accel_sizes = self
             .device
-            .lock()
-            .unwrap()
+            .0
             .accelerationStructureSizesWithDescriptor(&descriptor);
 
         crate::AccelerationStructureSizes {
@@ -113,8 +112,7 @@ impl super::Context {
 
         let accel_sizes = self
             .device
-            .lock()
-            .unwrap()
+            .0
             .accelerationStructureSizesWithDescriptor(&descriptor);
 
         crate::AccelerationStructureSizes {
@@ -156,8 +154,7 @@ impl super::Context {
         }
         let object = objc2::rc::autoreleasepool(|_| unsafe {
             self.device
-                .lock()
-                .unwrap()
+                .0
                 .newBufferWithBytes_length_options(
                     ptr::NonNull::new(instance_descriptors.as_ptr() as *mut _).unwrap(),
                     mem::size_of::<metal::MTLAccelerationStructureUserIDInstanceDescriptor>()
@@ -192,8 +189,7 @@ impl crate::traits::ResourceDevice for super::Context {
         };
         let object = objc2::rc::autoreleasepool(|_| {
             self.device
-                .lock()
-                .unwrap()
+                .0
                 .newBufferWithLength_options(desc.size as usize, options)
                 .unwrap()
         });
@@ -255,8 +251,7 @@ impl crate::traits::ResourceDevice for super::Context {
             descriptor.setStorageMode(metal::MTLStorageMode::Private);
 
             self.device
-                .lock()
-                .unwrap()
+                .0
                 .newTextureWithDescriptor(&descriptor)
                 .unwrap()
         });
@@ -358,8 +353,7 @@ impl crate::traits::ResourceDevice for super::Context {
                 descriptor.setLabel(Some(&NSString::from_str(desc.name)));
             }
             self.device
-                .lock()
-                .unwrap()
+                .0
                 .newSamplerStateWithDescriptor(&descriptor)
                 .unwrap()
         });
@@ -380,8 +374,7 @@ impl crate::traits::ResourceDevice for super::Context {
         let object = objc2::rc::autoreleasepool(|_| {
             //TODO: use `newAccelerationStructureWithDescriptor`
             self.device
-                .lock()
-                .unwrap()
+                .0
                 .newAccelerationStructureWithSize(desc.size as usize)
                 .unwrap()
         });

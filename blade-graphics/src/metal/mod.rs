@@ -7,6 +7,16 @@ use std::{
     thread, time,
 };
 
+/// Newtype that asserts `Send + Sync` for `MTLDevice`.
+///
+/// SAFETY: Apple's Metal specification guarantees that all Metal objects,
+/// including `MTLDevice` and its factory methods, are re-entrant and safe
+/// to use concurrently from multiple threads without external synchronization.
+/// ARC retain/release operations on Metal objects use atomic instructions.
+struct SharedDevice(Retained<ProtocolObject<dyn metal::MTLDevice>>);
+unsafe impl Send for SharedDevice {}
+unsafe impl Sync for SharedDevice {}
+
 mod command;
 mod pipeline;
 mod resource;
@@ -54,7 +64,7 @@ struct PrivateInfo {
 }
 
 pub struct Context {
-    device: Mutex<Retained<ProtocolObject<dyn metal::MTLDevice>>>,
+    device: SharedDevice,
     queue: Arc<Mutex<Retained<ProtocolObject<dyn metal::MTLCommandQueue>>>>,
     capture: Option<Retained<metal::MTLCaptureManager>>,
     timestamp_counter_set: Option<Retained<ProtocolObject<dyn metal::MTLCounterSet>>>,
@@ -550,7 +560,7 @@ impl Context {
         }
 
         Ok(Context {
-            device: Mutex::new(device),
+            device: SharedDevice(device),
             queue: Arc::new(Mutex::new(queue)),
             capture,
             timestamp_counter_set,
@@ -566,7 +576,7 @@ impl Context {
 
     pub fn capabilities(&self) -> crate::Capabilities {
         use metal::MTLDevice as _;
-        let device = self.device.lock().unwrap();
+        let device = &self.device.0;
 
         crate::Capabilities {
             ray_query: if device.supportsFamily(metal::MTLGPUFamily::Apple6) {
@@ -608,7 +618,7 @@ impl Context {
     /// Get an MTLDevice of this context.
     /// This is platform specific API.
     pub fn metal_device(&self) -> Retained<ProtocolObject<dyn metal::MTLDevice>> {
-        self.device.lock().unwrap().clone()
+        self.device.0.clone()
     }
 }
 
@@ -634,8 +644,7 @@ impl crate::traits::CommandDevice for Context {
                 let sample_buffer = unsafe {
                     csb_desc.setLabel(&objc2_foundation::NSString::from_str(&label));
                     self.device
-                        .lock()
-                        .unwrap()
+                        .0
                         .newCounterSampleBufferWithDescriptor_error(&csb_desc)
                         .unwrap()
                 };

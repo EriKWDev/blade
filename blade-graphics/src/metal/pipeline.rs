@@ -317,8 +317,7 @@ impl super::Context {
 
         let library = self
             .device
-            .lock()
-            .unwrap()
+            .0
             .newLibraryWithSource_options_error(&source_string, Some(&options))
             .unwrap_or_else(|err| {
                 panic!("MSL compilation error:\n{}", err.localizedDescription());
@@ -367,8 +366,7 @@ impl crate::traits::ShaderDevice for super::Context {
             // https://github.com/madsmtm/objc2/issues/683
             let raw = self
                 .device
-                .lock()
-                .unwrap()
+                .0
                 .newComputePipelineStateWithFunction_error(&cs.function)
                 .unwrap();
 
@@ -525,8 +523,7 @@ impl crate::traits::ShaderDevice for super::Context {
                     let ds_descriptor = create_depth_stencil_desc(ds);
                     let raw = self
                         .device
-                        .lock()
-                        .unwrap()
+                        .0
                         .newDepthStencilStateWithDescriptor(&ds_descriptor)
                         .unwrap();
                     Some((raw, ds.bias))
@@ -539,8 +536,7 @@ impl crate::traits::ShaderDevice for super::Context {
 
             let raw = self
                 .device
-                .lock()
-                .unwrap()
+                .0
                 .newRenderPipelineStateWithDescriptor_error(&descriptor)
                 .unwrap();
 
