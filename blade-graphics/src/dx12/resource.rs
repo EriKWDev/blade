@@ -315,6 +315,30 @@ impl crate::traits::ResourceDevice for super::Context {
     }
 }
 
+impl super::Context {
+    pub fn get_bottom_level_acceleration_structure_sizes(
+        &self,
+        _meshes: &[crate::AccelerationStructureMesh],
+    ) -> crate::AccelerationStructureSizes {
+        unimplemented!("DX12 acceleration structures not yet implemented")
+    }
+
+    pub fn get_top_level_acceleration_structure_sizes(
+        &self,
+        _instance_count: u32,
+    ) -> crate::AccelerationStructureSizes {
+        unimplemented!("DX12 acceleration structures not yet implemented")
+    }
+
+    pub fn create_acceleration_structure_instance_buffer(
+        &self,
+        _instances: &[crate::AccelerationStructureInstance],
+        _bottom_level: &[super::AccelerationStructure],
+    ) -> super::Buffer {
+        unimplemented!("DX12 acceleration structures not yet implemented")
+    }
+}
+
 // ── SRV / UAV / RTV / DSV descriptor builders ─────────────────────────────────
 
 fn mip_range(sr: &crate::TextureSubresources) -> (u32, u32) {

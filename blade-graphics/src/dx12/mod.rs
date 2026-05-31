@@ -1,4 +1,4 @@
-use std::{mem, ptr, sync::Mutex};
+use std::{ptr, sync::Mutex};
 use windows::{
     core::Interface,
     Win32::{
@@ -28,6 +28,14 @@ pub(super) const ENCODER_SAMPLER_SIZE: u32 = 2048;
 // Sized generously to hold a frame's uniform binds (large `materials`-style
 // arrays + per-draw locals); reset each `start()`.
 pub(super) const UPLOAD_RING_SIZE: u64 = 16 * 1024 * 1024;
+
+// Register spaces for naga 28's HLSL sampler-heap model. Chosen high to never
+// collide with per-group spaces (group `g` uses `space g`).
+//   nagaSamplerHeap[]           : register(s0, space SAMPLER_HEAP_SPACE)
+//   nagaComparisonSamplerHeap[] : register(s0, space SAMPLER_HEAP_SPACE + 1)
+//   nagaGroup{g}SamplerIndexArray : register(t0, space SAMPLER_INDEX_SPACE_BASE + g)
+pub(super) const SAMPLER_HEAP_SPACE: u32 = 1000;
+pub(super) const SAMPLER_INDEX_SPACE_BASE: u32 = 2000;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -353,8 +361,13 @@ pub(super) struct BindingSlot {
 
 #[derive(Clone, Debug)]
 pub(super) struct GroupDescriptors {
+    /// Root parameter index of this group's CBV/SRV/UAV descriptor table.
     pub cbv_srv_uav_root_index: Option<u32>,
-    pub sampler_root_index: Option<u32>,
+    /// Root parameter index of this group's sampler-index-buffer root SRV.
+    /// naga 28's HLSL backend addresses samplers as
+    /// `nagaSamplerHeap[nagaGroupNSamplerIndexArray[register]]`, so each group
+    /// with samplers needs a `StructuredBuffer<uint>` holding the heap indices.
+    pub sampler_index_root_index: Option<u32>,
     pub cbv_srv_uav_count: u32,
     pub sampler_count: u32,
     pub slots: Vec<BindingSlot>,
@@ -364,6 +377,9 @@ pub(super) struct GroupDescriptors {
 pub(super) struct PipelineLayout {
     pub root_signature: ID3D12RootSignature,
     pub groups: Vec<GroupDescriptors>,
+    /// Root parameter indices of the two global sampler heaps
+    /// (standard, comparison). Present iff any group has samplers.
+    pub sampler_heap_roots: Option<(u32, u32)>,
 }
 
 pub struct ComputePipeline {
@@ -482,6 +498,17 @@ impl UploadRing {
         self.offset = 0;
     }
 
+    /// Write `data` at an `align`-aligned offset; returns its GPU address.
+    /// Used for the per-group sampler-index buffer (root SRV → 4-byte aligned).
+    pub fn write_aligned(&mut self, data: &[u8], align: u64) -> u64 {
+        let aligned = (self.offset + align - 1) & !(align - 1);
+        let end = aligned + data.len() as u64;
+        assert!(end <= self.capacity, "upload ring overflow");
+        unsafe { ptr::copy_nonoverlapping(data.as_ptr(), self.mapped.add(aligned as usize), data.len()) };
+        self.offset = end;
+        self.gpu_address + aligned
+    }
+
     /// Write `data` at a 256-aligned offset and reserve a 256-aligned span (a CBV
     /// reads `SizeInBytes` rounded up to 256, so the whole span must stay in bounds).
     /// Returns the GPU address of the written data.
@@ -570,7 +597,8 @@ pub struct PipelineContext<'a> {
     pub(super) group_descriptors: &'a GroupDescriptors,
     /// Base of this group's CBV/SRV/UAV descriptors in the GPU-visible ring.
     pub(super) ring_cpu_base: D3D12_CPU_DESCRIPTOR_HANDLE,
-    /// Base of this group's sampler descriptors in the GPU-visible sampler ring.
+    /// Base of this group's samplers in the GPU-visible sampler ring (CPU handle).
+    /// Each `Sampler::bind_to` copies into `sampler_cpu_base + register`.
     pub(super) sampler_cpu_base: D3D12_CPU_DESCRIPTOR_HANDLE,
 }
 
@@ -810,12 +838,13 @@ pub(super) fn analyze_group(
     let cbv_srv_uav_root_index = if cbv_srv_uav_count > 0 {
         let i = *root_base; *root_base += 1; Some(i)
     } else { None };
-    let sampler_root_index = if smp > 0 {
+    // Root SRV holding this group's sampler-index buffer (see GroupDescriptors).
+    let sampler_index_root_index = if smp > 0 {
         let i = *root_base; *root_base += 1; Some(i)
     } else { None };
 
     let mut srv_off = 0u32; let mut uav_off = srv;
-    let mut cbv_off = srv + uav; let mut smp_off = 0u32;
+    let mut cbv_off = srv + uav;
     let mut srv_reg = 0u32; let mut uav_reg = 0u32;
     let mut cbv_reg = 0u32; let mut smp_reg = 0u32;
 
@@ -826,14 +855,16 @@ pub(super) fn analyze_group(
             BindingKind::Srv => { let v = (srv_off, srv_reg); srv_off += 1; srv_reg += 1; v }
             BindingKind::Uav => { let v = (uav_off, uav_reg); uav_off += 1; uav_reg += 1; v }
             BindingKind::Cbv => { let v = (cbv_off, cbv_reg); cbv_off += 1; cbv_reg += 1; v }
-            BindingKind::Sampler => { let v = (smp_off, smp_reg); smp_off += 1; smp_reg += 1; v }
+            // For samplers `heap_offset` is unused; `register` is the index into
+            // this group's sampler-index buffer (== slot in the sampler ring).
+            BindingKind::Sampler => { let v = (0u32, smp_reg); smp_reg += 1; v }
         };
         BindingSlot { heap_offset, register, kind }
     }).collect();
 
     GroupDescriptors {
         cbv_srv_uav_root_index,
-        sampler_root_index,
+        sampler_index_root_index,
         cbv_srv_uav_count,
         sampler_count: smp,
         slots,

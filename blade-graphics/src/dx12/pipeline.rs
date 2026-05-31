@@ -12,8 +12,10 @@ use super::{BindingKind, GroupDescriptors, PipelineLayout};
 
 // ── Binding map construction ──────────────────────────────────────────────────
 
-/// Build the naga HLSL binding map so each binding is re-mapped to
-/// a dense register index (per type) within its group's register space.
+/// Build the naga HLSL binding map: each binding is re-mapped to a dense
+/// per-type register within its group's register space (`space == group`).
+/// For samplers, `register` is the index into that group's sampler-index
+/// buffer (naga emits `nagaSamplerHeap[nagaGroupNSamplerIndexArray[register]]`).
 fn make_binding_map(groups: &[GroupDescriptors]) -> BTreeMap<naga::ResourceBinding, naga::back::hlsl::BindTarget> {
     let mut map = BTreeMap::new();
     for (g, gd) in groups.iter().enumerate() {
@@ -33,79 +35,119 @@ fn make_binding_map(groups: &[GroupDescriptors]) -> BTreeMap<naga::ResourceBindi
     map
 }
 
+/// naga HLSL sampler options: where the sampler heaps and per-group sampler
+/// index buffers live. Must agree with the root signature built below.
+fn make_sampler_options(
+    groups: &[GroupDescriptors],
+) -> (
+    naga::back::hlsl::SamplerHeapBindTargets,
+    std::collections::BTreeMap<naga::back::hlsl::SamplerIndexBufferKey, naga::back::hlsl::BindTarget>,
+) {
+    let heap = naga::back::hlsl::SamplerHeapBindTargets {
+        standard_samplers: naga::back::hlsl::BindTarget {
+            space: super::SAMPLER_HEAP_SPACE as u8,
+            register: 0,
+            binding_array_size: None,
+            dynamic_storage_buffer_offsets_index: None,
+            restrict_indexing: false,
+        },
+        comparison_samplers: naga::back::hlsl::BindTarget {
+            space: (super::SAMPLER_HEAP_SPACE + 1) as u8,
+            register: 0,
+            binding_array_size: None,
+            dynamic_storage_buffer_offsets_index: None,
+            restrict_indexing: false,
+        },
+    };
+    let mut index_map = std::collections::BTreeMap::new();
+    for (g, gd) in groups.iter().enumerate() {
+        if gd.sampler_count > 0 {
+            index_map.insert(
+                naga::back::hlsl::SamplerIndexBufferKey { group: g as u32 },
+                naga::back::hlsl::BindTarget {
+                    space: (super::SAMPLER_INDEX_SPACE_BASE + g as u32) as u8,
+                    register: 0,
+                    binding_array_size: None,
+                    dynamic_storage_buffer_offsets_index: None,
+                    restrict_indexing: false,
+                },
+            );
+        }
+    }
+    (heap, index_map)
+}
+
 // ── Root signature construction ───────────────────────────────────────────────
 
 fn build_root_signature(
     device: &ID3D12Device,
     groups: &[GroupDescriptors],
-) -> ID3D12RootSignature {
-    // Collect all ranges in stable Vecs before taking pointers.
-    let mut all_cbv_srv_uav_ranges: Vec<Vec<D3D12_DESCRIPTOR_RANGE>> = Vec::new();
-    let mut all_sampler_ranges: Vec<Vec<D3D12_DESCRIPTOR_RANGE>> = Vec::new();
-    let mut params: Vec<D3D12_ROOT_PARAMETER> = Vec::new();
-
+) -> (ID3D12RootSignature, Option<(u32, u32)>) {
+    // Stable storage for descriptor ranges (params hold raw pointers into these).
+    let mut all_cbv_srv_uav_ranges: Vec<Vec<D3D12_DESCRIPTOR_RANGE>> =
+        groups.iter().map(|_| Vec::new()).collect();
+    // Build per-group CBV/SRV/UAV ranges.
     for (g, gd) in groups.iter().enumerate() {
-        let space = g as u32;
-
-        // CBV/SRV/UAV descriptor table
-        if gd.cbv_srv_uav_count > 0 {
-            let mut ranges = Vec::new();
-            let (srv_count, uav_count, cbv_count) = count_types(&gd.slots);
-
-            // Offset within the table: SRV first, then UAV, then CBV
-            let mut offset = 0u32;
-
-            if srv_count > 0 {
-                ranges.push(D3D12_DESCRIPTOR_RANGE {
-                    RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
-                    NumDescriptors: srv_count,
-                    BaseShaderRegister: 0,
-                    RegisterSpace: space,
-                    OffsetInDescriptorsFromTableStart: offset,
-                });
-                offset += srv_count;
-            }
-            if uav_count > 0 {
-                ranges.push(D3D12_DESCRIPTOR_RANGE {
-                    RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
-                    NumDescriptors: uav_count,
-                    BaseShaderRegister: 0,
-                    RegisterSpace: space,
-                    OffsetInDescriptorsFromTableStart: offset,
-                });
-                offset += uav_count;
-            }
-            if cbv_count > 0 {
-                ranges.push(D3D12_DESCRIPTOR_RANGE {
-                    RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_CBV,
-                    NumDescriptors: cbv_count,
-                    BaseShaderRegister: 0,
-                    RegisterSpace: space,
-                    OffsetInDescriptorsFromTableStart: offset,
-                });
-            }
-
-            all_cbv_srv_uav_ranges.push(ranges);
-        } else {
-            all_cbv_srv_uav_ranges.push(Vec::new()); // placeholder
+        if gd.cbv_srv_uav_count == 0 {
+            continue;
         }
-
-        // Sampler descriptor table
-        if gd.sampler_count > 0 {
-            let ranges = vec![D3D12_DESCRIPTOR_RANGE {
-                RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
-                NumDescriptors: gd.sampler_count,
+        let space = g as u32;
+        let (srv_count, uav_count, cbv_count) = count_types(&gd.slots);
+        let mut ranges = Vec::new();
+        let mut offset = 0u32;
+        if srv_count > 0 {
+            ranges.push(D3D12_DESCRIPTOR_RANGE {
+                RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+                NumDescriptors: srv_count,
                 BaseShaderRegister: 0,
                 RegisterSpace: space,
-                OffsetInDescriptorsFromTableStart: 0,
-            }];
-            all_sampler_ranges.push(ranges);
-        } else {
-            all_sampler_ranges.push(Vec::new()); // placeholder
+                OffsetInDescriptorsFromTableStart: offset,
+            });
+            offset += srv_count;
         }
+        if uav_count > 0 {
+            ranges.push(D3D12_DESCRIPTOR_RANGE {
+                RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+                NumDescriptors: uav_count,
+                BaseShaderRegister: 0,
+                RegisterSpace: space,
+                OffsetInDescriptorsFromTableStart: offset,
+            });
+            offset += uav_count;
+        }
+        if cbv_count > 0 {
+            ranges.push(D3D12_DESCRIPTOR_RANGE {
+                RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_CBV,
+                NumDescriptors: cbv_count,
+                BaseShaderRegister: 0,
+                RegisterSpace: space,
+                OffsetInDescriptorsFromTableStart: offset,
+            });
+        }
+        all_cbv_srv_uav_ranges[g] = ranges;
     }
 
-    // Now build the root parameters pointing into the stable range Vecs
+    // Two SAMPLER ranges (standard + comparison heaps), both [2048] arrays.
+    let any_samplers = groups.iter().any(|gd| gd.sampler_count > 0);
+    let std_sampler_range = [D3D12_DESCRIPTOR_RANGE {
+        RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+        NumDescriptors: super::ENCODER_SAMPLER_SIZE,
+        BaseShaderRegister: 0,
+        RegisterSpace: super::SAMPLER_HEAP_SPACE,
+        OffsetInDescriptorsFromTableStart: 0,
+    }];
+    let cmp_sampler_range = [D3D12_DESCRIPTOR_RANGE {
+        RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+        NumDescriptors: super::ENCODER_SAMPLER_SIZE,
+        BaseShaderRegister: 0,
+        RegisterSpace: super::SAMPLER_HEAP_SPACE + 1,
+        OffsetInDescriptorsFromTableStart: 0,
+    }];
+
+    // Root parameters, in the exact order analyze_group assigned root indices:
+    //   per group: [CBV/SRV/UAV table?] [sampler-index root SRV?]
+    //   then (if any samplers): [standard sampler heap] [comparison sampler heap]
+    let mut params: Vec<D3D12_ROOT_PARAMETER> = Vec::new();
     for (g, gd) in groups.iter().enumerate() {
         if gd.cbv_srv_uav_root_index.is_some() {
             let ranges = &all_cbv_srv_uav_ranges[g];
@@ -120,20 +162,48 @@ fn build_root_signature(
                 ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
             });
         }
-        if gd.sampler_root_index.is_some() {
-            let ranges = &all_sampler_ranges[g];
+        if gd.sampler_index_root_index.is_some() {
+            // Root SRV (StructuredBuffer<uint>) at (t0, space SAMPLER_INDEX_SPACE_BASE+g).
             params.push(D3D12_ROOT_PARAMETER {
-                ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_SRV,
                 Anonymous: D3D12_ROOT_PARAMETER_0 {
-                    DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
-                        NumDescriptorRanges: ranges.len() as u32,
-                        pDescriptorRanges: ranges.as_ptr(),
+                    Descriptor: D3D12_ROOT_DESCRIPTOR {
+                        ShaderRegister: 0,
+                        RegisterSpace: super::SAMPLER_INDEX_SPACE_BASE + g as u32,
                     },
                 },
                 ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
             });
         }
     }
+
+    let sampler_heap_roots = if any_samplers {
+        let std_idx = params.len() as u32;
+        params.push(D3D12_ROOT_PARAMETER {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+            Anonymous: D3D12_ROOT_PARAMETER_0 {
+                DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
+                    NumDescriptorRanges: 1,
+                    pDescriptorRanges: std_sampler_range.as_ptr(),
+                },
+            },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+        });
+        let cmp_idx = params.len() as u32;
+        params.push(D3D12_ROOT_PARAMETER {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+            Anonymous: D3D12_ROOT_PARAMETER_0 {
+                DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
+                    NumDescriptorRanges: 1,
+                    pDescriptorRanges: cmp_sampler_range.as_ptr(),
+                },
+            },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+        });
+        Some((std_idx, cmp_idx))
+    } else {
+        None
+    };
 
     let desc = D3D12_ROOT_SIGNATURE_DESC {
         NumParameters: params.len() as u32,
@@ -172,7 +242,7 @@ fn build_root_signature(
             ),
         ).unwrap()
     };
-    rs
+    (rs, sampler_heap_roots)
 }
 
 fn count_types(slots: &[super::BindingSlot]) -> (u32, u32, u32) {
@@ -261,15 +331,24 @@ fn compile_shader_function(
         ep_info,
         group_layouts,
     );
+    // `fill_resource_bindings` only binds globals used by THIS entry point. The
+    // HLSL backend, unlike SPIR-V/MSL, emits *every* global in the module and
+    // unwraps each sampler's binding (writer.rs write_global_sampler) — so a
+    // fragment-only sampler would panic while compiling the vertex shader.
+    // Assign a binding to any still-unbound global that matches a layout entry.
+    assign_unused_bindings(&mut module, group_layouts);
     if stage == naga::ShaderStage::Vertex {
         crate::Shader::fill_vertex_locations(&mut module, ep_index, vertex_fetch_states);
     }
 
     let binding_map = make_binding_map(groups);
+    let (sampler_heap_target, sampler_buffer_binding_map) = make_sampler_options(groups);
     let hlsl_options = naga::back::hlsl::Options {
         shader_model: naga::back::hlsl::ShaderModel::V5_1,
         binding_map,
         fake_missing_bindings: true,
+        sampler_heap_target,
+        sampler_buffer_binding_map,
         ..Default::default()
     };
 
@@ -297,6 +376,43 @@ fn compile_shader_function(
 
     let bytecode = compile_hlsl(&hlsl_source, sf.entry_point, target_str, debug);
     (bytecode, wg_size)
+}
+
+/// Assign `(group, binding)` to any global still lacking a binding whose name
+/// matches a data-layout entry. naga's HLSL writer emits all globals and
+/// unwraps sampler bindings, so unbound globals (unused by the current entry
+/// point) must still be given a binding present in `binding_map`.
+fn assign_unused_bindings(
+    module: &mut naga::Module,
+    group_layouts: &[&crate::ShaderDataLayout],
+) {
+    for (_handle, var) in module.global_variables.iter_mut() {
+        if var.binding.is_some() {
+            continue;
+        }
+        // Only resource globals carry bindings (uniform/storage/handle spaces).
+        match var.space {
+            naga::AddressSpace::Uniform
+            | naga::AddressSpace::Storage { .. }
+            | naga::AddressSpace::Handle => {}
+            _ => continue,
+        }
+        let name = match var.name.as_ref() {
+            Some(n) => n.as_str(),
+            None => continue,
+        };
+        'groups: for (g, layout) in group_layouts.iter().enumerate() {
+            for (bi, &(bname, _)) in layout.bindings.iter().enumerate() {
+                if bname == name {
+                    var.binding = Some(naga::ResourceBinding {
+                        group: g as u32,
+                        binding: bi as u32,
+                    });
+                    break 'groups;
+                }
+            }
+        }
+    }
 }
 
 // ── ShaderDevice impl ─────────────────────────────────────────────────────────
@@ -365,7 +481,7 @@ impl crate::traits::ShaderDevice for super::Context {
             debug,
         );
 
-        let root_signature = build_root_signature(&self.device, &groups);
+        let (root_signature, sampler_heap_roots) = build_root_signature(&self.device, &groups);
 
         let pso: ID3D12PipelineState = unsafe {
             self.device.CreateComputePipelineState(
@@ -384,7 +500,7 @@ impl crate::traits::ShaderDevice for super::Context {
 
         super::ComputePipeline {
             pso,
-            layout: PipelineLayout { root_signature, groups },
+            layout: PipelineLayout { root_signature, groups, sampler_heap_roots },
             wg_size,
         }
     }
@@ -497,7 +613,7 @@ impl crate::traits::ShaderDevice for super::Context {
             Vec::new()
         };
 
-        let root_signature = build_root_signature(&self.device, &groups);
+        let (root_signature, sampler_heap_roots) = build_root_signature(&self.device, &groups);
 
         let topology = map_topology(desc.primitive.topology);
         let topology_type = match desc.primitive.topology {
@@ -601,7 +717,7 @@ impl crate::traits::ShaderDevice for super::Context {
 
         super::RenderPipeline {
             pso,
-            layout: PipelineLayout { root_signature, groups },
+            layout: PipelineLayout { root_signature, groups, sampler_heap_roots },
             topology,
             vertex_strides,
         }

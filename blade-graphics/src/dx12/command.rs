@@ -78,10 +78,12 @@ impl crate::ShaderBindable for super::Sampler {
     fn bind_to(&self, ctx: &mut super::PipelineContext, index: u32) {
         let slot = &ctx.group_descriptors.slots[index as usize];
         debug_assert_eq!(slot.kind, super::BindingKind::Sampler);
+        // Copy the sampler into ring slot (base + register). The shader reads
+        // nagaSamplerHeap[indexbuf[register]] where indexbuf[register] = base + register.
         let src = super::raw_cpu_handle(self.cpu_handle);
         let dst = D3D12_CPU_DESCRIPTOR_HANDLE {
             ptr: ctx.sampler_cpu_base.ptr
-                + (slot.heap_offset * ctx.encoder.sampler_ring.increment) as usize,
+                + (slot.register * ctx.encoder.sampler_ring.increment) as usize,
         };
         unsafe {
             ctx.encoder.device.CopyDescriptorsSimple(1, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
@@ -684,10 +686,16 @@ impl super::ComputeCommandEncoder<'_> {
     pub fn with<'p>(&'p mut self, pipeline: &'p super::ComputePipeline)
         -> super::ComputePipelineContext<'p>
     {
+        let sampler_gpu = self.encoder.sampler_ring.gpu_start;
         let list = self.encoder.list.as_ref().unwrap();
         unsafe {
             list.SetPipelineState(&pipeline.pso);
             list.SetComputeRootSignature(&pipeline.layout.root_signature);
+            // Bind both sampler heaps (standard + comparison) to the ring base.
+            if let Some((std_root, cmp_root)) = pipeline.layout.sampler_heap_roots {
+                list.SetComputeRootDescriptorTable(std_root, sampler_gpu);
+                list.SetComputeRootDescriptorTable(cmp_root, sampler_gpu);
+            }
         }
         super::ComputePipelineContext { encoder: self.encoder, layout: &pipeline.layout }
     }
@@ -699,11 +707,16 @@ impl super::RenderCommandEncoder<'_> {
     pub fn with<'p>(&'p mut self, pipeline: &'p super::RenderPipeline)
         -> super::RenderPipelineContext<'p>
     {
+        let sampler_gpu = self.encoder.sampler_ring.gpu_start;
         let list = self.encoder.list.as_ref().unwrap();
         unsafe {
             list.SetPipelineState(&pipeline.pso);
             list.SetGraphicsRootSignature(&pipeline.layout.root_signature);
             list.IASetPrimitiveTopology(pipeline.topology);
+            if let Some((std_root, cmp_root)) = pipeline.layout.sampler_heap_roots {
+                list.SetGraphicsRootDescriptorTable(std_root, sampler_gpu);
+                list.SetGraphicsRootDescriptorTable(cmp_root, sampler_gpu);
+            }
         }
         super::RenderPipelineContext {
             encoder: self.encoder,
@@ -730,17 +743,21 @@ fn bind_group<D: crate::ShaderData>(
     } else {
         (D3D12_CPU_DESCRIPTOR_HANDLE { ptr: 0 }, D3D12_GPU_DESCRIPTOR_HANDLE { ptr: 0 })
     };
-    let (sampler_cpu_base, sampler_gpu_base) = if gd.sampler_count > 0 {
-        encoder.sampler_ring.alloc(gd.sampler_count)
+    // Reserve a contiguous run in the sampler ring for this group's samplers.
+    // `sampler_base_index` is the absolute heap index the index buffer references.
+    let (sampler_cpu_base, sampler_base_index) = if gd.sampler_count > 0 {
+        let base_index = encoder.sampler_ring.offset;
+        let (cpu, _gpu) = encoder.sampler_ring.alloc(gd.sampler_count);
+        (cpu, base_index)
     } else {
-        (D3D12_CPU_DESCRIPTOR_HANDLE { ptr: 0 }, D3D12_GPU_DESCRIPTOR_HANDLE { ptr: 0 })
+        (D3D12_CPU_DESCRIPTOR_HANDLE { ptr: 0 }, 0)
     };
 
     let root_cbv = gd.cbv_srv_uav_root_index;
-    let root_smp = gd.sampler_root_index;
+    let root_sampler_index = gd.sampler_index_root_index;
 
     // `fill` consumes the PipelineContext (matching ShaderData::fill's by-value
-    // signature). Reborrow `encoder` so it remains usable afterwards.
+    // signature) and copies each sampler into ring slot (base + register).
     data.fill(super::PipelineContext {
         encoder: &mut *encoder,
         group_descriptors: gd,
@@ -748,17 +765,24 @@ fn bind_group<D: crate::ShaderData>(
         sampler_cpu_base,
     });
 
+    // Build and bind this group's sampler-index buffer: [base, base+1, ...].
+    if let Some(idx) = root_sampler_index {
+        let indices: Vec<u32> = (0..gd.sampler_count)
+            .map(|r| sampler_base_index + r)
+            .collect();
+        let va = encoder
+            .upload_ring
+            .write_aligned(bytemuck::cast_slice(&indices), 16);
+        let list = encoder.list.as_ref().unwrap();
+        if is_compute { unsafe { list.SetComputeRootShaderResourceView(idx, va) }; }
+        else          { unsafe { list.SetGraphicsRootShaderResourceView(idx, va) }; }
+    }
+
     let list = encoder.list.as_ref().unwrap();
     if let Some(idx) = root_cbv {
         if ring_gpu_base.ptr != 0 {
             if is_compute { unsafe { list.SetComputeRootDescriptorTable(idx, ring_gpu_base) }; }
             else          { unsafe { list.SetGraphicsRootDescriptorTable(idx, ring_gpu_base) }; }
-        }
-    }
-    if let Some(idx) = root_smp {
-        if sampler_gpu_base.ptr != 0 {
-            if is_compute { unsafe { list.SetComputeRootDescriptorTable(idx, sampler_gpu_base) }; }
-            else          { unsafe { list.SetGraphicsRootDescriptorTable(idx, sampler_gpu_base) }; }
         }
     }
 }
