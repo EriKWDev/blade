@@ -50,6 +50,16 @@ impl crate::traits::ResourceDevice for super::Context {
         };
         let aligned_size = (desc.size + 255) & !255;
 
+        // A UAV requires ALLOW_UNORDERED_ACCESS on the resource. That flag is only
+        // legal on DEFAULT-heap buffers (not UPLOAD), so device buffers get it (and
+        // a UAV); upload/shared buffers get neither. Creating a UAV on a buffer
+        // without the flag removes the device (DXGI_ERROR_INVALID_CALL).
+        let res_flags = if heap_type == D3D12_HEAP_TYPE_DEFAULT {
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+        } else {
+            D3D12_RESOURCE_FLAG_NONE
+        };
+
         let mut resource: Option<ID3D12Resource> = None;
         super::expect_d3d12(&self.device, "CreateCommittedResource(buffer)", unsafe {
             self.device.CreateCommittedResource(
@@ -63,6 +73,7 @@ impl crate::traits::ResourceDevice for super::Context {
                     MipLevels: 1,
                     SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
                     Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                    Flags: res_flags,
                     ..Default::default()
                 },
                 initial_state,
@@ -81,9 +92,8 @@ impl crate::traits::ResourceDevice for super::Context {
             ptr::null_mut()
         };
 
+        // SRV needs no special resource flag, so it is always available.
         let srv_handle = self.alloc_staging(1);
-        let uav_handle = self.alloc_staging(1);
-
         unsafe {
             self.device.CreateShaderResourceView(
                 &resource,
@@ -102,25 +112,35 @@ impl crate::traits::ResourceDevice for super::Context {
                 }),
                 srv_handle,
             );
-            self.device.CreateUnorderedAccessView(
-                &resource,
-                None,
-                Some(&D3D12_UNORDERED_ACCESS_VIEW_DESC {
-                    Format: DXGI_FORMAT_R32_TYPELESS,
-                    ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
-                    Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
-                        Buffer: D3D12_BUFFER_UAV {
-                            FirstElement: 0,
-                            NumElements: (aligned_size / 4) as u32,
-                            StructureByteStride: 0,
-                            CounterOffsetInBytes: 0,
-                            Flags: D3D12_BUFFER_UAV_FLAG_RAW,
-                        },
-                    },
-                }),
-                uav_handle,
-            );
         }
+
+        // UAV only for DEFAULT-heap buffers (which carry ALLOW_UNORDERED_ACCESS).
+        let uav_handle = if heap_type == D3D12_HEAP_TYPE_DEFAULT {
+            let h = self.alloc_staging(1);
+            unsafe {
+                self.device.CreateUnorderedAccessView(
+                    &resource,
+                    None,
+                    Some(&D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                        Format: DXGI_FORMAT_R32_TYPELESS,
+                        ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                            Buffer: D3D12_BUFFER_UAV {
+                                FirstElement: 0,
+                                NumElements: (aligned_size / 4) as u32,
+                                StructureByteStride: 0,
+                                CounterOffsetInBytes: 0,
+                                Flags: D3D12_BUFFER_UAV_FLAG_RAW,
+                            },
+                        },
+                    }),
+                    h,
+                );
+            }
+            h.ptr as u64
+        } else {
+            0
+        };
 
         // Box the COM object so `resource_ptr` is a stable `Box<ID3D12Resource>` pointer.
         let resource_ptr = Box::into_raw(Box::new(resource)) as super::ResourcePtr;
@@ -130,7 +150,7 @@ impl crate::traits::ResourceDevice for super::Context {
             gpu_address,
             mapped_ptr,
             srv_handle: srv_handle.ptr as u64,
-            uav_handle: uav_handle.ptr as u64,
+            uav_handle,
             size: desc.size,
         }
     }
