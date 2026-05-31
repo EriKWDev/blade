@@ -157,9 +157,6 @@ fn transition_barrier(
     }
 }
 
-/// PRESENT state (functionally identical to COMMON for swap-chain buffers in DX12).
-const PRESENT_STATE: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATE_PRESENT;
-
 // ── CommandEncoder: private helpers ──────────────────────────────────────────
 
 impl super::CommandEncoder {
@@ -251,17 +248,20 @@ impl super::CommandEncoder {
             target_size = rt.view.target_size;
             let vtbl = rt.view.resource_ptr;
 
-            // Transition: PRESENT (or COMMON on first use) → RENDER_TARGET.
-            // PRESENT == COMMON for swap-chain buffers per the DX12 spec,
-            // so this one transition covers both the first frame and subsequent frames.
-            let barrier = transition_barrier(vtbl, PRESENT_STATE, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            unsafe { list.ResourceBarrier(&[barrier]) };
-
-            // Track so barrier()/Drop can transition back to COMMON.
-            self.active_rts.push(super::ActiveRt {
-                resource_vtbl: vtbl,
-                state: D3D12_RESOURCE_STATE_RENDER_TARGET,
-            });
+            // COMMON → RENDER_TARGET. This is the one strictly-required transition:
+            // RENDER_TARGET is not a promotable state. COMMON (== PRESENT, both 0) is
+            // the resting state, so this covers the first frame, post-present back
+            // buffers, and offscreen targets uniformly. Skip if already tracked as a
+            // render target (manual-barrier mode, repeated passes without a barrier).
+            if !self.active_rts.iter().any(|rt| rt.resource_vtbl == vtbl) {
+                let barrier = transition_barrier(
+                    vtbl, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                unsafe { list.ResourceBarrier(&[barrier]) };
+                self.active_rts.push(super::ActiveRt {
+                    resource_vtbl: vtbl,
+                    state: D3D12_RESOURCE_STATE_RENDER_TARGET,
+                });
+            }
 
             let rtv = super::raw_cpu_handle(rt.view.rtv_dsv_handle);
             rtv_handles.push(rtv);
@@ -276,9 +276,12 @@ impl super::CommandEncoder {
             let vtbl = rt.view.resource_ptr;
             let state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
 
-            let barrier = transition_barrier(vtbl, D3D12_RESOURCE_STATE_COMMON, state);
-            unsafe { list.ResourceBarrier(&[barrier]) };
-            self.active_rts.push(super::ActiveRt { resource_vtbl: vtbl, state });
+            // COMMON → DEPTH_WRITE (also not promotable). Skip if already tracked.
+            if !self.active_rts.iter().any(|rt| rt.resource_vtbl == vtbl) {
+                let barrier = transition_barrier(vtbl, D3D12_RESOURCE_STATE_COMMON, state);
+                unsafe { list.ResourceBarrier(&[barrier]) };
+                self.active_rts.push(super::ActiveRt { resource_vtbl: vtbl, state });
+            }
 
             let dsv = super::raw_cpu_handle(rt.view.rtv_dsv_handle);
             dsv_handle = Some(dsv);
@@ -358,23 +361,21 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         profiling::function_scope!();
         let list = self.list.as_ref().unwrap();
 
-        // Find the back buffer's vtbl pointer in active_rts.
+        // PRESENT == COMMON (both 0). If the back buffer is still in RENDER_TARGET
+        // (the render pass left it there, lazily), transition it back to COMMON —
+        // which is the presentable state. If it was already flushed to COMMON by a
+        // `barrier()`, no transition is needed: emitting COMMON→PRESENT would be a
+        // before==after no-op that the debug layer rejects.
         let frame_vtbl = unsafe { frame.resource.as_raw() as *mut std::ffi::c_void };
-        let before_state = if let Some(pos) = self
+        if let Some(pos) = self
             .active_rts
             .iter()
             .position(|rt| rt.resource_vtbl == frame_vtbl)
         {
             let rt = self.active_rts.remove(pos);
-            rt.state // typically RENDER_TARGET
-        } else {
-            // barrier() was already called after the render pass, so the resource is in COMMON.
-            D3D12_RESOURCE_STATE_COMMON
-        };
-
-        // Transition to PRESENT (functionally COMMON for swap-chain resources).
-        let barrier = transition_barrier(frame_vtbl, before_state, PRESENT_STATE);
-        unsafe { list.ResourceBarrier(&[barrier]) };
+            let barrier = transition_barrier(frame_vtbl, rt.state, D3D12_RESOURCE_STATE_COMMON);
+            unsafe { list.ResourceBarrier(&[barrier]) };
+        }
 
         self.present = Some(super::Presentation {
             swapchain: frame.swapchain,
@@ -389,27 +390,12 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
     }
 }
 
-// ── Drop impls ────────────────────────────────────────────────────────────────
-
-impl Drop for super::RenderCommandEncoder<'_> {
-    fn drop(&mut self) {
-        // Transition any remaining active render targets back to COMMON.
-        // This handles the case where barrier() is not called after a render pass.
-        if !self.encoder.active_rts.is_empty() {
-            let list = self.encoder.list.as_ref().unwrap();
-            let barriers: Vec<D3D12_RESOURCE_BARRIER> = self
-                .encoder
-                .active_rts
-                .drain(..)
-                .map(|rt| transition_barrier(rt.resource_vtbl, rt.state, D3D12_RESOURCE_STATE_COMMON))
-                .collect();
-            unsafe { list.ResourceBarrier(&barriers) };
-        }
-    }
-}
-
-// TransferCommandEncoder and ComputeCommandEncoder have no GPU cleanup to do on drop.
-// The command list remains open after these passes (matching Vulkan/Metal behaviour).
+// No Drop impls on the sub-encoders: render targets are left in
+// RENDER_TARGET/DEPTH_WRITE state and lazily transitioned back to COMMON by
+// the next `barrier()` (auto-inserted at the next pass / at submit), or
+// directly to PRESENT by `present()`. This mirrors Vulkan, where the pipeline
+// barrier between passes — not the pass teardown — is what re-synchronizes,
+// and it keeps the back buffer at the minimal 2 transitions per frame.
 
 // ── TransferEncoder ───────────────────────────────────────────────────────────
 
