@@ -795,7 +795,7 @@ impl crate::traits::CommandDevice for Context {
         encoder.flush_to_common();
 
         let list = encoder.list.as_ref().unwrap();
-        unsafe { list.Close().unwrap() };
+        expect_d3d12(&self.device, "GraphicsCommandList::Close", unsafe { list.Close() });
 
         let mut queue = {
             profiling::scope!("lock queue");
