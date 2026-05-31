@@ -23,11 +23,14 @@ pub(super) const RTV_HEAP_SIZE: u32 = 512;
 pub(super) const DSV_HEAP_SIZE: u32 = 128;
 pub(super) const STAGING_HEAP_SIZE: u32 = 65536;
 pub(super) const STAGING_SAMPLER_SIZE: u32 = 2048;
-pub(super) const ENCODER_HEAP_SIZE: u32 = 65536;
+// Per-encoder GPU-visible CBV/SRV/UAV ring. Each `bind()` consumes descriptors,
+// so a frame with N draws needs ~N entries. 1,000,000 is the D3D12 tier-1 max
+// for a shader-visible CBV/SRV/UAV heap. Reset each `start()`.
+pub(super) const ENCODER_HEAP_SIZE: u32 = 1_000_000;
 pub(super) const ENCODER_SAMPLER_SIZE: u32 = 2048;
-// Sized generously to hold a frame's uniform binds (large `materials`-style
-// arrays + per-draw locals); reset each `start()`.
-pub(super) const UPLOAD_RING_SIZE: u64 = 16 * 1024 * 1024;
+// Per-encoder upload scratch for plain/CBV data: ~256 B per uniform bind, so a
+// frame with many per-draw binds needs room. 64 MiB ~= 256k binds. Reset each frame.
+pub(super) const UPLOAD_RING_SIZE: u64 = 64 * 1024 * 1024;
 
 // Register spaces for naga 28's HLSL sampler-heap model. naga's BindTarget.space
 // is a u8, so these MUST stay <= 255 (and match the root signature, which uses
@@ -349,7 +352,15 @@ unsafe impl Sync for Texture {}
 
 impl Default for Texture {
     fn default() -> Self {
-        panic!("Texture::default() not supported on DX12")
+        // Null placeholder (matches Vulkan/Metal). memory_handle=!0 marks it
+        // un-destroyable; it must be overwritten before any real use.
+        Self {
+            resource_ptr: ptr::null_mut(),
+            memory_handle: !0,
+            format: crate::TextureFormat::Rgba8Unorm,
+            target_size: [0; 2],
+            usage: crate::TextureUsage::empty(),
+        }
     }
 }
 
@@ -376,7 +387,15 @@ unsafe impl Sync for TextureView {}
 
 impl Default for TextureView {
     fn default() -> Self {
-        panic!("TextureView::default() not supported on DX12")
+        Self {
+            resource_ptr: ptr::null_mut(),
+            srv_handle: 0,
+            uav_handle: 0,
+            rtv_dsv_handle: 0,
+            format: crate::TextureFormat::Rgba8Unorm,
+            aspects: crate::TexelAspects::COLOR,
+            target_size: [0; 2],
+        }
     }
 }
 
@@ -391,7 +410,7 @@ unsafe impl Sync for Sampler {}
 
 impl Default for Sampler {
     fn default() -> Self {
-        panic!("Sampler::default() not supported on DX12")
+        Self { cpu_handle: 0 }
     }
 }
 
