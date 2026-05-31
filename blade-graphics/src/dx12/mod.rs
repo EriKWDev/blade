@@ -29,13 +29,15 @@ pub(super) const ENCODER_SAMPLER_SIZE: u32 = 2048;
 // arrays + per-draw locals); reset each `start()`.
 pub(super) const UPLOAD_RING_SIZE: u64 = 16 * 1024 * 1024;
 
-// Register spaces for naga 28's HLSL sampler-heap model. Chosen high to never
-// collide with per-group spaces (group `g` uses `space g`).
+// Register spaces for naga 28's HLSL sampler-heap model. naga's BindTarget.space
+// is a u8, so these MUST stay <= 255 (and match the root signature, which uses
+// the same numeric values). Chosen high to avoid colliding with per-group spaces
+// (group `g` uses `space g`; group counts are tiny).
 //   nagaSamplerHeap[]           : register(s0, space SAMPLER_HEAP_SPACE)
 //   nagaComparisonSamplerHeap[] : register(s0, space SAMPLER_HEAP_SPACE + 1)
 //   nagaGroup{g}SamplerIndexArray : register(t0, space SAMPLER_INDEX_SPACE_BASE + g)
-pub(super) const SAMPLER_HEAP_SPACE: u32 = 1000;
-pub(super) const SAMPLER_INDEX_SPACE_BASE: u32 = 2000;
+pub(super) const SAMPLER_HEAP_SPACE: u32 = 250;
+pub(super) const SAMPLER_INDEX_SPACE_BASE: u32 = 100;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
