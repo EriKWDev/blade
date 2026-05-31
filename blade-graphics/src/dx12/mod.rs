@@ -198,6 +198,8 @@ impl Frame {
             format: self.format,
             target_size: self.target_size,
             usage: crate::TextureUsage::TARGET,
+            mip_levels: 1,
+            array_layers: 1,
         }
     }
 
@@ -212,6 +214,12 @@ impl Frame {
             format: self.format,
             aspects: crate::TexelAspects::COLOR,
             target_size: self.target_size,
+            base_mip: 0,
+            mip_count: 1,
+            base_array: 0,
+            array_count: 1,
+            mip_levels: 1,
+            array_layers: 1,
         }
     }
 }
@@ -345,6 +353,9 @@ pub struct Texture {
     /// Which views are legal to create — D3D12 forbids e.g. an RTV on a
     /// resource not created with ALLOW_RENDER_TARGET (can remove the device).
     pub(super) usage: crate::TextureUsage,
+    /// For per-subresource state tracking (subresource = mip + layer*mip_levels).
+    pub(super) mip_levels: u32,
+    pub(super) array_layers: u32,
 }
 
 unsafe impl Send for Texture {}
@@ -360,6 +371,8 @@ impl Default for Texture {
             format: crate::TextureFormat::Rgba8Unorm,
             target_size: [0; 2],
             usage: crate::TextureUsage::empty(),
+            mip_levels: 1,
+            array_layers: 1,
         }
     }
 }
@@ -380,6 +393,13 @@ pub struct TextureView {
     pub(super) format: crate::TextureFormat,
     pub(super) aspects: crate::TexelAspects,
     pub(super) target_size: [u16; 2],
+    /// Subresource range this view covers, for per-subresource state tracking.
+    pub(super) base_mip: u32,
+    pub(super) mip_count: u32,
+    pub(super) base_array: u32,
+    pub(super) array_count: u32,
+    pub(super) mip_levels: u32,
+    pub(super) array_layers: u32,
 }
 
 unsafe impl Send for TextureView {}
@@ -395,7 +415,34 @@ impl Default for TextureView {
             format: crate::TextureFormat::Rgba8Unorm,
             aspects: crate::TexelAspects::COLOR,
             target_size: [0; 2],
+            base_mip: 0,
+            mip_count: 1,
+            base_array: 0,
+            array_count: 1,
+            mip_levels: 1,
+            array_layers: 1,
         }
+    }
+}
+
+impl TextureView {
+    /// Total subresources of the underlying texture.
+    pub(super) fn total_subresources(&self) -> u32 {
+        self.mip_levels * self.array_layers
+    }
+    /// Iterate the subresource indices this view covers (mip + layer*mip_levels).
+    pub(super) fn subresources(&self) -> impl Iterator<Item = u32> + '_ {
+        let ml = self.mip_levels;
+        (self.base_array..self.base_array + self.array_count).flat_map(move |a| {
+            (self.base_mip..self.base_mip + self.mip_count).map(move |m| m + a * ml)
+        })
+    }
+    /// True if the view covers every subresource of the texture.
+    pub(super) fn covers_all(&self) -> bool {
+        self.base_mip == 0
+            && self.mip_count == self.mip_levels
+            && self.base_array == 0
+            && self.array_count == self.array_layers
     }
 }
 
@@ -629,12 +676,14 @@ pub struct CommandEncoder {
     /// When true, a global UAV barrier is inserted automatically at the start of
     /// every pass (the DX12 analog of Vulkan's full memory barrier).
     pub(super) auto_barriers: bool,
-    /// Current D3D12 state of every resource touched in this command list, keyed
-    /// by COM vtable pointer (as usize). Absent => COMMON. Reset in `start()`
-    /// (buffers/textures decay to COMMON at the ExecuteCommandLists boundary).
-    /// This is what lets storage textures (which do NOT auto-promote
-    /// COMMON->UNORDERED_ACCESS) and render targets work the same as Vulkan.
-    pub(super) resource_states: std::collections::HashMap<usize, D3D12_RESOURCE_STATES>,
+    /// Current D3D12 state of every buffer touched this command list, keyed by
+    /// COM vtable ptr. Absent => COMMON. Reset in `start()`.
+    pub(super) buffer_states: std::collections::HashMap<usize, D3D12_RESOURCE_STATES>,
+    /// Per-subresource state of every texture touched this command list, keyed by
+    /// COM vtable ptr; Vec is indexed by subresource (mip + layer*mip_levels).
+    /// Per-subresource granularity lets e.g. mip-generation read mip i-1 (SRV)
+    /// while writing mip i (UAV) of the same texture.
+    pub(super) texture_states: std::collections::HashMap<usize, Vec<D3D12_RESOURCE_STATES>>,
 }
 
 unsafe impl Send for CommandEncoder {}
@@ -719,7 +768,8 @@ impl crate::traits::CommandDevice for Context {
             draw_indexed_sig: self.draw_indexed_sig.clone(),
             dispatch_sig: self.dispatch_sig.clone(),
             auto_barriers: true,
-            resource_states: std::collections::HashMap::new(),
+            buffer_states: std::collections::HashMap::new(),
+            texture_states: std::collections::HashMap::new(),
         }
     }
 

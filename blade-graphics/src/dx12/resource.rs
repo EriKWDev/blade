@@ -210,12 +210,19 @@ impl crate::traits::ResourceDevice for super::Context {
         });
         let resource = resource.unwrap();
         let resource_ptr = Box::into_raw(Box::new(resource)) as super::ResourcePtr;
+        let array_layers = if desc.dimension == crate::TextureDimension::D3 {
+            1
+        } else {
+            desc.array_layer_count
+        };
         super::Texture {
             resource_ptr,
             usage: desc.usage,
             memory_handle: 0,
             format: desc.format,
             target_size: [desc.size.width as u16, desc.size.height as u16],
+            mip_levels: desc.mip_level_count,
+            array_layers,
         }
     }
 
@@ -294,6 +301,15 @@ impl crate::traits::ResourceDevice for super::Context {
             0
         };
 
+        let mip_count = desc
+            .subresources
+            .mip_level_count
+            .map_or(texture.mip_levels - desc.subresources.base_mip_level, |n| n.get());
+        let array_count = desc
+            .subresources
+            .array_layer_count
+            .map_or(texture.array_layers - desc.subresources.base_array_layer, |n| n.get());
+
         super::TextureView {
             resource_ptr,
             srv_handle,
@@ -302,6 +318,12 @@ impl crate::traits::ResourceDevice for super::Context {
             format: desc.format,
             aspects,
             target_size: texture.target_size,
+            base_mip: desc.subresources.base_mip_level,
+            mip_count,
+            base_array: desc.subresources.base_array_layer,
+            array_count,
+            mip_levels: texture.mip_levels,
+            array_layers: texture.array_layers,
         }
     }
 

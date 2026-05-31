@@ -44,14 +44,14 @@ impl crate::ShaderBindable for super::TextureView {
             super::BindingKind::Srv => {
                 // Storage/sampled textures do NOT auto-promote to a read state from
                 // an arbitrary prior state (e.g. UNORDERED_ACCESS), so transition.
-                ctx.encoder.require_state(self.resource_ptr, READ_STATE);
+                ctx.encoder.require_view_state(self, READ_STATE);
                 super::raw_cpu_handle(self.srv_handle)
             }
             super::BindingKind::Uav => {
                 // Regular textures never auto-promote COMMON->UNORDERED_ACCESS, so
                 // this explicit transition is mandatory for storage textures.
                 ctx.encoder
-                    .require_state(self.resource_ptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    .require_view_state(self, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 super::raw_cpu_handle(self.uav_handle)
             }
             other => panic!("unexpected binding kind {:?} for TextureView", other),
@@ -159,6 +159,7 @@ fn transition_barrier(
     resource_vtbl: super::ResourcePtr,
     before: D3D12_RESOURCE_STATES,
     after: D3D12_RESOURCE_STATES,
+    subresource: u32,
 ) -> D3D12_RESOURCE_BARRIER {
     D3D12_RESOURCE_BARRIER {
         Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
@@ -169,7 +170,7 @@ fn transition_barrier(
                 pResource: mem::ManuallyDrop::new(Some(unsafe {
                     ID3D12Resource::from_raw(resource_vtbl as *mut _)
                 })),
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                Subresource: subresource,
                 StateBefore: before,
                 StateAfter: after,
             }),
@@ -185,25 +186,64 @@ const READ_STATE: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATES(
 // ── CommandEncoder: private helpers ──────────────────────────────────────────
 
 impl super::CommandEncoder {
-    /// Transition a resource (by COM vtable ptr) to `needed`, tracking its state.
-    /// A no-op if it is already in that state. This is the single mechanism by
-    /// which every resource reaches the state its next use requires — the DX12
-    /// equivalent of Vulkan keeping everything in GENERAL.
-    pub(super) fn require_state(&mut self, vtbl: super::ResourcePtr, needed: D3D12_RESOURCE_STATES) {
-        let key = vtbl as usize;
-        let current = self
-            .resource_states
-            .get(&key)
-            .copied()
-            .unwrap_or(D3D12_RESOURCE_STATE_COMMON);
-        if current.0 != needed.0 {
-            let barrier = transition_barrier(vtbl, current, needed);
-            unsafe { self.list.as_ref().unwrap().ResourceBarrier(&[barrier]) };
-            self.resource_states.insert(key, needed);
+    /// Transition a specific set of texture subresources to `needed`, tracking
+    /// per-subresource state. Per-subresource granularity is what lets e.g.
+    /// mip-generation read mip i-1 (SRV) while writing mip i (UAV) of the same
+    /// texture — a whole-resource transition would put both mips in one state.
+    fn require_subresources(
+        &mut self,
+        vtbl: super::ResourcePtr,
+        total: u32,
+        subs: impl Iterator<Item = u32>,
+        needed: D3D12_RESOURCE_STATES,
+    ) {
+        if vtbl.is_null() {
+            return; // null placeholder view
+        }
+        let mut barriers: Vec<D3D12_RESOURCE_BARRIER> = Vec::new();
+        {
+            let entry = self
+                .texture_states
+                .entry(vtbl as usize)
+                .or_insert_with(|| vec![D3D12_RESOURCE_STATE_COMMON; total.max(1) as usize]);
+            for s in subs {
+                let cur = entry[s as usize];
+                if cur.0 != needed.0 {
+                    barriers.push(transition_barrier(vtbl, cur, needed, s));
+                    entry[s as usize] = needed;
+                }
+            }
+        }
+        if !barriers.is_empty() {
+            unsafe { self.list.as_ref().unwrap().ResourceBarrier(&barriers) };
         }
     }
 
-    /// Like `require_state`, but for buffers. Host-visible (UPLOAD/Shared) buffers
+    /// Transition the subresources a texture *view* covers.
+    pub(super) fn require_view_state(
+        &mut self,
+        view: &super::TextureView,
+        needed: D3D12_RESOURCE_STATES,
+    ) {
+        let total = view.total_subresources();
+        let subs: Vec<u32> = view.subresources().collect();
+        self.require_subresources(view.resource_ptr, total, subs.into_iter(), needed);
+    }
+
+    /// Transition the single subresource a texture *piece* (copy) addresses.
+    pub(super) fn require_piece_state(
+        &mut self,
+        piece: &crate::TexturePiece,
+        needed: D3D12_RESOURCE_STATES,
+    ) {
+        let tex = &piece.texture;
+        let sub = piece.mip_level + piece.array_layer * tex.mip_levels;
+        let total = tex.mip_levels * tex.array_layers;
+        let vtbl = unsafe { tex.resource().as_raw() as super::ResourcePtr };
+        self.require_subresources(vtbl, total, std::iter::once(sub), needed);
+    }
+
+    /// Transition a buffer (whole resource). Host-visible (UPLOAD/Shared) buffers
     /// are permanently locked in GENERIC_READ and must never be transitioned;
     /// GENERIC_READ already permits vertex/index/constant/SRV/copy-source reads.
     pub(super) fn require_buffer_state(
@@ -211,11 +251,22 @@ impl super::CommandEncoder {
         buffer: &super::Buffer,
         needed: D3D12_RESOURCE_STATES,
     ) {
-        if !buffer.mapped_ptr.is_null() {
+        if !buffer.mapped_ptr.is_null() || buffer.resource_ptr.is_null() {
             return;
         }
         let vtbl = unsafe { buffer.resource().as_raw() as super::ResourcePtr };
-        self.require_state(vtbl, needed);
+        let key = vtbl as usize;
+        let cur = self
+            .buffer_states
+            .get(&key)
+            .copied()
+            .unwrap_or(D3D12_RESOURCE_STATE_COMMON);
+        if cur.0 != needed.0 {
+            let barrier =
+                transition_barrier(vtbl, cur, needed, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
+            unsafe { self.list.as_ref().unwrap().ResourceBarrier(&[barrier]) };
+            self.buffer_states.insert(key, needed);
+        }
     }
 
     pub(super) fn current_list(&self) -> &ID3D12GraphicsCommandList {
@@ -256,18 +307,34 @@ impl super::CommandEncoder {
     /// is COMMON) starts from a correct baseline — explicitly-transitioned
     /// resources do not decay at the ExecuteCommandLists boundary.
     pub(super) fn flush_to_common(&mut self) {
-        let barriers: Vec<D3D12_RESOURCE_BARRIER> = self
-            .resource_states
-            .iter()
-            .filter(|(_, s)| s.0 != D3D12_RESOURCE_STATE_COMMON.0)
-            .map(|(&key, &state)| {
-                transition_barrier(key as super::ResourcePtr, state, D3D12_RESOURCE_STATE_COMMON)
-            })
-            .collect();
+        let mut barriers: Vec<D3D12_RESOURCE_BARRIER> = Vec::new();
+        for (&key, &state) in self.buffer_states.iter() {
+            if state.0 != D3D12_RESOURCE_STATE_COMMON.0 {
+                barriers.push(transition_barrier(
+                    key as super::ResourcePtr,
+                    state,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                ));
+            }
+        }
+        for (&key, states) in self.texture_states.iter() {
+            for (sub, &state) in states.iter().enumerate() {
+                if state.0 != D3D12_RESOURCE_STATE_COMMON.0 {
+                    barriers.push(transition_barrier(
+                        key as super::ResourcePtr,
+                        state,
+                        D3D12_RESOURCE_STATE_COMMON,
+                        sub as u32,
+                    ));
+                }
+            }
+        }
         if !barriers.is_empty() {
             unsafe { self.list.as_ref().unwrap().ResourceBarrier(&barriers) };
         }
-        self.resource_states.clear();
+        self.buffer_states.clear();
+        self.texture_states.clear();
     }
 
     /// Called at the start of every pass. Inserts the automatic barrier
@@ -317,14 +384,14 @@ impl super::CommandEncoder {
         // then record clears / OMSetRenderTargets under a single list borrow.
         for rt in targets.colors {
             target_size = rt.view.target_size;
-            // -> RENDER_TARGET (not a promotable state; require_state tracks it so a
-            // later sample or present transitions out of it correctly).
-            self.require_state(rt.view.resource_ptr, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            // -> RENDER_TARGET (not a promotable state; tracked so a later sample
+            // or present transitions out of it correctly).
+            self.require_view_state(&rt.view, D3D12_RESOURCE_STATE_RENDER_TARGET);
             rtv_handles.push(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
         }
         if let Some(ref rt) = targets.depth_stencil {
             target_size = rt.view.target_size;
-            self.require_state(rt.view.resource_ptr, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            self.require_view_state(&rt.view, D3D12_RESOURCE_STATE_DEPTH_WRITE);
             dsv_handle = Some(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
         }
 
@@ -397,7 +464,8 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         self.upload_ring.reset();
         // All resources decay to COMMON at the ExecuteCommandLists boundary, so a
         // fresh command list starts with every resource implicitly in COMMON.
-        self.resource_states.clear();
+        self.buffer_states.clear();
+        self.texture_states.clear();
 
         let heaps: [Option<ID3D12DescriptorHeap>; 2] = [
             Some(self.cbv_srv_uav_ring.heap.clone()),
@@ -416,11 +484,11 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         profiling::function_scope!();
 
         // The presentable state is COMMON (== D3D12_RESOURCE_STATE_PRESENT == 0).
-        // require_state transitions from whatever the back buffer is currently in
-        // (typically RENDER_TARGET after the render pass) and is a no-op if it is
-        // already COMMON, so it never emits an illegal before==after barrier.
+        // The back buffer is a single-subresource texture (1 mip, 1 layer).
+        // require_subresources is a no-op if it's already COMMON, so it never
+        // emits an illegal before==after barrier.
         let frame_vtbl = unsafe { frame.resource.as_raw() as super::ResourcePtr };
-        self.require_state(frame_vtbl, D3D12_RESOURCE_STATE_COMMON);
+        self.require_subresources(frame_vtbl, 1, std::iter::once(0), D3D12_RESOURCE_STATE_COMMON);
 
         self.present = Some(super::Presentation {
             swapchain: frame.swapchain,
@@ -511,22 +579,20 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
     ) {
         let src_res = src.texture.resource();
         let dst_res = dst.texture.resource();
-        let src_vtbl = unsafe { src_res.as_raw() as super::ResourcePtr };
-        let dst_vtbl = unsafe { dst_res.as_raw() as super::ResourcePtr };
-        self.encoder.require_state(src_vtbl, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        self.encoder.require_state(dst_vtbl, D3D12_RESOURCE_STATE_COPY_DEST);
+        self.encoder.require_piece_state(&src, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        self.encoder.require_piece_state(&dst, D3D12_RESOURCE_STATE_COPY_DEST);
         let src_loc = D3D12_TEXTURE_COPY_LOCATION {
             pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(src_res.as_raw())) }),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                SubresourceIndex: subresource_index(src.mip_level, src.array_layer, 1),
+                SubresourceIndex: subresource_index(src.mip_level, src.array_layer, src.texture.mip_levels),
             },
         };
         let dst_loc = D3D12_TEXTURE_COPY_LOCATION {
             pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(dst_res.as_raw())) }),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                SubresourceIndex: subresource_index(dst.mip_level, dst.array_layer, 1),
+                SubresourceIndex: subresource_index(dst.mip_level, dst.array_layer, dst.texture.mip_levels),
             },
         };
         let src_box = D3D12_BOX {
@@ -550,10 +616,9 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         size: crate::Extent,
     ) {
         let dst_res = dst.texture.resource();
-        let dst_vtbl = unsafe { dst_res.as_raw() as super::ResourcePtr };
         self.encoder
             .require_buffer_state(&src.buffer, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        self.encoder.require_state(dst_vtbl, D3D12_RESOURCE_STATE_COPY_DEST);
+        self.encoder.require_piece_state(&dst, D3D12_RESOURCE_STATE_COPY_DEST);
         let aligned_pitch = align_pitch(bytes_per_row as u64);
         let src_loc = D3D12_TEXTURE_COPY_LOCATION {
             pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(src.buffer.resource().as_raw())) }),
@@ -573,7 +638,7 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
             pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(dst_res.as_raw())) }),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                SubresourceIndex: subresource_index(dst.mip_level, dst.array_layer, 1),
+                SubresourceIndex: subresource_index(dst.mip_level, dst.array_layer, dst.texture.mip_levels),
             },
         };
         unsafe {
@@ -591,8 +656,7 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         size: crate::Extent,
     ) {
         let src_res = src.texture.resource();
-        let src_vtbl = unsafe { src_res.as_raw() as super::ResourcePtr };
-        self.encoder.require_state(src_vtbl, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        self.encoder.require_piece_state(&src, D3D12_RESOURCE_STATE_COPY_SOURCE);
         self.encoder
             .require_buffer_state(&dst.buffer, D3D12_RESOURCE_STATE_COPY_DEST);
         let aligned_pitch = align_pitch(bytes_per_row as u64);
@@ -600,7 +664,7 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
             pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(src_res.as_raw())) }),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                SubresourceIndex: subresource_index(src.mip_level, src.array_layer, 1),
+                SubresourceIndex: subresource_index(src.mip_level, src.array_layer, src.texture.mip_levels),
             },
         };
         let dst_loc = D3D12_TEXTURE_COPY_LOCATION {
