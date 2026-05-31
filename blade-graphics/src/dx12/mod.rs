@@ -25,7 +25,9 @@ pub(super) const STAGING_HEAP_SIZE: u32 = 65536;
 pub(super) const STAGING_SAMPLER_SIZE: u32 = 2048;
 pub(super) const ENCODER_HEAP_SIZE: u32 = 65536;
 pub(super) const ENCODER_SAMPLER_SIZE: u32 = 2048;
-pub(super) const UPLOAD_RING_SIZE: u64 = 4 * 1024 * 1024;
+// Sized generously to hold a frame's uniform binds (large `materials`-style
+// arrays + per-draw locals); reset each `start()`.
+pub(super) const UPLOAD_RING_SIZE: u64 = 16 * 1024 * 1024;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -497,13 +499,17 @@ impl UploadRing {
         self.offset = 0;
     }
 
+    /// Write `data` at a 256-aligned offset and reserve a 256-aligned span (a CBV
+    /// reads `SizeInBytes` rounded up to 256, so the whole span must stay in bounds).
+    /// Returns the GPU address of the written data.
     pub fn write_cbv(&mut self, data: &[u8]) -> u64 {
         const CBV_ALIGN: u64 = 256;
         let aligned = (self.offset + CBV_ALIGN - 1) & !(CBV_ALIGN - 1);
-        let end = aligned + data.len() as u64;
-        assert!(end <= self.capacity, "upload ring overflow");
+        let size = data.len() as u64;
+        let aligned_size = (size + CBV_ALIGN - 1) & !(CBV_ALIGN - 1);
+        assert!(aligned + aligned_size <= self.capacity, "upload ring overflow");
         unsafe { ptr::copy_nonoverlapping(data.as_ptr(), self.mapped.add(aligned as usize), data.len()) };
-        self.offset = end;
+        self.offset = aligned + aligned_size;
         self.gpu_address + aligned
     }
 }
@@ -515,14 +521,6 @@ pub(super) struct Presentation {
     pub buffer_index: u32,
     pub present_id: u64,
     pub display_sync: bool,
-}
-
-// ── Active render target tracking ────────────────────────────────────────────
-
-pub(super) struct ActiveRt {
-    /// COM vtable pointer (borrowed from the surface/texture, no ownership).
-    pub resource_vtbl: ResourcePtr,
-    pub state: D3D12_RESOURCE_STATES,
 }
 
 // ── Command encoder ────────────────────────────────────────────────────────────
@@ -543,15 +541,15 @@ pub struct CommandEncoder {
     pub(super) draw_sig: ID3D12CommandSignature,
     pub(super) draw_indexed_sig: ID3D12CommandSignature,
     pub(super) dispatch_sig: ID3D12CommandSignature,
-    /// When true, a full barrier is inserted automatically at the start of every pass.
+    /// When true, a global UAV barrier is inserted automatically at the start of
+    /// every pass (the DX12 analog of Vulkan's full memory barrier).
     pub(super) auto_barriers: bool,
-    /// Render targets/depth that are currently in a non-COMMON state.
-    pub(super) active_rts: Vec<ActiveRt>,
-    /// Buffers (COM vtable ptrs) bound as UAV this barrier-epoch. They are
-    /// promoted COMMON->UNORDERED_ACCESS on dispatch and must be transitioned
-    /// back to COMMON by `barrier()` so a later indirect/SRV read can
-    /// auto-promote (e.g. COMMON->INDIRECT_ARGUMENT for ExecuteIndirect).
-    pub(super) uav_buffers: Vec<ResourcePtr>,
+    /// Current D3D12 state of every resource touched in this command list, keyed
+    /// by COM vtable pointer (as usize). Absent => COMMON. Reset in `start()`
+    /// (buffers/textures decay to COMMON at the ExecuteCommandLists boundary).
+    /// This is what lets storage textures (which do NOT auto-promote
+    /// COMMON->UNORDERED_ACCESS) and render targets work the same as Vulkan.
+    pub(super) resource_states: std::collections::HashMap<usize, D3D12_RESOURCE_STATES>,
 }
 
 unsafe impl Send for CommandEncoder {}
@@ -638,8 +636,7 @@ impl crate::traits::CommandDevice for Context {
             draw_indexed_sig: self.draw_indexed_sig.clone(),
             dispatch_sig: self.dispatch_sig.clone(),
             auto_barriers: true,
-            active_rts: Vec::new(),
-            uav_buffers: Vec::new(),
+            resource_states: std::collections::HashMap::new(),
         }
     }
 

@@ -14,11 +14,12 @@ impl<T: bytemuck::Pod> crate::ShaderBindable for T {
         let slot = &ctx.group_descriptors.slots[index as usize];
         debug_assert_eq!(slot.kind, super::BindingKind::Cbv);
 
-        // Write data (padded to 256 bytes — DX12 CBV minimum)
+        // Copy the full plain data into the upload ring (arbitrary size up to the
+        // 64 KiB CBV limit — e.g. large `materials` uniform arrays), then point a
+        // CBV at it. SizeInBytes must be a multiple of 256.
         let data = bytemuck::bytes_of(self);
-        let mut padded = [0u8; 256];
-        padded[..data.len().min(256)].copy_from_slice(&data[..data.len().min(256)]);
-        let gpu_addr = ctx.encoder.upload_ring.write_cbv(&padded);
+        let gpu_addr = ctx.encoder.upload_ring.write_cbv(data);
+        let size = ((data.len() as u32) + 255) & !255;
 
         let cbv_cpu = D3D12_CPU_DESCRIPTOR_HANDLE {
             ptr: ctx.ring_cpu_base.ptr
@@ -28,7 +29,7 @@ impl<T: bytemuck::Pod> crate::ShaderBindable for T {
             ctx.encoder.device.CreateConstantBufferView(
                 Some(&D3D12_CONSTANT_BUFFER_VIEW_DESC {
                     BufferLocation: gpu_addr,
-                    SizeInBytes: 256,
+                    SizeInBytes: size.max(256),
                 }),
                 cbv_cpu,
             );
@@ -39,22 +40,31 @@ impl<T: bytemuck::Pod> crate::ShaderBindable for T {
 impl crate::ShaderBindable for super::TextureView {
     fn bind_to(&self, ctx: &mut super::PipelineContext, index: u32) {
         let slot = &ctx.group_descriptors.slots[index as usize];
-        let (src, heap_type) = match slot.kind {
-            super::BindingKind::Srv => (
-                super::raw_cpu_handle(self.srv_handle),
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            ),
-            super::BindingKind::Uav => (
-                super::raw_cpu_handle(self.uav_handle),
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            ),
+        let src = match slot.kind {
+            super::BindingKind::Srv => {
+                // Storage/sampled textures do NOT auto-promote to a read state from
+                // an arbitrary prior state (e.g. UNORDERED_ACCESS), so transition.
+                ctx.encoder.require_state(self.resource_ptr, READ_STATE);
+                super::raw_cpu_handle(self.srv_handle)
+            }
+            super::BindingKind::Uav => {
+                // Regular textures never auto-promote COMMON->UNORDERED_ACCESS, so
+                // this explicit transition is mandatory for storage textures.
+                ctx.encoder
+                    .require_state(self.resource_ptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                super::raw_cpu_handle(self.uav_handle)
+            }
             other => panic!("unexpected binding kind {:?} for TextureView", other),
         };
         let dst = D3D12_CPU_DESCRIPTOR_HANDLE {
             ptr: ctx.ring_cpu_base.ptr
                 + (slot.heap_offset * ctx.encoder.cbv_srv_uav_ring.increment) as usize,
         };
-        unsafe { ctx.encoder.device.CopyDescriptorsSimple(1, dst, src, heap_type) };
+        unsafe {
+            ctx.encoder
+                .device
+                .CopyDescriptorsSimple(1, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        };
     }
 }
 
@@ -88,6 +98,7 @@ impl crate::ShaderBindable for crate::BufferPiece {
         };
         match slot.kind {
             super::BindingKind::Srv => {
+                ctx.encoder.require_buffer_state(&self.buffer, READ_STATE);
                 unsafe {
                     ctx.encoder.device.CopyDescriptorsSimple(
                         1, dst,
@@ -97,6 +108,8 @@ impl crate::ShaderBindable for crate::BufferPiece {
                 };
             }
             super::BindingKind::Uav => {
+                ctx.encoder
+                    .require_buffer_state(&self.buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 unsafe {
                     ctx.encoder.device.CopyDescriptorsSimple(
                         1, dst,
@@ -104,14 +117,10 @@ impl crate::ShaderBindable for crate::BufferPiece {
                         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                     )
                 };
-                // Track for UNORDERED_ACCESS->COMMON reset at the next barrier(),
-                // so a later indirect/SRV read can auto-promote from COMMON.
-                let vtbl = unsafe { self.buffer.resource().as_raw() as super::ResourcePtr };
-                if !ctx.encoder.uav_buffers.contains(&vtbl) {
-                    ctx.encoder.uav_buffers.push(vtbl);
-                }
             }
             super::BindingKind::Cbv => {
+                ctx.encoder
+                    .require_buffer_state(&self.buffer, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
                 let addr = self.buffer.gpu_address + self.offset;
                 let size = ((self.buffer.size.saturating_sub(self.offset) as u32) + 255) & !255;
                 unsafe {
@@ -166,44 +175,62 @@ fn transition_barrier(
     }
 }
 
+/// Combined shader-read state (works for both compute and graphics reads).
+const READ_STATE: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATES(
+    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0 | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0,
+);
+
 // ── CommandEncoder: private helpers ──────────────────────────────────────────
 
 impl super::CommandEncoder {
+    /// Transition a resource (by COM vtable ptr) to `needed`, tracking its state.
+    /// A no-op if it is already in that state. This is the single mechanism by
+    /// which every resource reaches the state its next use requires — the DX12
+    /// equivalent of Vulkan keeping everything in GENERAL.
+    pub(super) fn require_state(&mut self, vtbl: super::ResourcePtr, needed: D3D12_RESOURCE_STATES) {
+        let key = vtbl as usize;
+        let current = self
+            .resource_states
+            .get(&key)
+            .copied()
+            .unwrap_or(D3D12_RESOURCE_STATE_COMMON);
+        if current.0 != needed.0 {
+            let barrier = transition_barrier(vtbl, current, needed);
+            unsafe { self.list.as_ref().unwrap().ResourceBarrier(&[barrier]) };
+            self.resource_states.insert(key, needed);
+        }
+    }
+
+    /// Like `require_state`, but for buffers. Host-visible (UPLOAD/Shared) buffers
+    /// are permanently locked in GENERIC_READ and must never be transitioned;
+    /// GENERIC_READ already permits vertex/index/constant/SRV/copy-source reads.
+    pub(super) fn require_buffer_state(
+        &mut self,
+        buffer: &super::Buffer,
+        needed: D3D12_RESOURCE_STATES,
+    ) {
+        if !buffer.mapped_ptr.is_null() {
+            return;
+        }
+        let vtbl = unsafe { buffer.resource().as_raw() as super::ResourcePtr };
+        self.require_state(vtbl, needed);
+    }
+
     pub(super) fn current_list(&self) -> &ID3D12GraphicsCommandList {
         self.list.as_ref().unwrap()
     }
 
-    /// Full pipeline barrier — the DX12 equivalent of Vulkan's
+    /// Global UAV barrier — the DX12 analog of Vulkan's
     /// `MEMORY_WRITE -> MEMORY_READ|MEMORY_WRITE` over `ALL_COMMANDS`.
     ///
-    /// Three things happen, all "everything-before is visible to everything-after":
-    ///  1. Active render/depth targets transition back to COMMON.
-    ///  2. UAV-written buffers transition UNORDERED_ACCESS -> COMMON. This both
-    ///     flushes the writes AND returns them to COMMON so a following read can
-    ///     auto-promote — crucially, `ExecuteIndirect` needs INDIRECT_ARGUMENT,
-    ///     which COMMON promotes to but UNORDERED_ACCESS does not. This is what
-    ///     makes "compute writes indirect args -> indirect draw" work, matching
-    ///     Vulkan's MEMORY_WRITE->MEMORY_READ guarantee.
-    ///  3. A global UAV barrier covers any remaining UAV resources (e.g. storage
-    ///     textures, or buffers kept in UAV across passes).
+    /// Per-resource *state* hazards (UAV<->SRV, render-target<->sample, write
+    /// then indirect-read, etc.) are resolved by `require_state` at each use,
+    /// which also carries the necessary write-visibility for that resource.
+    /// What remains is same-state UAV->UAV write-after-write / read-after-write
+    /// (e.g. one compute pass writing a storage buffer, the next reading it as a
+    /// UAV): a global UAV barrier covers exactly that, for all resources at once.
     pub fn barrier(&mut self) {
         profiling::function_scope!();
-
-        let list = self.list.as_ref().unwrap();
-
-        let mut transitions: Vec<D3D12_RESOURCE_BARRIER> = Vec::new();
-        for rt in self.active_rts.drain(..) {
-            transitions.push(transition_barrier(rt.resource_vtbl, rt.state, D3D12_RESOURCE_STATE_COMMON));
-        }
-        for vtbl in self.uav_buffers.drain(..) {
-            transitions.push(transition_barrier(
-                vtbl, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON));
-        }
-        if !transitions.is_empty() {
-            unsafe { list.ResourceBarrier(&transitions) };
-        }
-
-        // Global UAV barrier: ensures all UAV writes are visible to later UAV use.
         let uav_barrier = D3D12_RESOURCE_BARRIER {
             Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
             Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
@@ -213,7 +240,7 @@ impl super::CommandEncoder {
                 }),
             },
         };
-        unsafe { list.ResourceBarrier(&[uav_barrier]) };
+        unsafe { self.list.as_ref().unwrap().ResourceBarrier(&[uav_barrier]) };
     }
 
     /// Matches Vulkan's `barrier_modifies_indirect` — a focused barrier
@@ -261,53 +288,36 @@ impl super::CommandEncoder {
     ) -> super::RenderCommandEncoder<'_> {
         self.begin_pass(label);
 
-        let list = self.list.as_ref().unwrap();
         let mut target_size = [0u16; 2];
         let mut rtv_handles: Vec<D3D12_CPU_DESCRIPTOR_HANDLE> = Vec::new();
         let mut dsv_handle: Option<D3D12_CPU_DESCRIPTOR_HANDLE> = None;
 
+        // Transition all attachments first (require_state borrows the list internally),
+        // then record clears / OMSetRenderTargets under a single list borrow.
         for rt in targets.colors {
             target_size = rt.view.target_size;
-            let vtbl = rt.view.resource_ptr;
+            // -> RENDER_TARGET (not a promotable state; require_state tracks it so a
+            // later sample or present transitions out of it correctly).
+            self.require_state(rt.view.resource_ptr, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            rtv_handles.push(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
+        }
+        if let Some(ref rt) = targets.depth_stencil {
+            target_size = rt.view.target_size;
+            self.require_state(rt.view.resource_ptr, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            dsv_handle = Some(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
+        }
 
-            // COMMON → RENDER_TARGET. This is the one strictly-required transition:
-            // RENDER_TARGET is not a promotable state. COMMON (== PRESENT, both 0) is
-            // the resting state, so this covers the first frame, post-present back
-            // buffers, and offscreen targets uniformly. Skip if already tracked as a
-            // render target (manual-barrier mode, repeated passes without a barrier).
-            if !self.active_rts.iter().any(|rt| rt.resource_vtbl == vtbl) {
-                let barrier = transition_barrier(
-                    vtbl, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                unsafe { list.ResourceBarrier(&[barrier]) };
-                self.active_rts.push(super::ActiveRt {
-                    resource_vtbl: vtbl,
-                    state: D3D12_RESOURCE_STATE_RENDER_TARGET,
-                });
-            }
+        let list = self.list.as_ref().unwrap();
 
-            let rtv = super::raw_cpu_handle(rt.view.rtv_dsv_handle);
-            rtv_handles.push(rtv);
+        for (i, rt) in targets.colors.iter().enumerate() {
             if let crate::InitOp::Clear(color) = rt.init_op {
                 let rgba = map_texture_color(color);
-                unsafe { list.ClearRenderTargetView(rtv, &rgba, None) };
+                unsafe { list.ClearRenderTargetView(rtv_handles[i], &rgba, None) };
             }
         }
 
         if let Some(ref rt) = targets.depth_stencil {
-            target_size = rt.view.target_size;
-            let vtbl = rt.view.resource_ptr;
-            let state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-
-            // COMMON → DEPTH_WRITE (also not promotable). Skip if already tracked.
-            if !self.active_rts.iter().any(|rt| rt.resource_vtbl == vtbl) {
-                let barrier = transition_barrier(vtbl, D3D12_RESOURCE_STATE_COMMON, state);
-                unsafe { list.ResourceBarrier(&[barrier]) };
-                self.active_rts.push(super::ActiveRt { resource_vtbl: vtbl, state });
-            }
-
-            let dsv = super::raw_cpu_handle(rt.view.rtv_dsv_handle);
-            dsv_handle = Some(dsv);
-
+            let dsv = dsv_handle.unwrap();
             let mut clear_flags = D3D12_CLEAR_FLAGS(0);
             let mut depth_v = 0.0f32;
             let mut stencil_v = 0u8;
@@ -364,10 +374,9 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         self.cbv_srv_uav_ring.reset();
         self.sampler_ring.reset();
         self.upload_ring.reset();
-        self.active_rts.clear();
-        // Buffer states decay to COMMON at the ExecuteCommandLists boundary, so
-        // a fresh command list starts with all buffers in COMMON.
-        self.uav_buffers.clear();
+        // All resources decay to COMMON at the ExecuteCommandLists boundary, so a
+        // fresh command list starts with every resource implicitly in COMMON.
+        self.resource_states.clear();
 
         let heaps: [Option<ID3D12DescriptorHeap>; 2] = [
             Some(self.cbv_srv_uav_ring.heap.clone()),
@@ -384,23 +393,13 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
 
     fn present(&mut self, frame: super::Frame) {
         profiling::function_scope!();
-        let list = self.list.as_ref().unwrap();
 
-        // PRESENT == COMMON (both 0). If the back buffer is still in RENDER_TARGET
-        // (the render pass left it there, lazily), transition it back to COMMON —
-        // which is the presentable state. If it was already flushed to COMMON by a
-        // `barrier()`, no transition is needed: emitting COMMON→PRESENT would be a
-        // before==after no-op that the debug layer rejects.
-        let frame_vtbl = unsafe { frame.resource.as_raw() as *mut std::ffi::c_void };
-        if let Some(pos) = self
-            .active_rts
-            .iter()
-            .position(|rt| rt.resource_vtbl == frame_vtbl)
-        {
-            let rt = self.active_rts.remove(pos);
-            let barrier = transition_barrier(frame_vtbl, rt.state, D3D12_RESOURCE_STATE_COMMON);
-            unsafe { list.ResourceBarrier(&[barrier]) };
-        }
+        // The presentable state is COMMON (== D3D12_RESOURCE_STATE_PRESENT == 0).
+        // require_state transitions from whatever the back buffer is currently in
+        // (typically RENDER_TARGET after the render pass) and is a no-op if it is
+        // already COMMON, so it never emits an illegal before==after barrier.
+        let frame_vtbl = unsafe { frame.resource.as_raw() as super::ResourcePtr };
+        self.require_state(frame_vtbl, D3D12_RESOURCE_STATE_COMMON);
 
         self.present = Some(super::Presentation {
             swapchain: frame.swapchain,
@@ -429,9 +428,15 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
     type BufferPiece = crate::BufferPiece;
     type TexturePiece = crate::TexturePiece;
 
-    fn fill_buffer(&mut self, dst: crate::BufferPiece, size: u64, value: u8) {
-        // DX12 ClearUnorderedAccessViewUint fills in DWORD chunks with a repeated-byte pattern.
+    fn fill_buffer(&mut self, dst: crate::BufferPiece, _size: u64, value: u8) {
+        // DX12 ClearUnorderedAccessViewUint fills in DWORD chunks with a repeated-byte
+        // pattern. Note: it clears the whole UAV (the buffer's full-range raw UAV), so
+        // `_size`/offset sub-ranges are not honored — exact for whole-buffer fills.
         let value_u32 = (value as u32) * 0x01010101;
+
+        // The buffer must be in UNORDERED_ACCESS to be cleared through a UAV.
+        self.encoder
+            .require_buffer_state(&dst.buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         let enc = &mut *self.encoder;
 
         // Allocate one slot in the GPU-visible ring for the UAV.
@@ -464,6 +469,10 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         dst: crate::BufferPiece,
         size: u64,
     ) {
+        self.encoder
+            .require_buffer_state(&src.buffer, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        self.encoder
+            .require_buffer_state(&dst.buffer, D3D12_RESOURCE_STATE_COPY_DEST);
         unsafe {
             self.encoder.current_list().CopyBufferRegion(
                 dst.buffer.resource(), dst.offset,
@@ -481,6 +490,10 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
     ) {
         let src_res = src.texture.resource();
         let dst_res = dst.texture.resource();
+        let src_vtbl = unsafe { src_res.as_raw() as super::ResourcePtr };
+        let dst_vtbl = unsafe { dst_res.as_raw() as super::ResourcePtr };
+        self.encoder.require_state(src_vtbl, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        self.encoder.require_state(dst_vtbl, D3D12_RESOURCE_STATE_COPY_DEST);
         let src_loc = D3D12_TEXTURE_COPY_LOCATION {
             pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(src_res.as_raw())) }),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
@@ -516,6 +529,10 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         size: crate::Extent,
     ) {
         let dst_res = dst.texture.resource();
+        let dst_vtbl = unsafe { dst_res.as_raw() as super::ResourcePtr };
+        self.encoder
+            .require_buffer_state(&src.buffer, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        self.encoder.require_state(dst_vtbl, D3D12_RESOURCE_STATE_COPY_DEST);
         let aligned_pitch = align_pitch(bytes_per_row as u64);
         let src_loc = D3D12_TEXTURE_COPY_LOCATION {
             pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(src.buffer.resource().as_raw())) }),
@@ -553,6 +570,10 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         size: crate::Extent,
     ) {
         let src_res = src.texture.resource();
+        let src_vtbl = unsafe { src_res.as_raw() as super::ResourcePtr };
+        self.encoder.require_state(src_vtbl, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        self.encoder
+            .require_buffer_state(&dst.buffer, D3D12_RESOURCE_STATE_COPY_DEST);
         let aligned_pitch = align_pitch(bytes_per_row as u64);
         let src_loc = D3D12_TEXTURE_COPY_LOCATION {
             pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(src_res.as_raw())) }),
@@ -741,6 +762,8 @@ impl crate::traits::ComputePipelineEncoder for super::ComputePipelineContext<'_>
     }
 
     fn dispatch_indirect(&mut self, indirect_buf: crate::BufferPiece) {
+        self.encoder
+            .require_buffer_state(&indirect_buf.buffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         let sig = self.encoder.dispatch_sig.clone();
         unsafe {
             self.encoder.current_list().ExecuteIndirect(
@@ -776,6 +799,10 @@ impl crate::traits::RenderEncoder for super::RenderPipelineContext<'_> {
     }
 
     fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
+        // A vertex buffer produced by a compute pass (e.g. post-culling instances)
+        // is in UNORDERED_ACCESS; bring it to the vertex-buffer read state.
+        self.encoder
+            .require_buffer_state(&vertex_buf.buffer, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
         let stride = self.vertex_strides.get(index as usize).copied().unwrap_or(0);
         let vbv = D3D12_VERTEX_BUFFER_VIEW {
             BufferLocation: vertex_buf.buffer.gpu_address + vertex_buf.offset,
@@ -805,6 +832,8 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
         start_instance: u32,
         instance_count: u32,
     ) {
+        self.encoder
+            .require_buffer_state(&index_buf.buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
         let ibv = D3D12_INDEX_BUFFER_VIEW {
             BufferLocation: index_buf.buffer.gpu_address + index_buf.offset,
             SizeInBytes: (index_buf.buffer.size - index_buf.offset) as u32,
@@ -818,6 +847,9 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
     }
 
     fn draw_indirect(&mut self, indirect_buf: crate::BufferPiece, draw_count: u32) {
+        // Compute-produced draw args are in UNORDERED_ACCESS; move to INDIRECT_ARGUMENT.
+        self.encoder
+            .require_buffer_state(&indirect_buf.buffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         let sig = self.encoder.draw_sig.clone();
         unsafe {
             self.encoder.current_list().ExecuteIndirect(
@@ -833,6 +865,10 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
         indirect_buf: crate::BufferPiece,
         draw_count: u32,
     ) {
+        self.encoder
+            .require_buffer_state(&index_buf.buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+        self.encoder
+            .require_buffer_state(&indirect_buf.buffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         let ibv = D3D12_INDEX_BUFFER_VIEW {
             BufferLocation: index_buf.buffer.gpu_address + index_buf.offset,
             SizeInBytes: (index_buf.buffer.size - index_buf.offset) as u32,
@@ -856,6 +892,13 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
         count_buf: crate::BufferPiece,
         max_draw_count: u32,
     ) {
+        self.encoder
+            .require_buffer_state(&index_buf.buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+        // Both the argument buffer and the count buffer must be INDIRECT_ARGUMENT.
+        self.encoder
+            .require_buffer_state(&indirect_buf.buffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        self.encoder
+            .require_buffer_state(&count_buf.buffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         let ibv = D3D12_INDEX_BUFFER_VIEW {
             BufferLocation: index_buf.buffer.gpu_address + index_buf.offset,
             SizeInBytes: (index_buf.buffer.size - index_buf.offset) as u32,
