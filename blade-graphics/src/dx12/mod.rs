@@ -631,6 +631,18 @@ impl UploadRing {
         self.gpu_address + aligned
     }
 
+    /// Reserve `size` bytes at an `align`-aligned offset; returns the *byte
+    /// offset* into the ring resource (for use as a placed-footprint Offset).
+    /// The caller writes into `self.mapped + offset` and copies from
+    /// `self.resource`. Used to repack texture uploads into a D3D12-legal layout.
+    pub fn alloc(&mut self, size: u64, align: u64) -> u64 {
+        let aligned = (self.offset + align - 1) & !(align - 1);
+        let end = aligned + size;
+        assert!(end <= self.capacity, "upload ring overflow");
+        self.offset = end;
+        aligned
+    }
+
     /// Write `data` at a 256-aligned offset and reserve a 256-aligned span (a CBV
     /// reads `SizeInBytes` rounded up to 256, so the whole span must stay in bounds).
     /// Returns the GPU address of the written data.

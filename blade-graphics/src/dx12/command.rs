@@ -615,17 +615,57 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         dst: crate::TexturePiece,
         size: crate::Extent,
     ) {
-        let dst_res = dst.texture.resource();
-        self.encoder
-            .require_buffer_state(&src.buffer, D3D12_RESOURCE_STATE_COPY_SOURCE);
         self.encoder.require_piece_state(&dst, D3D12_RESOURCE_STATE_COPY_DEST);
+
+        // D3D12 placed footprints require the source offset to be a multiple of
+        // 512 (D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT) and the row pitch a multiple
+        // of 256 (D3D12_TEXTURE_DATA_PITCH_ALIGNMENT). blade buffers are packed
+        // tightly at `bytes_per_row` with arbitrary offsets, so when either is
+        // unaligned we repack the rows into the upload ring at a legal layout.
+        // Wide textures (pitch already 256-aligned) and aligned offsets take the
+        // direct path with no copy.
         let aligned_pitch = align_pitch(bytes_per_row as u64);
+        let direct = src.offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT as u64 == 0
+            && bytes_per_row as u64 == aligned_pitch;
+
+        let (footprint_res, footprint_offset) = if direct {
+            self.encoder
+                .require_buffer_state(&src.buffer, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            (
+                unsafe { src.buffer.resource().as_raw() },
+                src.offset,
+            )
+        } else {
+            assert!(
+                !src.buffer.mapped_ptr.is_null(),
+                "DX12: copy_buffer_to_texture with an unaligned offset/row-pitch \
+                 requires a host-visible (Upload/Shared) source buffer"
+            );
+            let num_rows = (size.height * size.depth) as u64;
+            let staging_off = self.encoder.upload_ring.alloc(
+                aligned_pitch * num_rows,
+                D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT as u64,
+            );
+            unsafe {
+                let dst_base = self.encoder.upload_ring.mapped.add(staging_off as usize);
+                let src_base = src.buffer.mapped_ptr.add(src.offset as usize);
+                for r in 0..num_rows {
+                    std::ptr::copy_nonoverlapping(
+                        src_base.add((r * bytes_per_row as u64) as usize),
+                        dst_base.add((r * aligned_pitch) as usize),
+                        bytes_per_row as usize,
+                    );
+                }
+                (self.encoder.upload_ring.resource.as_raw(), staging_off)
+            }
+        };
+
         let src_loc = D3D12_TEXTURE_COPY_LOCATION {
-            pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(src.buffer.resource().as_raw())) }),
+            pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(footprint_res)) }),
             Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                 PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                    Offset: src.offset,
+                    Offset: footprint_offset,
                     Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
                         Format: super::map_texture_format(dst.texture.format),
                         Width: size.width, Height: size.height, Depth: size.depth,
@@ -635,7 +675,7 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
             },
         };
         let dst_loc = D3D12_TEXTURE_COPY_LOCATION {
-            pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(dst_res.as_raw())) }),
+            pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(dst.texture.resource().as_raw())) }),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                 SubresourceIndex: subresource_index(dst.mip_level, dst.array_layer, dst.texture.mip_levels),
