@@ -2,7 +2,7 @@ use std::{mem, ptr, sync::Mutex};
 use windows::{
     core::Interface,
     Win32::{
-        Foundation::HANDLE,
+        Foundation::{HANDLE, WAIT_EVENT},
         Graphics::{
             Direct3D12::*,
             Dxgi::{Common::*, *},
@@ -19,20 +19,13 @@ mod surface;
 
 // ── Descriptor heap sizes ─────────────────────────────────────────────────────
 
-/// CPU-only heap for render target views.
 pub(super) const RTV_HEAP_SIZE: u32 = 512;
-/// CPU-only heap for depth/stencil views.
 pub(super) const DSV_HEAP_SIZE: u32 = 128;
-/// CPU-only staging heap for CBV/SRV/UAV descriptors (used when creating resources).
 pub(super) const STAGING_HEAP_SIZE: u32 = 65536;
-/// CPU-only staging heap for sampler descriptors.
 pub(super) const STAGING_SAMPLER_SIZE: u32 = 2048;
-/// Per-encoder GPU-visible CBV/SRV/UAV heap.
 pub(super) const ENCODER_HEAP_SIZE: u32 = 65536;
-/// Per-encoder GPU-visible sampler heap (DX12 max is 2048).
 pub(super) const ENCODER_SAMPLER_SIZE: u32 = 2048;
-/// Per-encoder upload scratch ring size (for Plain/CBV data).
-pub(super) const UPLOAD_RING_SIZE: u64 = 4 * 1024 * 1024; // 4 MiB
+pub(super) const UPLOAD_RING_SIZE: u64 = 4 * 1024 * 1024;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -76,8 +69,7 @@ impl DescriptorHeap {
         } else {
             D3D12_GPU_DESCRIPTOR_HANDLE { ptr: 0 }
         };
-        let increment =
-            unsafe { device.GetDescriptorHandleIncrementSize(ty) };
+        let increment = unsafe { device.GetDescriptorHandleIncrementSize(ty) };
         Self { raw, cpu_start, gpu_start, increment, capacity }
     }
 
@@ -93,8 +85,6 @@ impl DescriptorHeap {
         }
     }
 }
-
-// ── Descriptor allocator (linear, used for static heaps) ─────────────────────
 
 pub(super) struct LinearAllocator {
     pub offset: u32,
@@ -123,18 +113,15 @@ unsafe impl Sync for Queue {}
 
 pub struct Context {
     pub(super) device: ID3D12Device,
-    queue: Mutex<Queue>,
-    // Static CPU-only descriptor heaps
+    pub(super) queue: Mutex<Queue>,
     pub(super) rtv_heap: DescriptorHeap,
     pub(super) dsv_heap: DescriptorHeap,
     pub(super) staging_heap: DescriptorHeap,
     pub(super) staging_sampler_heap: DescriptorHeap,
-    // Linear allocators for static heaps
     pub(super) rtv_alloc: Mutex<LinearAllocator>,
     pub(super) dsv_alloc: Mutex<LinearAllocator>,
     pub(super) staging_alloc: Mutex<LinearAllocator>,
     pub(super) staging_sampler_alloc: Mutex<LinearAllocator>,
-    // Command signatures for indirect execution (no root arg changes)
     pub(super) draw_sig: ID3D12CommandSignature,
     pub(super) draw_indexed_sig: ID3D12CommandSignature,
     pub(super) dispatch_sig: ID3D12CommandSignature,
@@ -188,16 +175,21 @@ unsafe impl Sync for Frame {}
 
 impl Frame {
     pub fn texture(&self) -> Texture {
+        // Frame textures are not owned — memory_handle=!0 marks this as un-destroyable.
+        // resource_ptr is null because init_texture is a no-op in DX12.
         Texture {
-            resource: self.resource.clone(),
+            resource_ptr: ptr::null_mut(),
+            memory_handle: !0,
             format: self.format,
             target_size: self.target_size,
         }
     }
 
     pub fn texture_view(&self) -> TextureView {
+        // Store the raw COM vtable pointer (without AddRef — borrowed from the frame).
+        let resource_ptr = unsafe { self.resource.as_raw() as *mut std::ffi::c_void };
         TextureView {
-            resource: self.resource.clone(),
+            resource_ptr,
             srv_handle: 0,
             uav_handle: 0,
             rtv_dsv_handle: self.rtv.ptr as u64,
@@ -217,19 +209,43 @@ pub struct SyncPoint {
 
 // ── Resource types ────────────────────────────────────────────────────────────
 
-/// CPU descriptor handle stored as raw usize value (0 = not present).
-type RawCpuHandle = u64;
+/// A raw CPU descriptor handle stored as u64 (0 = not present).
+pub(super) type RawCpuHandle = u64;
 
-pub(super) fn cpu_handle_raw(h: D3D12_CPU_DESCRIPTOR_HANDLE) -> RawCpuHandle {
-    h.ptr as u64
-}
 pub(super) fn raw_cpu_handle(v: RawCpuHandle) -> D3D12_CPU_DESCRIPTOR_HANDLE {
     D3D12_CPU_DESCRIPTOR_HANDLE { ptr: v as usize }
 }
 
+/// Pointer stored in `Buffer.resource_ptr` and `Texture.resource_ptr`:
+///   - Box ptr (`Box::into_raw(Box::new(ID3D12Resource))`)
+///   - null for frame textures (memory_handle == !0)
+/// Pointer stored in `TextureView.resource_ptr`:
+///   - COM vtable ptr (`resource.as_raw() as *mut c_void`)
+pub(super) type ResourcePtr = *mut std::ffi::c_void;
+
+/// Borrow a Box-stored resource (for `Buffer` and `Texture`).
+/// # Safety
+/// `ptr` must have been created by `Box::into_raw(Box::new(ID3D12Resource))`.
+pub(super) unsafe fn box_resource_ref(ptr: ResourcePtr) -> &'static ID3D12Resource {
+    debug_assert!(!ptr.is_null(), "null resource_ptr in box_resource_ref");
+    &*(ptr as *const ID3D12Resource)
+}
+
+/// Borrow a COM-vtbl-stored resource (for `TextureView`).
+/// Returns a `ManuallyDrop` to prevent Release on drop.
+/// # Safety
+/// `ptr` must have been created by `resource.as_raw() as *mut c_void`.
+pub(super) unsafe fn vtbl_resource_borrow(ptr: ResourcePtr)
+    -> mem::ManuallyDrop<ID3D12Resource>
+{
+    debug_assert!(!ptr.is_null(), "null resource_ptr in vtbl_resource_borrow");
+    mem::ManuallyDrop::new(ID3D12Resource::from_raw(ptr as *mut _))
+}
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq)]
 pub struct Buffer {
-    pub(super) resource_ptr: *mut std::ffi::c_void,
+    /// `Box::into_raw(Box::new(ID3D12Resource))`.
+    pub(super) resource_ptr: ResourcePtr,
     pub(super) gpu_address: u64,
     pub(super) mapped_ptr: *mut u8,
     pub(super) srv_handle: RawCpuHandle,
@@ -257,23 +273,18 @@ impl Buffer {
     pub fn data(&self) -> *mut u8 {
         self.mapped_ptr
     }
+
     pub(super) fn resource(&self) -> &ID3D12Resource {
-        unsafe { &*(self.resource_ptr as *const ID3D12Resource) }
+        unsafe { box_resource_ref(self.resource_ptr) }
     }
-}
-
-/// A raw, non-refcounted handle to a `ID3D12Resource`.
-/// Created by `Box::into_raw(Box::new(resource)) as *mut c_void`.
-/// Destroyed by `Box::from_raw(ptr as *mut ID3D12Resource)` + drop.
-pub(super) type ResourcePtr = *mut std::ffi::c_void;
-
-pub(super) unsafe fn resource_ref(ptr: ResourcePtr) -> &'static ID3D12Resource {
-    &*(ptr as *const ID3D12Resource)
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq)]
 pub struct Texture {
+    /// `Box::into_raw(Box::new(ID3D12Resource))`, or null when `memory_handle == !0`.
     pub(super) resource_ptr: ResourcePtr,
+    /// `!0` signals a "borrowed" frame texture that must not be destroyed.
+    pub(super) memory_handle: usize,
     pub(super) format: crate::TextureFormat,
     pub(super) target_size: [u16; 2],
 }
@@ -289,12 +300,13 @@ impl Default for Texture {
 
 impl Texture {
     pub(super) fn resource(&self) -> &ID3D12Resource {
-        unsafe { resource_ref(self.resource_ptr) }
+        unsafe { box_resource_ref(self.resource_ptr) }
     }
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq)]
 pub struct TextureView {
+    /// COM vtable pointer (`resource.as_raw() as *mut c_void`), borrowed.
     pub(super) resource_ptr: ResourcePtr,
     pub(super) srv_handle: RawCpuHandle,
     pub(super) uav_handle: RawCpuHandle,
@@ -314,8 +326,9 @@ impl Default for TextureView {
 }
 
 impl TextureView {
-    pub(super) fn resource(&self) -> &ID3D12Resource {
-        unsafe { resource_ref(self.resource_ptr) }
+    /// Returns a borrowed (non-owning) reference to the underlying resource.
+    pub(super) fn resource_borrow(&self) -> mem::ManuallyDrop<ID3D12Resource> {
+        unsafe { vtbl_resource_borrow(self.resource_ptr) }
     }
 }
 
@@ -346,28 +359,19 @@ pub(super) enum BindingKind {
     Sampler,
 }
 
-/// Per-binding metadata in a group descriptor layout.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct BindingSlot {
-    /// Index into the group's CBV/SRV/UAV or sampler heap allocation.
     pub heap_offset: u32,
-    /// Re-mapped HLSL register number (0-based within its type).
     pub register: u32,
     pub kind: BindingKind,
 }
 
-/// Descriptor layout for one bind group.
 #[derive(Clone, Debug)]
 pub(super) struct GroupDescriptors {
-    /// Root parameter index for the CBV/SRV/UAV table (None if no such bindings).
     pub cbv_srv_uav_root_index: Option<u32>,
-    /// Root parameter index for the sampler table (None if no sampler bindings).
     pub sampler_root_index: Option<u32>,
-    /// Number of CBV/SRV/UAV descriptors needed per bind call.
     pub cbv_srv_uav_count: u32,
-    /// Number of sampler descriptors needed per bind call.
     pub sampler_count: u32,
-    /// One entry per binding in group layout order.
     pub slots: Vec<BindingSlot>,
 }
 
@@ -396,16 +400,14 @@ pub struct RenderPipeline {
     pub(super) pso: ID3D12PipelineState,
     pub(super) layout: PipelineLayout,
     pub(super) topology: windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY,
-    /// Stride per vertex buffer binding slot (indexed by slot index).
     pub(super) vertex_strides: Vec<u32>,
 }
 
 unsafe impl Send for RenderPipeline {}
 unsafe impl Sync for RenderPipeline {}
 
-// ── Command encoder ────────────────────────────────────────────────────────────
+// ── Per-encoder GPU-visible descriptor ring ───────────────────────────────────
 
-/// Per-encoder GPU-visible descriptor ring (resets each frame).
 pub(super) struct DescriptorRing {
     pub heap: ID3D12DescriptorHeap,
     pub cpu_start: D3D12_CPU_DESCRIPTOR_HANDLE,
@@ -437,7 +439,6 @@ impl DescriptorRing {
         self.offset = 0;
     }
 
-    /// Allocate `count` consecutive descriptors; return (cpu_start, gpu_start).
     pub fn alloc(&mut self, count: u32) -> (D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE) {
         assert!(self.offset + count <= self.capacity, "descriptor ring overflow");
         let cpu = D3D12_CPU_DESCRIPTOR_HANDLE {
@@ -451,7 +452,8 @@ impl DescriptorRing {
     }
 }
 
-/// Per-encoder upload scratch ring (for CBV plain-data copies).
+// ── Upload scratch ring (for CBV plain-data) ──────────────────────────────────
+
 pub(super) struct UploadRing {
     pub resource: ID3D12Resource,
     pub gpu_address: u64,
@@ -467,10 +469,7 @@ impl UploadRing {
         let mut resource: Option<ID3D12Resource> = None;
         unsafe {
             device.CreateCommittedResource(
-                &D3D12_HEAP_PROPERTIES {
-                    Type: D3D12_HEAP_TYPE_UPLOAD,
-                    ..Default::default()
-                },
+                &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_UPLOAD, ..Default::default() },
                 D3D12_HEAP_FLAG_NONE,
                 &D3D12_RESOURCE_DESC {
                     Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
@@ -490,36 +489,26 @@ impl UploadRing {
         let resource = resource.unwrap();
         let gpu_address = unsafe { resource.GetGPUVirtualAddress() };
         let mut mapped_ptr: *mut std::ffi::c_void = ptr::null_mut();
-        unsafe {
-            resource.Map(0, None, Some(&mut mapped_ptr)).unwrap();
-        }
-        Self {
-            resource,
-            gpu_address,
-            mapped: mapped_ptr as *mut u8,
-            offset: 0,
-            capacity,
-        }
+        unsafe { resource.Map(0, None, Some(&mut mapped_ptr)).unwrap() };
+        Self { resource, gpu_address, mapped: mapped_ptr as *mut u8, offset: 0, capacity }
     }
 
     pub fn reset(&mut self) {
         self.offset = 0;
     }
 
-    /// Write `data` to the ring, aligned to 256 bytes (DX12 CBV alignment).
-    /// Returns the GPU address of the written data.
     pub fn write_cbv(&mut self, data: &[u8]) -> u64 {
         const CBV_ALIGN: u64 = 256;
-        let aligned_offset = (self.offset + CBV_ALIGN - 1) & !(CBV_ALIGN - 1);
-        let end = aligned_offset + data.len() as u64;
+        let aligned = (self.offset + CBV_ALIGN - 1) & !(CBV_ALIGN - 1);
+        let end = aligned + data.len() as u64;
         assert!(end <= self.capacity, "upload ring overflow");
-        unsafe {
-            ptr::copy_nonoverlapping(data.as_ptr(), self.mapped.add(aligned_offset as usize), data.len());
-        }
+        unsafe { ptr::copy_nonoverlapping(data.as_ptr(), self.mapped.add(aligned as usize), data.len()) };
         self.offset = end;
-        self.gpu_address + aligned_offset
+        self.gpu_address + aligned
     }
 }
+
+// ── Presentation ──────────────────────────────────────────────────────────────
 
 pub(super) struct Presentation {
     pub swapchain: IDXGISwapChain3,
@@ -527,6 +516,16 @@ pub(super) struct Presentation {
     pub present_id: u64,
     pub display_sync: bool,
 }
+
+// ── Active render target tracking ────────────────────────────────────────────
+
+pub(super) struct ActiveRt {
+    /// COM vtable pointer (borrowed from the surface/texture, no ownership).
+    pub resource_vtbl: ResourcePtr,
+    pub state: D3D12_RESOURCE_STATES,
+}
+
+// ── Command encoder ────────────────────────────────────────────────────────────
 
 pub struct CommandEncoder {
     pub(super) list: Option<ID3D12GraphicsCommandList>,
@@ -544,13 +543,16 @@ pub struct CommandEncoder {
     pub(super) draw_sig: ID3D12CommandSignature,
     pub(super) draw_indexed_sig: ID3D12CommandSignature,
     pub(super) dispatch_sig: ID3D12CommandSignature,
+    /// When true, a full barrier is inserted automatically at the start of every pass.
+    pub(super) auto_barriers: bool,
+    /// Render targets/depth that are currently in a non-COMMON state.
+    pub(super) active_rts: Vec<ActiveRt>,
 }
 
 unsafe impl Send for CommandEncoder {}
 
 pub struct TransferCommandEncoder<'a> {
-    pub(super) list: &'a ID3D12GraphicsCommandList,
-    pub(super) device: &'a ID3D12Device,
+    pub(super) encoder: &'a mut CommandEncoder,
 }
 
 pub struct AccelerationStructureCommandEncoder<'a> {
@@ -580,13 +582,9 @@ pub struct RenderPipelineContext<'a> {
 pub struct PipelineContext<'a> {
     pub(super) encoder: &'a mut CommandEncoder,
     pub(super) group_descriptors: &'a GroupDescriptors,
-    /// Base CPU address in the GPU-visible ring for CBV/SRV/UAV of this group.
     pub(super) ring_cpu_base: D3D12_CPU_DESCRIPTOR_HANDLE,
-    /// Base GPU address in the ring for CBV/SRV/UAV.
     pub(super) ring_gpu_base: D3D12_GPU_DESCRIPTOR_HANDLE,
-    /// Base CPU address in the sampler ring for this group.
     pub(super) sampler_cpu_base: D3D12_CPU_DESCRIPTOR_HANDLE,
-    /// Base GPU address in the sampler ring.
     pub(super) sampler_gpu_base: D3D12_GPU_DESCRIPTOR_HANDLE,
     pub(super) is_compute: bool,
     pub(super) root_index_cbv_srv_uav: Option<u32>,
@@ -603,23 +601,13 @@ impl crate::traits::CommandDevice for Context {
     fn create_command_encoder(&self, desc: super::CommandEncoderDesc) -> CommandEncoder {
         let allocators: Vec<ID3D12CommandAllocator> = (0..desc.buffer_count)
             .map(|_| unsafe {
-                self.device
-                    .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
-                    .unwrap()
+                self.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).unwrap()
             })
             .collect();
 
         let list: ID3D12GraphicsCommandList = unsafe {
-            self.device
-                .CreateCommandList(
-                    0,
-                    D3D12_COMMAND_LIST_TYPE_DIRECT,
-                    &allocators[0],
-                    None,
-                )
-                .unwrap()
+            self.device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocators[0], None).unwrap()
         };
-        // Close immediately; we'll reset/open at start()
         unsafe { list.Close().unwrap() };
 
         let cbv_srv_uav_ring =
@@ -644,27 +632,34 @@ impl crate::traits::CommandDevice for Context {
             draw_sig: self.draw_sig.clone(),
             draw_indexed_sig: self.draw_indexed_sig.clone(),
             dispatch_sig: self.dispatch_sig.clone(),
+            auto_barriers: true,
+            active_rts: Vec::new(),
         }
     }
 
     fn destroy_command_encoder(&self, encoder: &mut CommandEncoder) {
-        // Drop all allocators (and list) — COM refs released on drop
         encoder.allocators.clear();
         encoder.list = None;
     }
 
     fn submit(&self, encoder: &mut CommandEncoder, after: Option<&SyncPoint>) -> SyncPoint {
         profiling::function_scope!();
+
+        // Final barrier before closing — matches Vulkan's finish() calling barrier()
+        if encoder.auto_barriers {
+            encoder.barrier();
+        }
+
         let list = encoder.list.as_ref().unwrap();
         unsafe { list.Close().unwrap() };
 
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = {
+            profiling::scope!("lock queue");
+            self.queue.lock().unwrap()
+        };
 
-        // GPU-side dependency on a previous sync point
         if let Some(sp) = after {
-            unsafe {
-                queue.raw.Wait(&queue.fence, sp.progress).unwrap();
-            }
+            unsafe { queue.raw.Wait(&queue.fence, sp.progress).unwrap() };
         }
 
         let cmd_lists: [Option<ID3D12CommandList>; 1] =
@@ -676,7 +671,6 @@ impl crate::traits::CommandDevice for Context {
         unsafe { queue.raw.Signal(&queue.fence, progress).unwrap() };
 
         if let Some(pres) = encoder.present.take() {
-            // Record which fence value the swapchain buffer was last used at
             let sync_interval: u32 = if pres.display_sync { 1 } else { 0 };
             unsafe { pres.swapchain.Present(sync_interval, 0).ok() };
         }
@@ -686,26 +680,19 @@ impl crate::traits::CommandDevice for Context {
 
     fn wait_for(&self, sp: &SyncPoint, timeout_ms: u32) -> bool {
         let queue = self.queue.lock().unwrap();
-        let completed = unsafe { queue.fence.GetCompletedValue() };
-        if completed >= sp.progress {
+        if unsafe { queue.fence.GetCompletedValue() } >= sp.progress {
             return true;
         }
         unsafe {
-            queue
-                .fence
-                .SetEventOnCompletion(sp.progress, queue.fence_event)
-                .unwrap();
+            queue.fence.SetEventOnCompletion(sp.progress, queue.fence_event).unwrap();
         }
         let timeout = if timeout_ms == !0 { INFINITE } else { timeout_ms };
-        use windows::Win32::Foundation::WAIT_EVENT;
-        let result = unsafe { WaitForSingleObjectEx(queue.fence_event, timeout, false) };
-        result == WAIT_EVENT(0u32) // WAIT_OBJECT_0
+        unsafe { WaitForSingleObjectEx(queue.fence_event, timeout, false) == WAIT_EVENT(0u32) }
     }
 }
 
 impl Context {
     pub fn wait_for_present(&self, _surface: &Surface, _present_id: u64, _timeout_ms: u32) -> bool {
-        // DXGI doesn't expose a direct present-wait primitive; return true immediately.
         true
     }
 }
@@ -755,7 +742,6 @@ pub(super) fn map_texture_format(format: crate::TextureFormat) -> DXGI_FORMAT {
     }
 }
 
-/// For depth formats, return the typeless parent format suitable for SRV.
 pub(super) fn map_depth_srv_format(format: crate::TextureFormat) -> DXGI_FORMAT {
     match format {
         crate::TextureFormat::Depth32Float => DXGI_FORMAT_R32_FLOAT,
@@ -817,92 +803,48 @@ pub(super) fn analyze_group(
     group_index: u32,
     root_base: &mut u32,
 ) -> GroupDescriptors {
-    let mut srv_counter = 0u32;
-    let mut uav_counter = 0u32;
-    let mut cbv_counter = 0u32;
-    let mut sampler_counter = 0u32;
-
-    // First pass: count by kind
+    let mut srv = 0u32;
+    let mut uav = 0u32;
+    let mut cbv = 0u32;
+    let mut smp = 0u32;
     for (bi, (_, binding)) in layout.bindings.iter().enumerate() {
-        let access = info.binding_access[bi];
-        match classify_binding(binding, access) {
-            BindingKind::Srv => srv_counter += 1,
-            BindingKind::Uav => uav_counter += 1,
-            BindingKind::Cbv => cbv_counter += 1,
-            BindingKind::Sampler => sampler_counter += 1,
+        match classify_binding(binding, info.binding_access[bi]) {
+            BindingKind::Srv => srv += 1,
+            BindingKind::Uav => uav += 1,
+            BindingKind::Cbv => cbv += 1,
+            BindingKind::Sampler => smp += 1,
         }
     }
-
-    let cbv_srv_uav_count = srv_counter + uav_counter + cbv_counter;
-
-    // Assign root parameter indices
+    let cbv_srv_uav_count = srv + uav + cbv;
     let cbv_srv_uav_root_index = if cbv_srv_uav_count > 0 {
-        let idx = *root_base;
-        *root_base += 1;
-        Some(idx)
-    } else {
-        None
-    };
-    let sampler_root_index = if sampler_counter > 0 {
-        let idx = *root_base;
-        *root_base += 1;
-        Some(idx)
-    } else {
-        None
-    };
+        let i = *root_base; *root_base += 1; Some(i)
+    } else { None };
+    let sampler_root_index = if smp > 0 {
+        let i = *root_base; *root_base += 1; Some(i)
+    } else { None };
 
-    // Second pass: assign heap_offset and remapped register per binding
-    let mut srv_heap_offset = 0u32;
-    let mut uav_heap_offset = srv_counter;
-    let mut cbv_heap_offset = srv_counter + uav_counter;
-    let mut srv_reg = 0u32;
-    let mut uav_reg = 0u32;
-    let mut cbv_reg = 0u32;
-    let mut sampler_heap_offset = 0u32;
-    let mut sampler_reg = 0u32;
+    let mut srv_off = 0u32; let mut uav_off = srv;
+    let mut cbv_off = srv + uav; let mut smp_off = 0u32;
+    let mut srv_reg = 0u32; let mut uav_reg = 0u32;
+    let mut cbv_reg = 0u32; let mut smp_reg = 0u32;
 
-    let slots = layout
-        .bindings
-        .iter()
-        .enumerate()
-        .map(|(bi, (_, binding))| {
-            let access = info.binding_access[bi];
-            let kind = classify_binding(binding, access);
-            let (heap_offset, register) = match kind {
-                BindingKind::Srv => {
-                    let (h, r) = (srv_heap_offset, srv_reg);
-                    srv_heap_offset += 1;
-                    srv_reg += 1;
-                    (h, r)
-                }
-                BindingKind::Uav => {
-                    let (h, r) = (uav_heap_offset, uav_reg);
-                    uav_heap_offset += 1;
-                    uav_reg += 1;
-                    (h, r)
-                }
-                BindingKind::Cbv => {
-                    let (h, r) = (cbv_heap_offset, cbv_reg);
-                    cbv_heap_offset += 1;
-                    cbv_reg += 1;
-                    (h, r)
-                }
-                BindingKind::Sampler => {
-                    let (h, r) = (sampler_heap_offset, sampler_reg);
-                    sampler_heap_offset += 1;
-                    sampler_reg += 1;
-                    (h, r)
-                }
-            };
-            BindingSlot { heap_offset, register, kind }
-        })
-        .collect();
+    let slots = layout.bindings.iter().enumerate().map(|(bi, (_, binding))| {
+        let access = info.binding_access[bi];
+        let kind = classify_binding(binding, access);
+        let (heap_offset, register) = match kind {
+            BindingKind::Srv => { let v = (srv_off, srv_reg); srv_off += 1; srv_reg += 1; v }
+            BindingKind::Uav => { let v = (uav_off, uav_reg); uav_off += 1; uav_reg += 1; v }
+            BindingKind::Cbv => { let v = (cbv_off, cbv_reg); cbv_off += 1; cbv_reg += 1; v }
+            BindingKind::Sampler => { let v = (smp_off, smp_reg); smp_off += 1; smp_reg += 1; v }
+        };
+        BindingSlot { heap_offset, register, kind }
+    }).collect();
 
     GroupDescriptors {
         cbv_srv_uav_root_index,
         sampler_root_index,
         cbv_srv_uav_count,
-        sampler_count: sampler_counter,
+        sampler_count: smp,
         slots,
     }
 }
