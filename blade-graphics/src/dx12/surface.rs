@@ -109,16 +109,19 @@ impl super::Context {
                 AlphaMode: map_alpha_mode(alpha),
                 Flags: tearing_flag.0 as u32,
             };
-            let sc1: IDXGISwapChain1 = unsafe {
-                self.factory
-                    .CreateSwapChainForHwnd(
-                        &queue.raw,
-                        hwnd,
-                        &swap_desc,
-                        None,
-                        None,
-                    )
-                    .unwrap()
+            let sc_result = unsafe {
+                self.factory.CreateSwapChainForHwnd(&queue.raw, hwnd, &swap_desc, None, None)
+            };
+            let sc1: IDXGISwapChain1 = match sc_result {
+                Ok(sc) => sc,
+                Err(e) => {
+                    log_dxgi_messages();
+                    panic!(
+                        "CreateSwapChainForHwnd failed: {e}\n  desc: {}x{} fmt={:?} buffers={} flags={:#x}",
+                        swap_desc.Width, swap_desc.Height, swap_desc.Format,
+                        swap_desc.BufferCount, swap_desc.Flags
+                    );
+                }
             };
             surface.swapchain = Some(sc1.cast::<IDXGISwapChain3>().unwrap());
         }
@@ -232,6 +235,33 @@ impl super::Surface {
 
     pub fn last_present_id(&self) -> u64 {
         self.next_present_id.saturating_sub(1)
+    }
+}
+
+/// Drain the DXGI debug message queue to the log. DXGI errors (e.g. from
+/// CreateSwapChainForHwnd) go here, NOT to the D3D12 info queue, so this is the
+/// only way to see why a swapchain call failed. No-op if the DXGI debug layer
+/// isn't installed.
+fn log_dxgi_messages() {
+    let info_queue: IDXGIInfoQueue = match unsafe { DXGIGetDebugInterface1(0) } {
+        Ok(q) => q,
+        Err(_) => return,
+    };
+    unsafe {
+        let count = info_queue.GetNumStoredMessages(DXGI_DEBUG_ALL);
+        for i in 0..count {
+            let mut len: usize = 0;
+            if info_queue.GetMessage(DXGI_DEBUG_ALL, i, None, &mut len).is_err() || len == 0 {
+                continue;
+            }
+            let mut buf = vec![0u8; len];
+            let msg = buf.as_mut_ptr() as *mut DXGI_INFO_QUEUE_MESSAGE;
+            if info_queue.GetMessage(DXGI_DEBUG_ALL, i, Some(msg), &mut len).is_ok() {
+                let m = &*msg;
+                let text = std::slice::from_raw_parts(m.pDescription, m.DescriptionByteLength);
+                log::error!("[DXGI] {}", String::from_utf8_lossy(text).trim_end_matches('\0'));
+            }
+        }
     }
 }
 

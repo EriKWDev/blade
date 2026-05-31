@@ -356,9 +356,28 @@ fn compile_shader_function(
         entry_point: Some((stage, sf.entry_point.to_string())),
     };
 
+    // naga's HLSL backend can `unreachable!()`/panic on constructs it can't
+    // express (it does not return a Result for those). Catch it so we (a) don't
+    // abort the process via a worker-thread panic across the FFI boundary, and
+    // (b) report the exact entry point + WGSL source that triggered it, which is
+    // otherwise invisible because the panic happens inside naga.
     let mut hlsl_source = String::new();
-    let mut writer = naga::back::hlsl::Writer::new(&mut hlsl_source, &hlsl_options, &pipeline_options);
-    let _reflection = writer.write(&module, &module_info, None).unwrap();
+    let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut writer =
+            naga::back::hlsl::Writer::new(&mut hlsl_source, &hlsl_options, &pipeline_options);
+        writer.write(&module, &module_info, None)
+    }));
+    match write_result {
+        Ok(Ok(_reflection)) => {}
+        Ok(Err(e)) => panic!("naga HLSL generation failed for '{}': {e}", sf.entry_point),
+        Err(_panic) => {
+            panic!(
+                "naga HLSL backend panicked compiling entry point '{}' ({:?}).\n\
+                 This is a naga limitation for some WGSL construct. Source follows:\n{}",
+                sf.entry_point, stage, sf.shader.source
+            );
+        }
+    }
 
     let wg_size = if stage == naga::ShaderStage::Compute {
         let wg = ep.workgroup_size;
