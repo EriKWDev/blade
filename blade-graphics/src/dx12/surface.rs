@@ -128,8 +128,7 @@ impl super::Context {
         // Acquire RTVs for the new back buffers
         let sc = surface.swapchain.as_ref().unwrap();
         let buffer_count: u32 = {
-            let mut desc: DXGI_SWAP_CHAIN_DESC1 = unsafe { std::mem::zeroed() };
-            unsafe { sc.GetDesc1(&mut desc).unwrap() };
+            let desc = unsafe { sc.GetDesc1().unwrap() };
             desc.BufferCount
         };
 

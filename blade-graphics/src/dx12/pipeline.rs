@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use windows::{
     core::PCSTR,
     Win32::Graphics::{
-        Direct3D::{Fxc::D3DCompile, *},
+        Direct3D::*,
         Direct3D12::*,
         Dxgi::Common::*,
     },
@@ -434,7 +434,7 @@ impl crate::traits::ShaderDevice for super::Context {
         }
 
         // Merge access info (union of vs + fs accesses)
-        let mut merged_infos: Vec<crate::ShaderDataInfo> = desc
+        let merged_infos: Vec<crate::ShaderDataInfo> = desc
             .data_layouts
             .iter()
             .enumerate()
@@ -545,7 +545,7 @@ impl crate::traits::ShaderDevice for super::Context {
             .map_or(DXGI_FORMAT_UNKNOWN, |ds| super::map_texture_format(ds.format));
 
         // Input layout from vertex fetch states
-        let (input_elements, element_strs) =
+        let (input_elements, _element_strs) =
             build_input_layout(desc.vertex_fetches, desc.vertex);
 
         let mut rtv_formats = [DXGI_FORMAT_UNKNOWN; 8];
@@ -725,7 +725,7 @@ fn map_color_writes(mask: crate::ColorWrites) -> u32 {
     out
 }
 
-fn map_topology(t: crate::PrimitiveTopology) -> D3D12_PRIMITIVE_TOPOLOGY {
+fn map_topology(t: crate::PrimitiveTopology) -> D3D_PRIMITIVE_TOPOLOGY {
     match t {
         crate::PrimitiveTopology::PointList => D3D_PRIMITIVE_TOPOLOGY_POINTLIST,
         crate::PrimitiveTopology::LineList => D3D_PRIMITIVE_TOPOLOGY_LINELIST,
@@ -756,7 +756,7 @@ fn map_vertex_format(vf: crate::VertexFormat) -> DXGI_FORMAT {
 /// The strings must outlive the descs, so we return them together.
 fn build_input_layout(
     vertex_fetches: &[crate::VertexFetchState],
-    vs_sf: crate::ShaderFunction,
+    _vs_sf: crate::ShaderFunction,
 ) -> (Vec<D3D12_INPUT_ELEMENT_DESC>, Vec<std::ffi::CString>) {
     let mut elements: Vec<D3D12_INPUT_ELEMENT_DESC> = Vec::new();
     let mut strings: Vec<std::ffi::CString> = Vec::new();
@@ -765,7 +765,7 @@ fn build_input_layout(
     let mut location = 0u32;
 
     for (buf_index, fetch) in vertex_fetches.iter().enumerate() {
-        for (attr_index, (name, attr)) in fetch.layout.attributes.iter().enumerate() {
+        for (_attr_index, (_name, attr)) in fetch.layout.attributes.iter().enumerate() {
             let semantic = std::ffi::CString::new(format!("TEXCOORD{location}")).unwrap();
             elements.push(D3D12_INPUT_ELEMENT_DESC {
                 SemanticName: PCSTR(semantic.as_ptr() as _),

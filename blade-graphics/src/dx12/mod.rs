@@ -7,7 +7,7 @@ use windows::{
             Direct3D12::*,
             Dxgi::{Common::*, *},
         },
-        System::Threading::{CreateEventW, WaitForSingleObjectEx, INFINITE},
+        System::Threading::{WaitForSingleObjectEx, INFINITE},
     },
 };
 
@@ -233,17 +233,6 @@ pub(super) unsafe fn box_resource_ref(ptr: ResourcePtr) -> &'static ID3D12Resour
     &*(ptr as *const ID3D12Resource)
 }
 
-/// Borrow a COM-vtbl-stored resource (for `TextureView`).
-/// Returns a `ManuallyDrop` to prevent Release on drop.
-/// # Safety
-/// `ptr` must have been created by `resource.as_raw() as *mut c_void`.
-pub(super) unsafe fn vtbl_resource_borrow(ptr: ResourcePtr)
-    -> mem::ManuallyDrop<ID3D12Resource>
-{
-    debug_assert!(!ptr.is_null(), "null resource_ptr in vtbl_resource_borrow");
-    mem::ManuallyDrop::new(ID3D12Resource::from_raw(ptr as *mut _))
-}
-
 #[derive(Clone, Copy, Debug, Hash, PartialEq)]
 pub struct Buffer {
     /// `Box::into_raw(Box::new(ID3D12Resource))`.
@@ -327,12 +316,6 @@ impl Default for TextureView {
     }
 }
 
-impl TextureView {
-    /// Returns a borrowed (non-owning) reference to the underlying resource.
-    pub(super) fn resource_borrow(&self) -> mem::ManuallyDrop<ID3D12Resource> {
-        unsafe { vtbl_resource_borrow(self.resource_ptr) }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq)]
 pub struct Sampler {
@@ -585,13 +568,10 @@ pub struct RenderPipelineContext<'a> {
 pub struct PipelineContext<'a> {
     pub(super) encoder: &'a mut CommandEncoder,
     pub(super) group_descriptors: &'a GroupDescriptors,
+    /// Base of this group's CBV/SRV/UAV descriptors in the GPU-visible ring.
     pub(super) ring_cpu_base: D3D12_CPU_DESCRIPTOR_HANDLE,
-    pub(super) ring_gpu_base: D3D12_GPU_DESCRIPTOR_HANDLE,
+    /// Base of this group's sampler descriptors in the GPU-visible sampler ring.
     pub(super) sampler_cpu_base: D3D12_CPU_DESCRIPTOR_HANDLE,
-    pub(super) sampler_gpu_base: D3D12_GPU_DESCRIPTOR_HANDLE,
-    pub(super) is_compute: bool,
-    pub(super) root_index_cbv_srv_uav: Option<u32>,
-    pub(super) root_index_sampler: Option<u32>,
 }
 
 // ── Trait: CommandDevice ──────────────────────────────────────────────────────
@@ -683,7 +663,7 @@ impl crate::traits::CommandDevice for Context {
 
         if let Some(pres) = encoder.present.take() {
             let sync_interval: u32 = if pres.display_sync { 1 } else { 0 };
-            unsafe { pres.swapchain.Present(sync_interval, 0).ok() };
+            let _ = unsafe { pres.swapchain.Present(sync_interval, DXGI_PRESENT(0)) };
         }
 
         SyncPoint { progress }
@@ -811,7 +791,7 @@ pub(super) fn classify_binding(
 pub(super) fn analyze_group(
     layout: &crate::ShaderDataLayout,
     info: &crate::ShaderDataInfo,
-    group_index: u32,
+    _group_index: u32,
     root_base: &mut u32,
 ) -> GroupDescriptors {
     let mut srv = 0u32;

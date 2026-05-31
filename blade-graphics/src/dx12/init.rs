@@ -1,6 +1,4 @@
-use windows::{
-    core::Interface,
-    Win32::{
+use windows::Win32::{
         Foundation::HANDLE,
         Graphics::{
             Direct3D::D3D_FEATURE_LEVEL_12_0,
@@ -8,8 +6,7 @@ use windows::{
             Dxgi::*,
         },
         System::Threading::CreateEventW,
-    },
-};
+    };
 
 use super::{Context, DescriptorHeap, LinearAllocator, Queue};
 
@@ -17,8 +14,11 @@ impl Context {
     pub unsafe fn init(desc: super::super::ContextDesc) -> Result<Self, super::super::NotSupportedError> {
         // Enable debug layer in validation mode
         if desc.validation {
-            if let Ok(debug) = D3D12GetDebugInterface::<ID3D12Debug>() {
-                debug.EnableDebugLayer();
+            let mut debug: Option<ID3D12Debug> = None;
+            if D3D12GetDebugInterface(&mut debug).is_ok() {
+                if let Some(debug) = debug {
+                    debug.EnableDebugLayer();
+                }
             }
         }
 
@@ -87,14 +87,8 @@ impl Context {
             )
         };
 
-        let driver_version = adapter_desc.DriverVersion;
-        let driver_info = format!(
-            "{}.{}.{}.{}",
-            (driver_version >> 48) & 0xFFFF,
-            (driver_version >> 32) & 0xFFFF,
-            (driver_version >> 16) & 0xFFFF,
-            driver_version & 0xFFFF,
-        );
+        // DXGI_ADAPTER_DESC1 does not expose a driver version field.
+        let driver_info = String::new();
 
         Ok(Context {
             device,
@@ -158,7 +152,13 @@ fn create_command_sig(
         pArgumentDescs: &arg_desc,
         NodeMask: 0,
     };
-    unsafe { device.CreateCommandSignature(&sig_desc, None).unwrap() }
+    let mut sig: Option<ID3D12CommandSignature> = None;
+    unsafe {
+        device
+            .CreateCommandSignature(&sig_desc, None::<&ID3D12RootSignature>, &mut sig)
+            .unwrap();
+    }
+    sig.unwrap()
 }
 
 unsafe fn pick_adapter(

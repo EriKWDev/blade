@@ -3,7 +3,7 @@ use windows::{
     core::Interface,
     Win32::{
         Foundation::RECT,
-        Graphics::{Direct3D::D3D_PRIMITIVE_TOPOLOGY, Direct3D12::*},
+        Graphics::Direct3D12::*,
     },
 };
 
@@ -349,7 +349,7 @@ impl super::CommandEncoder {
                 stencil_v = v as u8;
             }
             if clear_flags.0 != 0 {
-                unsafe { list.ClearDepthStencilView(dsv, clear_flags, depth_v, stencil_v, None) };
+                unsafe { list.ClearDepthStencilView(dsv, clear_flags, depth_v, stencil_v, &[]) };
             }
         }
 
@@ -358,7 +358,7 @@ impl super::CommandEncoder {
                 rtv_handles.len() as u32,
                 if rtv_handles.is_empty() { None } else { Some(rtv_handles.as_ptr()) },
                 false,
-                dsv_handle.as_ref(),
+                dsv_handle.as_ref().map(|h| h as *const _),
             );
             list.RSSetViewports(&[D3D12_VIEWPORT {
                 TopLeftX: 0.0, TopLeftY: 0.0,
@@ -644,10 +644,22 @@ impl crate::traits::AccelerationStructureEncoder
     type AccelerationStructureMesh = crate::AccelerationStructureMesh;
     type BufferPiece = crate::BufferPiece;
 
-    fn build_bottom_level(&mut self, _: Self::AccelerationStructure, _: &[Self::AccelerationStructureMesh], _: Self::BufferPiece) {
+    fn build_bottom_level(
+        &mut self,
+        _acceleration_structure: super::AccelerationStructure,
+        _meshes: &[crate::AccelerationStructureMesh],
+        _scratch_data: crate::BufferPiece,
+    ) {
         unimplemented!("DX12 acceleration structures not yet implemented")
     }
-    fn build_top_level(&mut self, _: Self::AccelerationStructure, _: &[Self::AccelerationStructure], _: u32, _: Self::BufferPiece, _: Self::BufferPiece) {
+    fn build_top_level(
+        &mut self,
+        _acceleration_structure: super::AccelerationStructure,
+        _bottom_level: &[super::AccelerationStructure],
+        _instance_count: u32,
+        _instance_data: crate::BufferPiece,
+        _scratch_data: crate::BufferPiece,
+    ) {
         unimplemented!("DX12 acceleration structures not yet implemented")
     }
 }
@@ -703,11 +715,11 @@ impl super::RenderCommandEncoder<'_> {
 
 // ── PipelineEncoder (bind) ────────────────────────────────────────────────────
 
-fn bind_group(
+fn bind_group<D: crate::ShaderData>(
     encoder: &mut super::CommandEncoder,
     layout: &super::PipelineLayout,
     group: u32,
-    data_fill: impl FnOnce(&mut super::PipelineContext),
+    data: &D,
     is_compute: bool,
 ) {
     let gd = &layout.groups[group as usize];
@@ -726,18 +738,17 @@ fn bind_group(
 
     let root_cbv = gd.cbv_srv_uav_root_index;
     let root_smp = gd.sampler_root_index;
-    let mut ctx = super::PipelineContext {
-        encoder,
-        group_descriptors: gd,
-        ring_cpu_base, ring_gpu_base,
-        sampler_cpu_base, sampler_gpu_base,
-        is_compute,
-        root_index_cbv_srv_uav: root_cbv,
-        root_index_sampler: root_smp,
-    };
-    data_fill(&mut ctx);
 
-    let list = ctx.encoder.list.as_ref().unwrap();
+    // `fill` consumes the PipelineContext (matching ShaderData::fill's by-value
+    // signature). Reborrow `encoder` so it remains usable afterwards.
+    data.fill(super::PipelineContext {
+        encoder: &mut *encoder,
+        group_descriptors: gd,
+        ring_cpu_base,
+        sampler_cpu_base,
+    });
+
+    let list = encoder.list.as_ref().unwrap();
     if let Some(idx) = root_cbv {
         if ring_gpu_base.ptr != 0 {
             if is_compute { unsafe { list.SetComputeRootDescriptorTable(idx, ring_gpu_base) }; }
@@ -756,7 +767,7 @@ fn bind_group(
 impl crate::traits::PipelineEncoder for super::ComputePipelineContext<'_> {
     fn bind<D: crate::ShaderData>(&mut self, group: u32, data: &D) {
         let layout = self.layout;
-        bind_group(self.encoder, layout, group, |ctx| data.fill(ctx), true);
+        bind_group(self.encoder, layout, group, data, true);
     }
 }
 
@@ -764,7 +775,7 @@ impl crate::traits::PipelineEncoder for super::ComputePipelineContext<'_> {
 impl crate::traits::PipelineEncoder for super::RenderPipelineContext<'_> {
     fn bind<D: crate::ShaderData>(&mut self, group: u32, data: &D) {
         let layout = self.layout;
-        bind_group(self.encoder, layout, group, |ctx| data.fill(ctx), false);
+        bind_group(self.encoder, layout, group, data, false);
     }
 }
 
@@ -807,8 +818,8 @@ impl crate::traits::RenderEncoder for super::RenderPipelineContext<'_> {
         let vp = D3D12_VIEWPORT {
             TopLeftX: viewport.x, TopLeftY: viewport.y,
             Width: viewport.w, Height: viewport.h,
-            MinDepth: *viewport.depth.start(),
-            MaxDepth: *viewport.depth.end(),
+            MinDepth: viewport.depth.start,
+            MaxDepth: viewport.depth.end,
         };
         unsafe { self.encoder.current_list().RSSetViewports(&[vp]) };
     }

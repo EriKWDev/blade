@@ -1,5 +1,8 @@
 use std::ptr;
-use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
+use windows::{
+    core::Interface,
+    Win32::Graphics::{Direct3D12::*, Dxgi::Common::*},
+};
 
 impl super::Context {
     pub(super) fn alloc_rtv(&self) -> D3D12_CPU_DESCRIPTOR_HANDLE {
