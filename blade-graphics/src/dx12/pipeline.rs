@@ -728,9 +728,29 @@ impl crate::traits::ShaderDevice for super::Context {
 
 // ── Blend / depth / input layout helpers ─────────────────────────────────────
 
+/// A blend-disabled render target with *valid* (non-zero) enum fields. A
+/// zeroed `D3D12_RENDER_TARGET_BLEND_DESC` has `SrcBlend=0`/`LogicOp=0`, which
+/// are invalid enum values the runtime rejects (E_INVALIDARG) even when blend
+/// is disabled — so unused targets must use this, not `Default::default()`.
+fn disabled_blend_rt(write_mask: u8) -> D3D12_RENDER_TARGET_BLEND_DESC {
+    D3D12_RENDER_TARGET_BLEND_DESC {
+        BlendEnable: false.into(),
+        LogicOpEnable: false.into(),
+        SrcBlend: D3D12_BLEND_ONE,
+        DestBlend: D3D12_BLEND_ZERO,
+        BlendOp: D3D12_BLEND_OP_ADD,
+        SrcBlendAlpha: D3D12_BLEND_ONE,
+        DestBlendAlpha: D3D12_BLEND_ZERO,
+        BlendOpAlpha: D3D12_BLEND_OP_ADD,
+        LogicOp: D3D12_LOGIC_OP_NOOP,
+        RenderTargetWriteMask: write_mask,
+    }
+}
+
 fn build_blend_state(color_targets: &[crate::ColorTargetState]) -> D3D12_BLEND_DESC {
-    let mut rt_blend = [D3D12_RENDER_TARGET_BLEND_DESC::default(); 8];
+    let mut rt_blend = [disabled_blend_rt(D3D12_COLOR_WRITE_ENABLE_ALL.0 as u8); 8];
     for (i, ct) in color_targets.iter().enumerate() {
+        let write_mask = map_color_writes(ct.write_mask) as u8;
         rt_blend[i] = if let Some(blend) = ct.blend {
             D3D12_RENDER_TARGET_BLEND_DESC {
                 BlendEnable: true.into(),
@@ -742,14 +762,10 @@ fn build_blend_state(color_targets: &[crate::ColorTargetState]) -> D3D12_BLEND_D
                 DestBlendAlpha: map_blend_factor(blend.alpha.dst_factor),
                 BlendOpAlpha: map_blend_op(blend.alpha.operation),
                 LogicOp: D3D12_LOGIC_OP_NOOP,
-                RenderTargetWriteMask: map_color_writes(ct.write_mask) as u8,
+                RenderTargetWriteMask: write_mask,
             }
         } else {
-            D3D12_RENDER_TARGET_BLEND_DESC {
-                BlendEnable: false.into(),
-                RenderTargetWriteMask: map_color_writes(ct.write_mask) as u8,
-                ..Default::default()
-            }
+            disabled_blend_rt(write_mask)
         };
     }
     D3D12_BLEND_DESC {
@@ -759,9 +775,30 @@ fn build_blend_state(color_targets: &[crate::ColorTargetState]) -> D3D12_BLEND_D
     }
 }
 
+/// Depth/stencil with depth and stencil disabled, but valid (non-zero) enum
+/// fields — see `disabled_blend_rt` for the same E_INVALIDARG rationale.
+fn disabled_depth_stencil() -> D3D12_DEPTH_STENCIL_DESC {
+    let keep = D3D12_DEPTH_STENCILOP_DESC {
+        StencilFailOp: D3D12_STENCIL_OP_KEEP,
+        StencilDepthFailOp: D3D12_STENCIL_OP_KEEP,
+        StencilPassOp: D3D12_STENCIL_OP_KEEP,
+        StencilFunc: D3D12_COMPARISON_FUNC_ALWAYS,
+    };
+    D3D12_DEPTH_STENCIL_DESC {
+        DepthEnable: false.into(),
+        DepthWriteMask: D3D12_DEPTH_WRITE_MASK_ZERO,
+        DepthFunc: D3D12_COMPARISON_FUNC_ALWAYS,
+        StencilEnable: false.into(),
+        StencilReadMask: 0,
+        StencilWriteMask: 0,
+        FrontFace: keep,
+        BackFace: keep,
+    }
+}
+
 fn build_depth_stencil(ds: &Option<crate::DepthStencilState>) -> D3D12_DEPTH_STENCIL_DESC {
     match ds {
-        None => D3D12_DEPTH_STENCIL_DESC::default(),
+        None => disabled_depth_stencil(),
         Some(ds) => {
             let aspects = ds.format.aspects();
             D3D12_DEPTH_STENCIL_DESC {
@@ -880,12 +917,18 @@ fn build_input_layout(
     // Location index counter (matches what fill_vertex_locations assigned)
     let mut location = 0u32;
 
+    // naga's HLSL backend names vertex inputs `LOC{n}`, i.e. base semantic "LOC"
+    // with SemanticIndex n. The input-element semantic must match the VS input
+    // signature exactly or CreateGraphicsPipelineState fails with E_INVALIDARG.
+    // `fill_vertex_locations` assigns locations in shader-member order; we mirror
+    // that with a running counter over the fetch attributes (they line up for the
+    // common case where shader inputs are declared in vertex-fetch order).
     for (buf_index, fetch) in vertex_fetches.iter().enumerate() {
         for (_attr_index, (_name, attr)) in fetch.layout.attributes.iter().enumerate() {
-            let semantic = std::ffi::CString::new(format!("TEXCOORD{location}")).unwrap();
+            let semantic = std::ffi::CString::new("LOC").unwrap();
             elements.push(D3D12_INPUT_ELEMENT_DESC {
                 SemanticName: PCSTR(semantic.as_ptr() as _),
-                SemanticIndex: 0,
+                SemanticIndex: location,
                 Format: map_vertex_format(attr.format),
                 InputSlot: buf_index as u32,
                 AlignedByteOffset: attr.offset,
