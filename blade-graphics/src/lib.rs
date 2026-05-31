@@ -49,11 +49,16 @@ pub const IDENTITY_TRANSFORM: Transform = mint::RowMatrix3x4 {
 
 pub mod derive;
 #[cfg_attr(
+    all(feature = "dx12", target_os = "windows"),
+    path = "dx12/mod.rs"
+)]
+#[cfg_attr(
     all(not(vulkan), not(gles), any(target_os = "ios", target_os = "macos")),
     path = "metal/mod.rs"
 )]
 #[cfg_attr(
     all(
+        not(feature = "dx12"),
         not(gles),
         any(
             vulkan,

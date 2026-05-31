@@ -1,0 +1,640 @@
+use std::ptr;
+use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
+
+impl super::Context {
+    pub(super) fn alloc_rtv(&self) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        let idx = self.rtv_alloc.lock().unwrap().alloc(1);
+        assert!(idx < super::RTV_HEAP_SIZE, "RTV heap exhausted");
+        self.rtv_heap.cpu_handle(idx)
+    }
+
+    pub(super) fn alloc_dsv(&self) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        let idx = self.dsv_alloc.lock().unwrap().alloc(1);
+        assert!(idx < super::DSV_HEAP_SIZE, "DSV heap exhausted");
+        self.dsv_heap.cpu_handle(idx)
+    }
+
+    pub(super) fn alloc_staging(&self, count: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        let idx = self.staging_alloc.lock().unwrap().alloc(count);
+        assert!(idx + count <= super::STAGING_HEAP_SIZE, "staging heap exhausted");
+        self.staging_heap.cpu_handle(idx)
+    }
+
+    pub(super) fn alloc_staging_sampler(&self) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        let idx = self.staging_sampler_alloc.lock().unwrap().alloc(1);
+        assert!(idx < super::STAGING_SAMPLER_SIZE, "staging sampler heap exhausted");
+        self.staging_sampler_heap.cpu_handle(idx)
+    }
+}
+
+#[hidden_trait::expose]
+impl crate::traits::ResourceDevice for super::Context {
+    type Buffer = super::Buffer;
+    type Texture = super::Texture;
+    type TextureView = super::TextureView;
+    type Sampler = super::Sampler;
+    type AccelerationStructure = super::AccelerationStructure;
+
+    fn create_buffer(&self, desc: super::super::BufferDesc) -> super::Buffer {
+        let is_host_visible = desc.memory.is_host_visible();
+        let heap_type = match desc.memory {
+            crate::Memory::Device | crate::Memory::External(_) => D3D12_HEAP_TYPE_DEFAULT,
+            crate::Memory::Shared => D3D12_HEAP_TYPE_UPLOAD,
+            crate::Memory::Upload => D3D12_HEAP_TYPE_UPLOAD,
+        };
+
+        let initial_state = match heap_type {
+            D3D12_HEAP_TYPE_UPLOAD => D3D12_RESOURCE_STATE_GENERIC_READ,
+            _ => D3D12_RESOURCE_STATE_COMMON,
+        };
+
+        // Align size to 256 (DX12 requirement for uniform buffers)
+        let aligned_size = (desc.size + 255) & !255;
+
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe {
+            self.device.CreateCommittedResource(
+                &D3D12_HEAP_PROPERTIES { Type: heap_type, ..Default::default() },
+                D3D12_HEAP_FLAG_NONE,
+                &D3D12_RESOURCE_DESC {
+                    Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                    Width: aligned_size,
+                    Height: 1,
+                    DepthOrArraySize: 1,
+                    MipLevels: 1,
+                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                    ..Default::default()
+                },
+                initial_state,
+                None,
+                &mut resource,
+            ).unwrap();
+        }
+        let resource = resource.unwrap();
+
+        let gpu_address = unsafe { resource.GetGPUVirtualAddress() };
+
+        let mapped_ptr = if is_host_visible {
+            let mut ptr: *mut std::ffi::c_void = ptr::null_mut();
+            unsafe { resource.Map(0, None, Some(&mut ptr)).unwrap() };
+            ptr as *mut u8
+        } else {
+            ptr::null_mut()
+        };
+
+        // Allocate CPU-side SRV and UAV descriptors
+        let srv_handle = self.alloc_staging(1);
+        let uav_handle = self.alloc_staging(1);
+
+        // SRV: raw buffer (structured)
+        unsafe {
+            self.device.CreateShaderResourceView(
+                &resource,
+                Some(&D3D12_SHADER_RESOURCE_VIEW_DESC {
+                    Format: DXGI_FORMAT_R32_TYPELESS,
+                    ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                    Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                    Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                        Buffer: D3D12_BUFFER_SRV {
+                            FirstElement: 0,
+                            NumElements: (aligned_size / 4) as u32,
+                            StructureByteStride: 0,
+                            Flags: D3D12_BUFFER_SRV_FLAG_RAW,
+                        },
+                    },
+                }),
+                srv_handle,
+            );
+        }
+
+        // UAV: raw buffer
+        unsafe {
+            self.device.CreateUnorderedAccessView(
+                &resource,
+                None,
+                Some(&D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                    Format: DXGI_FORMAT_R32_TYPELESS,
+                    ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                    Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                        Buffer: D3D12_BUFFER_UAV {
+                            FirstElement: 0,
+                            NumElements: (aligned_size / 4) as u32,
+                            StructureByteStride: 0,
+                            CounterOffsetInBytes: 0,
+                            Flags: D3D12_BUFFER_UAV_FLAG_RAW,
+                        },
+                    },
+                }),
+                uav_handle,
+            );
+        }
+
+        // Keep COM object alive by leaking an extra reference.
+        // The raw pointer is stored in Buffer; when destroy_buffer is called we release it.
+        let resource_ptr = unsafe {
+            let raw = std::mem::ManuallyDrop::new(resource.clone());
+            windows::core::Interface::as_raw(&*raw) as *mut std::ffi::c_void
+        };
+
+        super::Buffer {
+            resource_ptr,
+            gpu_address,
+            mapped_ptr,
+            srv_handle: srv_handle.ptr as u64,
+            uav_handle: uav_handle.ptr as u64,
+            size: desc.size,
+        }
+    }
+
+    fn sync_buffer(&self, _buffer: super::Buffer) {
+        // For upload/shared heaps the writes are coherent.
+    }
+
+    fn destroy_buffer(&self, buffer: super::Buffer) {
+        if !buffer.resource_ptr.is_null() {
+            // Release the extra reference we added in create_buffer
+            unsafe {
+                let unknown = buffer.resource_ptr as *mut windows::core::IUnknown;
+                (*unknown).Release();
+            }
+        }
+    }
+
+    fn create_texture(&self, desc: super::super::TextureDesc) -> super::Texture {
+        let format = super::map_texture_format(desc.format);
+        let dimension = match desc.dimension {
+            crate::TextureDimension::D1 => D3D12_RESOURCE_DIMENSION_TEXTURE1D,
+            crate::TextureDimension::D2 => D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            crate::TextureDimension::D3 => D3D12_RESOURCE_DIMENSION_TEXTURE3D,
+        };
+
+        let mut flags = D3D12_RESOURCE_FLAG_NONE;
+        if desc.usage.contains(crate::TextureUsage::TARGET) {
+            if desc.format.aspects().contains(crate::TexelAspects::DEPTH) {
+                flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+            } else {
+                flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            }
+        }
+        if desc.usage.contains(crate::TextureUsage::STORAGE) {
+            flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        }
+
+        let resource_desc = D3D12_RESOURCE_DESC {
+            Dimension: dimension,
+            Width: desc.size.width as u64,
+            Height: desc.size.height,
+            DepthOrArraySize: if desc.dimension == crate::TextureDimension::D3 {
+                desc.size.depth as u16
+            } else {
+                desc.array_layer_count as u16
+            },
+            MipLevels: desc.mip_level_count as u16,
+            Format: format,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: desc.sample_count,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: flags,
+            ..Default::default()
+        };
+
+        let initial_state = D3D12_RESOURCE_STATE_COMMON;
+        let mut resource: Option<ID3D12Resource> = None;
+        unsafe {
+            self.device.CreateCommittedResource(
+                &D3D12_HEAP_PROPERTIES {
+                    Type: D3D12_HEAP_TYPE_DEFAULT,
+                    ..Default::default()
+                },
+                D3D12_HEAP_FLAG_NONE,
+                &resource_desc,
+                initial_state,
+                None,
+                &mut resource,
+            ).unwrap();
+        }
+        let resource = resource.unwrap();
+        let resource_ptr = Box::into_raw(Box::new(resource)) as super::ResourcePtr;
+
+        let target_size = [desc.size.width as u16, desc.size.height as u16];
+        super::Texture {
+            resource_ptr,
+            format: desc.format,
+            target_size,
+        }
+    }
+
+    fn destroy_texture(&self, texture: super::Texture) {
+        if !texture.resource_ptr.is_null() {
+            unsafe {
+                drop(Box::from_raw(
+                    texture.resource_ptr as *mut ID3D12Resource,
+                ));
+            }
+        }
+    }
+
+    fn create_texture_view(
+        &self,
+        texture: super::Texture,
+        desc: super::super::TextureViewDesc,
+    ) -> super::TextureView {
+        let format = super::map_texture_format(desc.format);
+        let aspects = desc.aspects.unwrap_or_else(|| desc.format.aspects());
+
+        let srv_handle = self.alloc_staging(1);
+        let uav_handle = self.alloc_staging(1);
+
+        let srv_format = super::map_depth_srv_format(desc.format);
+        let resource = texture.resource();
+
+        // Create SRV
+        let srv_desc = make_srv_desc(srv_format, desc.dimension, desc.subresources);
+        unsafe {
+            self.device.CreateShaderResourceView(resource, Some(&srv_desc), srv_handle);
+        }
+
+        // Create UAV (only for non-depth storage textures)
+        let uav_valid = !aspects.contains(crate::TexelAspects::DEPTH)
+            && !aspects.contains(crate::TexelAspects::STENCIL);
+        if uav_valid {
+            let uav_desc = make_uav_desc(format, desc.dimension, desc.subresources);
+            unsafe {
+                self.device.CreateUnorderedAccessView(resource, None, Some(&uav_desc), uav_handle);
+            }
+        }
+
+        // Create RTV or DSV
+        let rtv_dsv_handle = if aspects.contains(crate::TexelAspects::DEPTH)
+            || aspects.contains(crate::TexelAspects::STENCIL)
+        {
+            let h = self.alloc_dsv();
+            let dsv_desc = make_dsv_desc(format, desc.dimension, desc.subresources);
+            unsafe { self.device.CreateDepthStencilView(resource, Some(&dsv_desc), h); }
+            h.ptr as u64
+        } else if aspects.contains(crate::TexelAspects::COLOR) {
+            let h = self.alloc_rtv();
+            let rtv_desc = make_rtv_desc(format, desc.dimension, desc.subresources);
+            unsafe { self.device.CreateRenderTargetView(resource, Some(&rtv_desc), h); }
+            h.ptr as u64
+        } else {
+            0
+        };
+
+        super::TextureView {
+            resource_ptr: texture.resource_ptr,
+            srv_handle: srv_handle.ptr as u64,
+            uav_handle: if uav_valid { uav_handle.ptr as u64 } else { 0 },
+            rtv_dsv_handle,
+            format: desc.format,
+            aspects,
+            target_size: texture.target_size,
+        }
+    }
+
+    fn destroy_texture_view(&self, _view: super::TextureView) {
+        // Descriptors are in bump-allocated heaps; no individual free.
+    }
+
+    fn create_sampler(&self, desc: super::super::SamplerDesc) -> super::Sampler {
+        let handle = self.alloc_staging_sampler();
+
+        let filter = map_filter(desc.mag_filter, desc.min_filter, desc.mipmap_filter, desc.compare);
+        let [au, av, aw] = desc.address_modes;
+        let lod_max = desc.lod_max_clamp.unwrap_or(f32::MAX);
+
+        let sampler_desc = D3D12_SAMPLER_DESC {
+            Filter: filter,
+            AddressU: map_address_mode(au),
+            AddressV: map_address_mode(av),
+            AddressW: map_address_mode(aw),
+            MipLODBias: 0.0,
+            MaxAnisotropy: desc.anisotropy_clamp.max(1),
+            ComparisonFunc: desc.compare.map_or(
+                D3D12_COMPARISON_FUNC_ALWAYS,
+                super::map_comparison,
+            ),
+            BorderColor: map_border_color(desc.border_color),
+            MinLOD: desc.lod_min_clamp,
+            MaxLOD: lod_max,
+        };
+        unsafe {
+            self.device.CreateSampler(&sampler_desc, handle);
+        }
+
+        super::Sampler { cpu_handle: handle.ptr as u64 }
+    }
+
+    fn destroy_sampler(&self, _sampler: super::Sampler) {}
+
+    fn create_acceleration_structure(
+        &self,
+        _desc: super::super::AccelerationStructureDesc,
+    ) -> super::AccelerationStructure {
+        unimplemented!("DX12 acceleration structures not yet implemented")
+    }
+
+    fn destroy_acceleration_structure(
+        &self,
+        _acceleration_structure: super::AccelerationStructure,
+    ) {
+        unimplemented!("DX12 acceleration structures not yet implemented")
+    }
+}
+
+// ── SRV/UAV/RTV/DSV descriptor builders ──────────────────────────────────────
+
+fn subresource_mip(sr: &crate::TextureSubresources) -> (u32, u32) {
+    let base = sr.base_mip_level;
+    let count = sr.mip_level_count.map_or(u32::MAX, |n| n.get());
+    (base, count)
+}
+
+fn subresource_array(sr: &crate::TextureSubresources) -> (u32, u32) {
+    let base = sr.base_array_layer;
+    let count = sr.array_layer_count.map_or(u32::MAX, |n| n.get());
+    (base, count)
+}
+
+fn make_srv_desc(
+    format: DXGI_FORMAT,
+    dim: crate::ViewDimension,
+    subresources: &crate::TextureSubresources,
+) -> D3D12_SHADER_RESOURCE_VIEW_DESC {
+    let (mip_base, mip_count) = subresource_mip(subresources);
+    let (arr_base, arr_count) = subresource_array(subresources);
+    let mapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+    match dim {
+        crate::ViewDimension::D1 => D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE1D,
+            Shader4ComponentMapping: mapping,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture1D: D3D12_TEX1D_SRV {
+                    MostDetailedMip: mip_base,
+                    MipLevels: mip_count,
+                    ResourceMinLODClamp: 0.0,
+                },
+            },
+        },
+        crate::ViewDimension::D1Array => D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE1DARRAY,
+            Shader4ComponentMapping: mapping,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture1DArray: D3D12_TEX1D_ARRAY_SRV {
+                    MostDetailedMip: mip_base,
+                    MipLevels: mip_count,
+                    FirstArraySlice: arr_base,
+                    ArraySize: arr_count,
+                    ResourceMinLODClamp: 0.0,
+                },
+            },
+        },
+        crate::ViewDimension::D2 => D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+            Shader4ComponentMapping: mapping,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_SRV {
+                    MostDetailedMip: mip_base,
+                    MipLevels: mip_count,
+                    PlaneSlice: 0,
+                    ResourceMinLODClamp: 0.0,
+                },
+            },
+        },
+        crate::ViewDimension::D2Array => D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+            Shader4ComponentMapping: mapping,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture2DArray: D3D12_TEX2D_ARRAY_SRV {
+                    MostDetailedMip: mip_base,
+                    MipLevels: mip_count,
+                    FirstArraySlice: arr_base,
+                    ArraySize: arr_count,
+                    PlaneSlice: 0,
+                    ResourceMinLODClamp: 0.0,
+                },
+            },
+        },
+        crate::ViewDimension::Cube => D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURECUBE,
+            Shader4ComponentMapping: mapping,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                TextureCube: D3D12_TEXCUBE_SRV {
+                    MostDetailedMip: mip_base,
+                    MipLevels: mip_count,
+                    ResourceMinLODClamp: 0.0,
+                },
+            },
+        },
+        crate::ViewDimension::CubeArray => D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURECUBEARRAY,
+            Shader4ComponentMapping: mapping,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                TextureCubeArray: D3D12_TEXCUBE_ARRAY_SRV {
+                    MostDetailedMip: mip_base,
+                    MipLevels: mip_count,
+                    First2DArrayFace: arr_base,
+                    NumCubes: arr_count / 6,
+                    ResourceMinLODClamp: 0.0,
+                },
+            },
+        },
+        crate::ViewDimension::D3 => D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE3D,
+            Shader4ComponentMapping: mapping,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture3D: D3D12_TEX3D_SRV {
+                    MostDetailedMip: mip_base,
+                    MipLevels: mip_count,
+                    ResourceMinLODClamp: 0.0,
+                },
+            },
+        },
+    }
+}
+
+fn make_uav_desc(
+    format: DXGI_FORMAT,
+    dim: crate::ViewDimension,
+    subresources: &crate::TextureSubresources,
+) -> D3D12_UNORDERED_ACCESS_VIEW_DESC {
+    let (arr_base, arr_count) = subresource_array(subresources);
+    let mip = subresources.base_mip_level;
+
+    match dim {
+        crate::ViewDimension::D2 => D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_UAV { MipSlice: mip, PlaneSlice: 0 },
+            },
+        },
+        crate::ViewDimension::D2Array => D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2DARRAY,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Texture2DArray: D3D12_TEX2D_ARRAY_UAV {
+                    MipSlice: mip,
+                    FirstArraySlice: arr_base,
+                    ArraySize: arr_count,
+                    PlaneSlice: 0,
+                },
+            },
+        },
+        crate::ViewDimension::D3 => D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE3D,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Texture3D: D3D12_TEX3D_UAV {
+                    MipSlice: mip,
+                    FirstWSlice: arr_base,
+                    WSize: arr_count,
+                },
+            },
+        },
+        _ => D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_UAV { MipSlice: mip, PlaneSlice: 0 },
+            },
+        },
+    }
+}
+
+fn make_rtv_desc(
+    format: DXGI_FORMAT,
+    dim: crate::ViewDimension,
+    subresources: &crate::TextureSubresources,
+) -> D3D12_RENDER_TARGET_VIEW_DESC {
+    let (arr_base, arr_count) = subresource_array(subresources);
+    let mip = subresources.base_mip_level;
+
+    match dim {
+        crate::ViewDimension::D2 => D3D12_RENDER_TARGET_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_RTV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D12_RENDER_TARGET_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_RTV { MipSlice: mip, PlaneSlice: 0 },
+            },
+        },
+        crate::ViewDimension::D2Array => D3D12_RENDER_TARGET_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_RTV_DIMENSION_TEXTURE2DARRAY,
+            Anonymous: D3D12_RENDER_TARGET_VIEW_DESC_0 {
+                Texture2DArray: D3D12_TEX2D_ARRAY_RTV {
+                    MipSlice: mip,
+                    FirstArraySlice: arr_base,
+                    ArraySize: arr_count,
+                    PlaneSlice: 0,
+                },
+            },
+        },
+        _ => D3D12_RENDER_TARGET_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_RTV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D12_RENDER_TARGET_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_RTV { MipSlice: mip, PlaneSlice: 0 },
+            },
+        },
+    }
+}
+
+fn make_dsv_desc(
+    format: DXGI_FORMAT,
+    dim: crate::ViewDimension,
+    subresources: &crate::TextureSubresources,
+) -> D3D12_DEPTH_STENCIL_VIEW_DESC {
+    let (arr_base, arr_count) = subresource_array(subresources);
+    let mip = subresources.base_mip_level;
+
+    match dim {
+        crate::ViewDimension::D2 => D3D12_DEPTH_STENCIL_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_DSV_DIMENSION_TEXTURE2D,
+            Flags: D3D12_DSV_FLAG_NONE,
+            Anonymous: D3D12_DEPTH_STENCIL_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_DSV { MipSlice: mip },
+            },
+        },
+        crate::ViewDimension::D2Array => D3D12_DEPTH_STENCIL_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_DSV_DIMENSION_TEXTURE2DARRAY,
+            Flags: D3D12_DSV_FLAG_NONE,
+            Anonymous: D3D12_DEPTH_STENCIL_VIEW_DESC_0 {
+                Texture2DArray: D3D12_TEX2D_ARRAY_DSV {
+                    MipSlice: mip,
+                    FirstArraySlice: arr_base,
+                    ArraySize: arr_count,
+                },
+            },
+        },
+        _ => D3D12_DEPTH_STENCIL_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D12_DSV_DIMENSION_TEXTURE2D,
+            Flags: D3D12_DSV_FLAG_NONE,
+            Anonymous: D3D12_DEPTH_STENCIL_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_DSV { MipSlice: mip },
+            },
+        },
+    }
+}
+
+// ── Sampler helpers ────────────────────────────────────────────────────────────
+
+fn map_address_mode(mode: crate::AddressMode) -> D3D12_TEXTURE_ADDRESS_MODE {
+    match mode {
+        crate::AddressMode::ClampToEdge => D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        crate::AddressMode::Repeat => D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        crate::AddressMode::MirrorRepeat => D3D12_TEXTURE_ADDRESS_MODE_MIRROR,
+        crate::AddressMode::ClampToBorder => D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+    }
+}
+
+fn map_filter(
+    mag: crate::FilterMode,
+    min: crate::FilterMode,
+    mip: crate::FilterMode,
+    compare: Option<crate::CompareFunction>,
+) -> D3D12_FILTER {
+    let is_compare = compare.is_some();
+    match (min, mag, mip, is_compare) {
+        (crate::FilterMode::Nearest, crate::FilterMode::Nearest, crate::FilterMode::Nearest, false) =>
+            D3D12_FILTER_MIN_MAG_MIP_POINT,
+        (crate::FilterMode::Nearest, crate::FilterMode::Nearest, crate::FilterMode::Linear, false) =>
+            D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR,
+        (crate::FilterMode::Nearest, crate::FilterMode::Linear, crate::FilterMode::Nearest, false) =>
+            D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT,
+        (crate::FilterMode::Nearest, crate::FilterMode::Linear, crate::FilterMode::Linear, false) =>
+            D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR,
+        (crate::FilterMode::Linear, crate::FilterMode::Nearest, crate::FilterMode::Nearest, false) =>
+            D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT,
+        (crate::FilterMode::Linear, crate::FilterMode::Nearest, crate::FilterMode::Linear, false) =>
+            D3D12_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR,
+        (crate::FilterMode::Linear, crate::FilterMode::Linear, crate::FilterMode::Nearest, false) =>
+            D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
+        (crate::FilterMode::Linear, crate::FilterMode::Linear, crate::FilterMode::Linear, false) =>
+            D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        (_, _, _, true) => D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR,
+    }
+}
+
+fn map_border_color(color: Option<crate::TextureColor>) -> [f32; 4] {
+    match color {
+        None | Some(crate::TextureColor::TransparentBlack) => [0.0, 0.0, 0.0, 0.0],
+        Some(crate::TextureColor::OpaqueBlack) => [0.0, 0.0, 0.0, 1.0],
+        Some(crate::TextureColor::White) => [1.0, 1.0, 1.0, 1.0],
+        Some(crate::TextureColor::RgbaFloat { rgba }) => rgba,
+    }
+}
