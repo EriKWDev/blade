@@ -51,7 +51,7 @@ impl crate::traits::ResourceDevice for super::Context {
         let aligned_size = (desc.size + 255) & !255;
 
         let mut resource: Option<ID3D12Resource> = None;
-        unsafe {
+        super::expect_d3d12(&self.device, "CreateCommittedResource(buffer)", unsafe {
             self.device.CreateCommittedResource(
                 &D3D12_HEAP_PROPERTIES { Type: heap_type, ..Default::default() },
                 D3D12_HEAP_FLAG_NONE,
@@ -68,8 +68,8 @@ impl crate::traits::ResourceDevice for super::Context {
                 initial_state,
                 None,
                 &mut resource,
-            ).unwrap();
-        }
+            )
+        });
         let resource = resource.unwrap();
         let gpu_address = unsafe { resource.GetGPUVirtualAddress() };
 
@@ -163,7 +163,7 @@ impl crate::traits::ResourceDevice for super::Context {
         }
 
         let mut resource: Option<ID3D12Resource> = None;
-        unsafe {
+        super::expect_d3d12(&self.device, "CreateCommittedResource(texture)", unsafe {
             self.device.CreateCommittedResource(
                 &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
                 D3D12_HEAP_FLAG_NONE,
@@ -186,12 +186,13 @@ impl crate::traits::ResourceDevice for super::Context {
                 D3D12_RESOURCE_STATE_COMMON,
                 None,
                 &mut resource,
-            ).unwrap();
-        }
+            )
+        });
         let resource = resource.unwrap();
         let resource_ptr = Box::into_raw(Box::new(resource)) as super::ResourcePtr;
         super::Texture {
             resource_ptr,
+            usage: desc.usage,
             memory_handle: 0,
             format: desc.format,
             target_size: [desc.size.width as u16, desc.size.height as u16],
@@ -218,26 +219,38 @@ impl crate::traits::ResourceDevice for super::Context {
         // Store the COM vtable pointer for barrier use — borrowed from the Box.
         let resource_ptr = unsafe { resource.as_raw() as *mut std::ffi::c_void };
 
-        let srv_handle = self.alloc_staging(1);
-        let uav_handle = self.alloc_staging(1);
-
-        let srv_desc = make_srv_desc(srv_format, desc.dimension, desc.subresources);
-        unsafe {
-            self.device.CreateShaderResourceView(resource, Some(&srv_desc), srv_handle);
-        }
-
-        let uav_valid = !aspects.contains(crate::TexelAspects::DEPTH)
+        // D3D12 forbids creating a view kind the resource wasn't created for
+        // (e.g. an RTV on a non-ALLOW_RENDER_TARGET resource), which can remove
+        // the device. Only create the views the texture's usage permits. An SRV
+        // is always legal (no special creation flag is required for it).
+        let usage = texture.usage;
+        let can_srv = usage.contains(crate::TextureUsage::RESOURCE);
+        let can_uav = usage.contains(crate::TextureUsage::STORAGE)
+            && !aspects.contains(crate::TexelAspects::DEPTH)
             && !aspects.contains(crate::TexelAspects::STENCIL);
-        if uav_valid {
-            let uav_desc = make_uav_desc(format, desc.dimension, desc.subresources);
-            unsafe {
-                self.device.CreateUnorderedAccessView(resource, None, Some(&uav_desc), uav_handle);
-            }
-        }
+        let is_depth = aspects.contains(crate::TexelAspects::DEPTH)
+            || aspects.contains(crate::TexelAspects::STENCIL);
+        let can_target = usage.contains(crate::TextureUsage::TARGET);
 
-        let rtv_dsv_handle = if aspects.contains(crate::TexelAspects::DEPTH)
-            || aspects.contains(crate::TexelAspects::STENCIL)
-        {
+        let srv_handle = if can_srv {
+            let h = self.alloc_staging(1);
+            let srv_desc = make_srv_desc(srv_format, desc.dimension, desc.subresources);
+            unsafe { self.device.CreateShaderResourceView(resource, Some(&srv_desc), h) };
+            h.ptr as u64
+        } else {
+            0
+        };
+
+        let uav_handle = if can_uav {
+            let h = self.alloc_staging(1);
+            let uav_desc = make_uav_desc(format, desc.dimension, desc.subresources);
+            unsafe { self.device.CreateUnorderedAccessView(resource, None, Some(&uav_desc), h) };
+            h.ptr as u64
+        } else {
+            0
+        };
+
+        let rtv_dsv_handle = if can_target && is_depth {
             let h = self.alloc_dsv();
             unsafe {
                 self.device.CreateDepthStencilView(
@@ -247,7 +260,7 @@ impl crate::traits::ResourceDevice for super::Context {
                 );
             }
             h.ptr as u64
-        } else if aspects.contains(crate::TexelAspects::COLOR) {
+        } else if can_target {
             let h = self.alloc_rtv();
             unsafe {
                 self.device.CreateRenderTargetView(
@@ -263,8 +276,8 @@ impl crate::traits::ResourceDevice for super::Context {
 
         super::TextureView {
             resource_ptr,
-            srv_handle: srv_handle.ptr as u64,
-            uav_handle: if uav_valid { uav_handle.ptr as u64 } else { 0 },
+            srv_handle,
+            uav_handle,
             rtv_dsv_handle,
             format: desc.format,
             aspects,
@@ -336,6 +349,21 @@ impl super::Context {
         _bottom_level: &[super::AccelerationStructure],
     ) -> super::Buffer {
         unimplemented!("DX12 acceleration structures not yet implemented")
+    }
+
+    pub fn get_external_texture_source(
+        &self,
+        _texture: super::Texture,
+    ) -> Option<crate::ExternalMemorySource> {
+        // DX12 external memory is not supported yet.
+        None
+    }
+
+    pub fn get_external_buffer_source(
+        &self,
+        _buffer: super::Buffer,
+    ) -> Option<crate::ExternalMemorySource> {
+        None
     }
 }
 

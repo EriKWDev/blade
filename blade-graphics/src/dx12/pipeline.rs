@@ -483,20 +483,24 @@ impl crate::traits::ShaderDevice for super::Context {
 
         let (root_signature, sampler_heap_roots) = build_root_signature(&self.device, &groups);
 
-        let pso: ID3D12PipelineState = unsafe {
-            self.device.CreateComputePipelineState(
-                &D3D12_COMPUTE_PIPELINE_STATE_DESC {
-                    pRootSignature: std::mem::ManuallyDrop::new(Some(root_signature.clone())),
-                    CS: D3D12_SHADER_BYTECODE {
-                        pShaderBytecode: bytecode.as_ptr() as *const _,
-                        BytecodeLength: bytecode.len(),
+        let pso: ID3D12PipelineState = super::expect_d3d12(
+            &self.device,
+            "CreateComputePipelineState",
+            unsafe {
+                self.device.CreateComputePipelineState(
+                    &D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                        pRootSignature: std::mem::ManuallyDrop::new(Some(root_signature.clone())),
+                        CS: D3D12_SHADER_BYTECODE {
+                            pShaderBytecode: bytecode.as_ptr() as *const _,
+                            BytecodeLength: bytecode.len(),
+                        },
+                        NodeMask: 0,
+                        CachedPSO: D3D12_CACHED_PIPELINE_STATE::default(),
+                        Flags: D3D12_PIPELINE_STATE_FLAG_NONE,
                     },
-                    NodeMask: 0,
-                    CachedPSO: D3D12_CACHED_PIPELINE_STATE::default(),
-                    Flags: D3D12_PIPELINE_STATE_FLAG_NONE,
-                },
-            ).unwrap()
-        };
+                )
+            },
+        );
 
         super::ComputePipeline {
             pso,
@@ -706,9 +710,11 @@ impl crate::traits::ShaderDevice for super::Context {
             ..Default::default()
         };
 
-        let pso: ID3D12PipelineState = unsafe {
-            self.device.CreateGraphicsPipelineState(&pso_desc).unwrap()
-        };
+        let pso: ID3D12PipelineState = super::expect_d3d12(
+            &self.device,
+            "CreateGraphicsPipelineState",
+            unsafe { self.device.CreateGraphicsPipelineState(&pso_desc) },
+        );
 
         let vertex_strides: Vec<u32> = desc.vertex_fetches
             .iter()

@@ -192,6 +192,7 @@ impl Frame {
             memory_handle: !0,
             format: self.format,
             target_size: self.target_size,
+            usage: crate::TextureUsage::TARGET,
         }
     }
 
@@ -224,6 +225,56 @@ pub(super) type RawCpuHandle = u64;
 
 pub(super) fn raw_cpu_handle(v: RawCpuHandle) -> D3D12_CPU_DESCRIPTOR_HANDLE {
     D3D12_CPU_DESCRIPTOR_HANDLE { ptr: v as usize }
+}
+
+/// Drain the D3D12 debug layer's message queue to the log (only populated when
+/// validation is enabled). Call this right after a failed D3D12 call to learn
+/// the precise reason the runtime rejected it.
+pub(super) fn log_debug_messages(device: &ID3D12Device) {
+    let info_queue: ID3D12InfoQueue = match device.cast() {
+        Ok(q) => q,
+        Err(_) => return, // debug layer not enabled
+    };
+    unsafe {
+        let count = info_queue.GetNumStoredMessages();
+        for i in 0..count {
+            let mut len: usize = 0;
+            if info_queue.GetMessage(i, None, &mut len).is_err() || len == 0 {
+                continue;
+            }
+            let mut buf = vec![0u8; len];
+            let msg = buf.as_mut_ptr() as *mut D3D12_MESSAGE;
+            if info_queue.GetMessage(i, Some(msg), &mut len).is_ok() {
+                let m = &*msg;
+                let text = std::slice::from_raw_parts(m.pDescription, m.DescriptionByteLength);
+                log::error!("[D3D12] {}", String::from_utf8_lossy(text).trim_end_matches('\0'));
+            }
+        }
+        info_queue.ClearStoredMessages();
+    }
+}
+
+/// If the device has been removed, return the reason as a string.
+pub(super) fn device_removed_reason(device: &ID3D12Device) -> Option<String> {
+    match unsafe { device.GetDeviceRemovedReason() } {
+        Ok(()) => None,
+        Err(e) => Some(format!("{e}")),
+    }
+}
+
+/// Unwrap a D3D12 call's result, dumping debug-layer messages and the
+/// device-removed reason on failure so the panic is actionable.
+pub(super) fn expect_d3d12<T>(device: &ID3D12Device, what: &str, r: windows::core::Result<T>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e) => {
+            log_debug_messages(device);
+            if let Some(reason) = device_removed_reason(device) {
+                panic!("DX12 {what} failed: {e}; device removed reason: {reason}");
+            }
+            panic!("DX12 {what} failed: {e}");
+        }
+    }
 }
 
 /// Pointer stored in `Buffer.resource_ptr` and `Texture.resource_ptr`:
@@ -286,6 +337,9 @@ pub struct Texture {
     pub(super) memory_handle: usize,
     pub(super) format: crate::TextureFormat,
     pub(super) target_size: [u16; 2],
+    /// Which views are legal to create — D3D12 forbids e.g. an RTV on a
+    /// resource not created with ALLOW_RENDER_TARGET (can remove the device).
+    pub(super) usage: crate::TextureUsage,
 }
 
 unsafe impl Send for Texture {}
