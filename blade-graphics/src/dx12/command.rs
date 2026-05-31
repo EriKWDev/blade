@@ -3,7 +3,7 @@ use windows::{
     core::Interface,
     Win32::{
         Foundation::RECT,
-        Graphics::Direct3D12::*,
+        Graphics::{Direct3D12::*, Dxgi::Common::DXGI_FORMAT_R32_TYPELESS},
     },
 };
 
@@ -98,14 +98,32 @@ impl crate::ShaderBindable for crate::BufferPiece {
             ptr: ctx.ring_cpu_base.ptr
                 + (slot.heap_offset * ctx.encoder.cbv_srv_uav_ring.increment) as usize,
         };
+        // The buffer's pre-made SRV/UAV cover the whole buffer from offset 0, but a
+        // BufferPiece can point mid-buffer (belt sub-allocations). Create the view
+        // inline with FirstElement = offset/4 so the shader reads from the right
+        // place — otherwise sub-allocated bindings (e.g. egui vertices) read garbage.
+        let raw_first = (self.offset / 4) as u32;
+        let raw_num = (self.buffer.size.saturating_sub(self.offset) / 4) as u32;
         match slot.kind {
             super::BindingKind::Srv => {
                 ctx.encoder.require_buffer_state(&self.buffer, READ_STATE);
                 unsafe {
-                    ctx.encoder.device.CopyDescriptorsSimple(
-                        1, dst,
-                        super::raw_cpu_handle(self.buffer.srv_handle),
-                        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                    ctx.encoder.device.CreateShaderResourceView(
+                        self.buffer.resource(),
+                        Some(&D3D12_SHADER_RESOURCE_VIEW_DESC {
+                            Format: DXGI_FORMAT_R32_TYPELESS,
+                            ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                                Buffer: D3D12_BUFFER_SRV {
+                                    FirstElement: raw_first as u64,
+                                    NumElements: raw_num.max(1),
+                                    StructureByteStride: 0,
+                                    Flags: D3D12_BUFFER_SRV_FLAG_RAW,
+                                },
+                            },
+                        }),
+                        dst,
                     )
                 };
             }
@@ -113,10 +131,23 @@ impl crate::ShaderBindable for crate::BufferPiece {
                 ctx.encoder
                     .require_buffer_state(&self.buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 unsafe {
-                    ctx.encoder.device.CopyDescriptorsSimple(
-                        1, dst,
-                        super::raw_cpu_handle(self.buffer.uav_handle),
-                        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                    ctx.encoder.device.CreateUnorderedAccessView(
+                        self.buffer.resource(),
+                        None,
+                        Some(&D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                            Format: DXGI_FORMAT_R32_TYPELESS,
+                            ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                                Buffer: D3D12_BUFFER_UAV {
+                                    FirstElement: raw_first as u64,
+                                    NumElements: raw_num.max(1),
+                                    StructureByteStride: 0,
+                                    CounterOffsetInBytes: 0,
+                                    Flags: D3D12_BUFFER_UAV_FLAG_RAW,
+                                },
+                            },
+                        }),
+                        dst,
                     )
                 };
             }
