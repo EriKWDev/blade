@@ -249,6 +249,25 @@ impl super::CommandEncoder {
         self.barrier();
     }
 
+    /// Transition every tracked resource back to COMMON and clear the state map.
+    /// Called at submit so that the next command list (which assumes everything
+    /// is COMMON) starts from a correct baseline — explicitly-transitioned
+    /// resources do not decay at the ExecuteCommandLists boundary.
+    pub(super) fn flush_to_common(&mut self) {
+        let barriers: Vec<D3D12_RESOURCE_BARRIER> = self
+            .resource_states
+            .iter()
+            .filter(|(_, s)| s.0 != D3D12_RESOURCE_STATE_COMMON.0)
+            .map(|(&key, &state)| {
+                transition_barrier(key as super::ResourcePtr, state, D3D12_RESOURCE_STATE_COMMON)
+            })
+            .collect();
+        if !barriers.is_empty() {
+            unsafe { self.list.as_ref().unwrap().ResourceBarrier(&barriers) };
+        }
+        self.resource_states.clear();
+    }
+
     /// Called at the start of every pass. Inserts the automatic barrier
     /// when `auto_barriers` is enabled (matching Vulkan's `begin_pass`).
     fn begin_pass(&mut self, _label: &str) {

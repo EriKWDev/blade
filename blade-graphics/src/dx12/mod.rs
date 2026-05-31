@@ -653,6 +653,14 @@ impl crate::traits::CommandDevice for Context {
             encoder.barrier();
         }
 
+        // Return every resource to COMMON before closing. Unlike buffers and
+        // implicitly-promoted read states, resources we *explicitly* transitioned
+        // (render targets, storage textures, etc.) do NOT decay at the
+        // ExecuteCommandLists boundary — so without this they'd carry a non-COMMON
+        // state into the next command list while `start()` assumes COMMON. The
+        // back buffer is already COMMON here (present() reset it), so it is skipped.
+        encoder.flush_to_common();
+
         let list = encoder.list.as_ref().unwrap();
         unsafe { list.Close().unwrap() };
 
