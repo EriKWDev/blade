@@ -435,6 +435,28 @@ impl super::CommandEncoder {
         }
     }
 
+    pub fn barrier_modifies_indirect(&mut self) {
+        profiling::function_scope!();
+
+        let barrier = vk::MemoryBarrier {
+            src_access_mask: vk::AccessFlags::SHADER_WRITE,
+            dst_access_mask: vk::AccessFlags::INDIRECT_COMMAND_READ,
+            ..Default::default()
+        };
+
+        unsafe {
+            self.device.core.cmd_pipeline_barrier(
+                self.buffers[0].raw,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::DRAW_INDIRECT | vk::PipelineStageFlags::VERTEX_SHADER,
+                vk::DependencyFlags::empty(),
+                &[barrier],
+                &[],
+                &[],
+            );
+        }
+    }
+
     pub fn transfer(&mut self, label: &str) -> super::TransferCommandEncoder<'_> {
         self.begin_pass(label);
         super::TransferCommandEncoder {

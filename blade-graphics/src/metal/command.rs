@@ -224,6 +224,8 @@ impl super::CommandEncoder {
 
     pub fn barrier(&mut self) {}
 
+    pub fn barrier_modifies_indirect(&mut self) {}
+
     pub fn render(
         &mut self,
         label: &str,
