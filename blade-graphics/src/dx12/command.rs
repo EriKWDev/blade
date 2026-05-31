@@ -226,11 +226,13 @@ impl super::CommandEncoder {
         needed: D3D12_RESOURCE_STATES,
     ) {
         let total = view.total_subresources();
-        let subs: Vec<u32> = view.subresources().collect();
+        let subs = view.subresources();
         self.require_subresources(view.resource_ptr, total, subs.into_iter(), needed);
     }
 
-    /// Transition the single subresource a texture *piece* (copy) addresses.
+    /// Transition the single (plane-0) subresource a texture *piece* (copy)
+    /// addresses. `total` must include planes so the tracking Vec stays the same
+    /// size as the view path uses for the same texture.
     pub(super) fn require_piece_state(
         &mut self,
         piece: &crate::TexturePiece,
@@ -238,7 +240,7 @@ impl super::CommandEncoder {
     ) {
         let tex = &piece.texture;
         let sub = piece.mip_level + piece.array_layer * tex.mip_levels;
-        let total = tex.mip_levels * tex.array_layers;
+        let total = tex.mip_levels * tex.array_layers * super::plane_count(tex.format);
         let vtbl = unsafe { tex.resource().as_raw() as super::ResourcePtr };
         self.require_subresources(vtbl, total, std::iter::once(sub), needed);
     }

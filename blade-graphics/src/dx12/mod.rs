@@ -200,6 +200,7 @@ impl Frame {
             usage: crate::TextureUsage::TARGET,
             mip_levels: 1,
             array_layers: 1,
+            sample_count: 1,
         }
     }
 
@@ -356,6 +357,8 @@ pub struct Texture {
     /// For per-subresource state tracking (subresource = mip + layer*mip_levels).
     pub(super) mip_levels: u32,
     pub(super) array_layers: u32,
+    /// MSAA sample count; >1 requires multisample view dimensions (TEXTURE2DMS).
+    pub(super) sample_count: u32,
 }
 
 unsafe impl Send for Texture {}
@@ -373,6 +376,7 @@ impl Default for Texture {
             usage: crate::TextureUsage::empty(),
             mip_levels: 1,
             array_layers: 1,
+            sample_count: 1,
         }
     }
 }
@@ -426,23 +430,37 @@ impl Default for TextureView {
 }
 
 impl TextureView {
-    /// Total subresources of the underlying texture.
+    /// Total subresources of the underlying texture, including planes. A
+    /// depth+stencil format has 2 planes (0=depth, 1=stencil), each a distinct
+    /// subresource that must be transitioned — missing the stencil plane left it
+    /// in COMMON and removed the device on ClearDepthStencilView.
     pub(super) fn total_subresources(&self) -> u32 {
-        self.mip_levels * self.array_layers
+        self.mip_levels * self.array_layers * plane_count(self.format)
     }
-    /// Iterate the subresource indices this view covers (mip + layer*mip_levels).
-    pub(super) fn subresources(&self) -> impl Iterator<Item = u32> + '_ {
+    /// Subresource indices this view covers, across all planes
+    /// (index = plane*mip_levels*array_layers + layer*mip_levels + mip).
+    pub(super) fn subresources(&self) -> Vec<u32> {
         let ml = self.mip_levels;
-        (self.base_array..self.base_array + self.array_count).flat_map(move |a| {
-            (self.base_mip..self.base_mip + self.mip_count).map(move |m| m + a * ml)
-        })
+        let al = self.array_layers;
+        let planes = plane_count(self.format);
+        let mut out = Vec::with_capacity((self.mip_count * self.array_count * planes) as usize);
+        for p in 0..planes {
+            for a in self.base_array..self.base_array + self.array_count {
+                for m in self.base_mip..self.base_mip + self.mip_count {
+                    out.push(p * ml * al + a * ml + m);
+                }
+            }
+        }
+        out
     }
-    /// True if the view covers every subresource of the texture.
-    pub(super) fn covers_all(&self) -> bool {
-        self.base_mip == 0
-            && self.mip_count == self.mip_levels
-            && self.base_array == 0
-            && self.array_count == self.array_layers
+}
+
+/// Number of subresource planes for a format. Depth+stencil formats have a
+/// separate stencil plane; everything else is single-plane.
+pub(super) fn plane_count(format: crate::TextureFormat) -> u32 {
+    match format {
+        crate::TextureFormat::Depth32FloatStencil8Uint => 2,
+        _ => 1,
     }
 }
 

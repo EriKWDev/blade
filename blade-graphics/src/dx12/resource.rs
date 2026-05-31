@@ -244,6 +244,7 @@ impl crate::traits::ResourceDevice for super::Context {
             target_size: [desc.size.width as u16, desc.size.height as u16],
             mip_levels: desc.mip_level_count,
             array_layers,
+            sample_count: desc.sample_count,
         }
     }
 
@@ -280,9 +281,10 @@ impl crate::traits::ResourceDevice for super::Context {
             || aspects.contains(crate::TexelAspects::STENCIL);
         let can_target = usage.contains(crate::TextureUsage::TARGET);
 
+        let samples = texture.sample_count;
         let srv_handle = if can_srv {
             let h = self.alloc_staging(1);
-            let srv_desc = make_srv_desc(srv_format, desc.dimension, desc.subresources);
+            let srv_desc = make_srv_desc(srv_format, desc.dimension, desc.subresources, samples);
             unsafe { self.device.CreateShaderResourceView(resource, Some(&srv_desc), h) };
             h.ptr as u64
         } else {
@@ -303,7 +305,7 @@ impl crate::traits::ResourceDevice for super::Context {
             unsafe {
                 self.device.CreateDepthStencilView(
                     resource,
-                    Some(&make_dsv_desc(format, desc.dimension, desc.subresources)),
+                    Some(&make_dsv_desc(format, desc.dimension, desc.subresources, samples)),
                     h,
                 );
             }
@@ -313,7 +315,7 @@ impl crate::traits::ResourceDevice for super::Context {
             unsafe {
                 self.device.CreateRenderTargetView(
                     resource,
-                    Some(&make_rtv_desc(format, desc.dimension, desc.subresources)),
+                    Some(&make_rtv_desc(format, desc.dimension, desc.subresources, samples)),
                     h,
                 );
             }
@@ -443,10 +445,32 @@ fn make_srv_desc(
     fmt: DXGI_FORMAT,
     dim: crate::ViewDimension,
     sr: &crate::TextureSubresources,
+    samples: u32,
 ) -> D3D12_SHADER_RESOURCE_VIEW_DESC {
     let (mb, mc) = mip_range(sr);
     let (ab, ac) = arr_range(sr);
     let m = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    // Multisample resources need the *MS view dimensions (no mip fields).
+    if samples > 1 {
+        return match dim {
+            crate::ViewDimension::D2Array | crate::ViewDimension::Cube | crate::ViewDimension::CubeArray => {
+                D3D12_SHADER_RESOURCE_VIEW_DESC {
+                    Format: fmt, ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY,
+                    Shader4ComponentMapping: m,
+                    Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                        Texture2DMSArray: D3D12_TEX2DMS_ARRAY_SRV { FirstArraySlice: ab, ArraySize: ac },
+                    },
+                }
+            }
+            _ => D3D12_SHADER_RESOURCE_VIEW_DESC {
+                Format: fmt, ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2DMS,
+                Shader4ComponentMapping: m,
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Texture2DMS: D3D12_TEX2DMS_SRV::default(),
+                },
+            },
+        };
+    }
     match dim {
         crate::ViewDimension::D1 => D3D12_SHADER_RESOURCE_VIEW_DESC {
             Format: fmt, ViewDimension: D3D12_SRV_DIMENSION_TEXTURE1D,
@@ -517,9 +541,22 @@ fn make_rtv_desc(
     fmt: DXGI_FORMAT,
     dim: crate::ViewDimension,
     sr: &crate::TextureSubresources,
+    samples: u32,
 ) -> D3D12_RENDER_TARGET_VIEW_DESC {
     let mip = sr.base_mip_level;
     let (ab, ac) = arr_range(sr);
+    if samples > 1 {
+        return match dim {
+            crate::ViewDimension::D2Array => D3D12_RENDER_TARGET_VIEW_DESC {
+                Format: fmt, ViewDimension: D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY,
+                Anonymous: D3D12_RENDER_TARGET_VIEW_DESC_0 { Texture2DMSArray: D3D12_TEX2DMS_ARRAY_RTV { FirstArraySlice: ab, ArraySize: ac } },
+            },
+            _ => D3D12_RENDER_TARGET_VIEW_DESC {
+                Format: fmt, ViewDimension: D3D12_RTV_DIMENSION_TEXTURE2DMS,
+                Anonymous: D3D12_RENDER_TARGET_VIEW_DESC_0 { Texture2DMS: D3D12_TEX2DMS_RTV::default() },
+            },
+        };
+    }
     match dim {
         crate::ViewDimension::D2Array => D3D12_RENDER_TARGET_VIEW_DESC {
             Format: fmt, ViewDimension: D3D12_RTV_DIMENSION_TEXTURE2DARRAY,
@@ -536,9 +573,24 @@ fn make_dsv_desc(
     fmt: DXGI_FORMAT,
     dim: crate::ViewDimension,
     sr: &crate::TextureSubresources,
+    samples: u32,
 ) -> D3D12_DEPTH_STENCIL_VIEW_DESC {
     let mip = sr.base_mip_level;
     let (ab, ac) = arr_range(sr);
+    if samples > 1 {
+        return match dim {
+            crate::ViewDimension::D2Array => D3D12_DEPTH_STENCIL_VIEW_DESC {
+                Format: fmt, ViewDimension: D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY,
+                Flags: D3D12_DSV_FLAG_NONE,
+                Anonymous: D3D12_DEPTH_STENCIL_VIEW_DESC_0 { Texture2DMSArray: D3D12_TEX2DMS_ARRAY_DSV { FirstArraySlice: ab, ArraySize: ac } },
+            },
+            _ => D3D12_DEPTH_STENCIL_VIEW_DESC {
+                Format: fmt, ViewDimension: D3D12_DSV_DIMENSION_TEXTURE2DMS,
+                Flags: D3D12_DSV_FLAG_NONE,
+                Anonymous: D3D12_DEPTH_STENCIL_VIEW_DESC_0 { Texture2DMS: D3D12_TEX2DMS_DSV::default() },
+            },
+        };
+    }
     match dim {
         crate::ViewDimension::D2Array => D3D12_DEPTH_STENCIL_VIEW_DESC {
             Format: fmt, ViewDimension: D3D12_DSV_DIMENSION_TEXTURE2DARRAY,

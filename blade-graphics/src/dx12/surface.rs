@@ -65,8 +65,13 @@ impl super::Context {
             config.requested_num_frames
         };
 
+        // ALLOW_TEARING may only be set if the adapter actually supports it;
+        // setting it otherwise makes CreateSwapChain fail with DXGI_ERROR_INVALID_CALL
+        // (which is what broke exclusive-fullscreen creation on this adapter).
         let tearing_flag = match config.display_sync {
-            crate::DisplaySync::Tear => DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING,
+            crate::DisplaySync::Tear if self.tearing_supported() => {
+                DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
+            }
             _ => DXGI_SWAP_CHAIN_FLAG(0),
         };
 
@@ -168,6 +173,24 @@ impl super::Context {
             WaitForSingleObjectEx(queue.fence_event, u32::MAX, false);
         }
         queue.last_progress = progress;
+    }
+
+    /// Whether the adapter supports DXGI present tearing (required before the
+    /// ALLOW_TEARING swap-chain flag may be used).
+    fn tearing_supported(&self) -> bool {
+        let factory5: IDXGIFactory5 = match self.factory.cast() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let mut allow: windows::Win32::Foundation::BOOL = false.into();
+        let ok = unsafe {
+            factory5.CheckFeatureSupport(
+                DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                &mut allow as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<windows::Win32::Foundation::BOOL>() as u32,
+            )
+        };
+        ok.is_ok() && allow.as_bool()
     }
 }
 
