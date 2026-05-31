@@ -273,6 +273,35 @@ impl super::CommandEncoder {
         self.list.as_ref().unwrap()
     }
 
+    /// Record a vertex-buffer bind for this slot (replacing any prior one), to be
+    /// applied with the pipeline's stride. See `pending_vertex`.
+    pub(super) fn record_vertex(&mut self, slot: u32, buf: crate::BufferPiece) {
+        match self.pending_vertex.iter_mut().find(|(s, _)| *s == slot) {
+            Some(entry) => entry.1 = buf,
+            None => self.pending_vertex.push((slot, buf)),
+        }
+    }
+
+    /// Issue IASetVertexBuffers for one slot with an explicit stride.
+    pub(super) fn set_vertex_buffer(&self, slot: u32, buf: &crate::BufferPiece, stride: u32) {
+        let vbv = D3D12_VERTEX_BUFFER_VIEW {
+            BufferLocation: buf.buffer.gpu_address + buf.offset,
+            SizeInBytes: (buf.buffer.size - buf.offset) as u32,
+            StrideInBytes: stride,
+        };
+        unsafe { self.current_list().IASetVertexBuffers(slot, Some(&[vbv])) };
+    }
+
+    /// (Re)apply all recorded vertex binds with the given pipeline's strides.
+    pub(super) fn apply_pending_vertex(&mut self, vertex_strides: &[u32]) {
+        let binds = std::mem::take(&mut self.pending_vertex);
+        for (slot, buf) in &binds {
+            let stride = vertex_strides.get(*slot as usize).copied().unwrap_or(0);
+            self.set_vertex_buffer(*slot, buf, stride);
+        }
+        self.pending_vertex = binds;
+    }
+
     /// Global UAV barrier — the DX12 analog of Vulkan's
     /// `MEMORY_WRITE -> MEMORY_READ|MEMORY_WRITE` over `ALL_COMMANDS`.
     ///
@@ -375,6 +404,7 @@ impl super::CommandEncoder {
         targets: crate::RenderTargetSet,
     ) -> super::RenderCommandEncoder<'_> {
         self.begin_pass(label);
+        self.pending_vertex.clear();
 
         let mut target_size = [0u16; 2];
         let mut rtv_handles: Vec<D3D12_CPU_DESCRIPTOR_HANDLE> = Vec::new();
@@ -822,11 +852,47 @@ impl super::RenderCommandEncoder<'_> {
                 list.SetGraphicsRootDescriptorTable(cmp_root, sampler_gpu);
             }
         }
+        // Apply vertex buffers bound on the pass (their stride is known only now).
+        self.encoder.apply_pending_vertex(&pipeline.vertex_strides);
         super::RenderPipelineContext {
             encoder: self.encoder,
             layout: &pipeline.layout,
             vertex_strides: &pipeline.vertex_strides,
         }
+    }
+}
+
+// `RenderEncoder` on the pass itself (matches Vulkan/Metal): scissor/viewport/
+// stencil are command-list state set directly; vertex binds are deferred until a
+// pipeline supplies the stride (see `with`).
+#[hidden_trait::expose]
+impl crate::traits::RenderEncoder for super::RenderCommandEncoder<'_> {
+    type BufferPiece = crate::BufferPiece;
+
+    fn set_scissor_rect(&mut self, rect: &crate::ScissorRect) {
+        let r = RECT { left: rect.x, top: rect.y, right: rect.x + rect.w as i32, bottom: rect.y + rect.h as i32 };
+        unsafe { self.encoder.current_list().RSSetScissorRects(&[r]) };
+    }
+
+    fn set_viewport(&mut self, viewport: &crate::Viewport) {
+        let vp = D3D12_VIEWPORT {
+            TopLeftX: viewport.x, TopLeftY: viewport.y,
+            Width: viewport.w, Height: viewport.h,
+            MinDepth: viewport.depth.start,
+            MaxDepth: viewport.depth.end,
+        };
+        unsafe { self.encoder.current_list().RSSetViewports(&[vp]) };
+    }
+
+    fn set_stencil_reference(&mut self, reference: u32) {
+        unsafe { self.encoder.current_list().OMSetStencilRef(reference) };
+    }
+
+    fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
+        self.encoder
+            .require_buffer_state(&vertex_buf.buffer, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+        // Deferred — applied with the pipeline's stride at `with()`.
+        self.encoder.record_vertex(index, vertex_buf);
     }
 }
 
@@ -961,13 +1027,11 @@ impl crate::traits::RenderEncoder for super::RenderPipelineContext<'_> {
         // is in UNORDERED_ACCESS; bring it to the vertex-buffer read state.
         self.encoder
             .require_buffer_state(&vertex_buf.buffer, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+        // Apply now with this pipeline's stride, and record it so a subsequent
+        // `with()` (next pipeline in the pass) re-applies it.
         let stride = self.vertex_strides.get(index as usize).copied().unwrap_or(0);
-        let vbv = D3D12_VERTEX_BUFFER_VIEW {
-            BufferLocation: vertex_buf.buffer.gpu_address + vertex_buf.offset,
-            SizeInBytes: (vertex_buf.buffer.size - vertex_buf.offset) as u32,
-            StrideInBytes: stride,
-        };
-        unsafe { self.encoder.current_list().IASetVertexBuffers(index, Some(&[vbv])) };
+        self.encoder.set_vertex_buffer(index, &vertex_buf, stride);
+        self.encoder.record_vertex(index, vertex_buf);
     }
 }
 

@@ -696,6 +696,12 @@ pub struct CommandEncoder {
     /// Per-subresource granularity lets e.g. mip-generation read mip i-1 (SRV)
     /// while writing mip i (UAV) of the same texture.
     pub(super) texture_states: std::collections::HashMap<usize, Vec<D3D12_RESOURCE_STATES>>,
+    /// Vertex buffers bound this render pass, keyed by slot. blade lets
+    /// `bind_vertex` be called on the pass *before* a pipeline is bound, but in
+    /// D3D12 the per-vertex stride lives in the vertex-buffer view, which comes
+    /// from the pipeline. So binds are recorded here and (re)applied with the
+    /// pipeline's strides at each `with()`. Cleared at `render()`.
+    pub(super) pending_vertex: Vec<(u32, crate::BufferPiece)>,
 }
 
 unsafe impl Send for CommandEncoder {}
@@ -782,6 +788,7 @@ impl crate::traits::CommandDevice for Context {
             auto_barriers: true,
             buffer_states: std::collections::HashMap::new(),
             texture_states: std::collections::HashMap::new(),
+            pending_vertex: Vec::new(),
         }
     }
 
