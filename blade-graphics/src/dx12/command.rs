@@ -1,7 +1,10 @@
 use std::mem;
-use windows::Win32::{
-    Foundation::RECT,
-    Graphics::{Direct3D::D3D_PRIMITIVE_TOPOLOGY, Direct3D12::*},
+use windows::{
+    core::Interface,
+    Win32::{
+        Foundation::RECT,
+        Graphics::{Direct3D::D3D_PRIMITIVE_TOPOLOGY, Direct3D12::*},
+    },
 };
 
 // ── ShaderBindable impls ──────────────────────────────────────────────────────
@@ -101,6 +104,12 @@ impl crate::ShaderBindable for crate::BufferPiece {
                         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                     )
                 };
+                // Track for UNORDERED_ACCESS->COMMON reset at the next barrier(),
+                // so a later indirect/SRV read can auto-promote from COMMON.
+                let vtbl = unsafe { self.buffer.resource().as_raw() as super::ResourcePtr };
+                if !ctx.encoder.uav_buffers.contains(&vtbl) {
+                    ctx.encoder.uav_buffers.push(vtbl);
+                }
             }
             super::BindingKind::Cbv => {
                 let addr = self.buffer.gpu_address + self.offset;
@@ -164,24 +173,37 @@ impl super::CommandEncoder {
         self.list.as_ref().unwrap()
     }
 
-    /// Flush all tracked render-target states back to COMMON, then emit a
-    /// global UAV barrier — mirroring Vulkan's full pipeline barrier.
+    /// Full pipeline barrier — the DX12 equivalent of Vulkan's
+    /// `MEMORY_WRITE -> MEMORY_READ|MEMORY_WRITE` over `ALL_COMMANDS`.
+    ///
+    /// Three things happen, all "everything-before is visible to everything-after":
+    ///  1. Active render/depth targets transition back to COMMON.
+    ///  2. UAV-written buffers transition UNORDERED_ACCESS -> COMMON. This both
+    ///     flushes the writes AND returns them to COMMON so a following read can
+    ///     auto-promote — crucially, `ExecuteIndirect` needs INDIRECT_ARGUMENT,
+    ///     which COMMON promotes to but UNORDERED_ACCESS does not. This is what
+    ///     makes "compute writes indirect args -> indirect draw" work, matching
+    ///     Vulkan's MEMORY_WRITE->MEMORY_READ guarantee.
+    ///  3. A global UAV barrier covers any remaining UAV resources (e.g. storage
+    ///     textures, or buffers kept in UAV across passes).
     pub fn barrier(&mut self) {
         profiling::function_scope!();
 
         let list = self.list.as_ref().unwrap();
 
-        // Transition all active render targets / depth targets back to COMMON
-        if !self.active_rts.is_empty() {
-            let barriers: Vec<D3D12_RESOURCE_BARRIER> = self
-                .active_rts
-                .drain(..)
-                .map(|rt| transition_barrier(rt.resource_vtbl, rt.state, D3D12_RESOURCE_STATE_COMMON))
-                .collect();
-            unsafe { list.ResourceBarrier(&barriers) };
+        let mut transitions: Vec<D3D12_RESOURCE_BARRIER> = Vec::new();
+        for rt in self.active_rts.drain(..) {
+            transitions.push(transition_barrier(rt.resource_vtbl, rt.state, D3D12_RESOURCE_STATE_COMMON));
+        }
+        for vtbl in self.uav_buffers.drain(..) {
+            transitions.push(transition_barrier(
+                vtbl, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON));
+        }
+        if !transitions.is_empty() {
+            unsafe { list.ResourceBarrier(&transitions) };
         }
 
-        // Global UAV barrier: ensures all UAV writes are visible.
+        // Global UAV barrier: ensures all UAV writes are visible to later UAV use.
         let uav_barrier = D3D12_RESOURCE_BARRIER {
             Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
             Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
@@ -343,6 +365,9 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         self.sampler_ring.reset();
         self.upload_ring.reset();
         self.active_rts.clear();
+        // Buffer states decay to COMMON at the ExecuteCommandLists boundary, so
+        // a fresh command list starts with all buffers in COMMON.
+        self.uav_buffers.clear();
 
         let heaps: [Option<ID3D12DescriptorHeap>; 2] = [
             Some(self.cbv_srv_uav_ring.heap.clone()),

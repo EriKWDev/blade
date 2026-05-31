@@ -547,6 +547,11 @@ pub struct CommandEncoder {
     pub(super) auto_barriers: bool,
     /// Render targets/depth that are currently in a non-COMMON state.
     pub(super) active_rts: Vec<ActiveRt>,
+    /// Buffers (COM vtable ptrs) bound as UAV this barrier-epoch. They are
+    /// promoted COMMON->UNORDERED_ACCESS on dispatch and must be transitioned
+    /// back to COMMON by `barrier()` so a later indirect/SRV read can
+    /// auto-promote (e.g. COMMON->INDIRECT_ARGUMENT for ExecuteIndirect).
+    pub(super) uav_buffers: Vec<ResourcePtr>,
 }
 
 unsafe impl Send for CommandEncoder {}
@@ -634,6 +639,7 @@ impl crate::traits::CommandDevice for Context {
             dispatch_sig: self.dispatch_sig.clone(),
             auto_barriers: true,
             active_rts: Vec::new(),
+            uav_buffers: Vec::new(),
         }
     }
 
