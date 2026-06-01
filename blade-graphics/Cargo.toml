@@ -31,7 +31,7 @@ aftermath = ["dep:aftermath"]
 # Cargo does not allow `feature = ...` inside `[target.'cfg(...)']`, so the
 # windows crate is an optional dependency pulled in by this feature, and the
 # naga HLSL backend is enabled here too.
-dx12 = ["dep:windows", "naga/hlsl-out"]
+dx12 = ["dep:windows", "naga/hlsl-out", "naga/wgsl-out"]
 
 [target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
 objc2 = "0.6"

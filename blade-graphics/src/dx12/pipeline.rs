@@ -371,10 +371,29 @@ fn compile_shader_function(
         Ok(Ok(_reflection)) => {}
         Ok(Err(e)) => panic!("naga HLSL generation failed for '{}': {e}", sf.entry_point),
         Err(_panic) => {
+            // The offending construct lives in `#import`-ed / `#ifdef`-preprocessed
+            // files, so `sf.shader.source` (the primary file) is not enough to
+            // reproduce it. Round-trip the fully-assembled module back to WGSL via
+            // naga's wgsl backend so the complete source is visible.
+            let dump = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                naga::back::wgsl::write_string(
+                    &module,
+                    &module_info,
+                    naga::back::wgsl::WriterFlags::EXPLICIT_TYPES,
+                )
+            }));
+            let assembled = match dump {
+                Ok(Ok(s)) => s,
+                _ => format!(
+                    "<wgsl-out also failed; falling back to primary source>\n{}",
+                    sf.shader.source
+                ),
+            };
             panic!(
                 "naga HLSL backend panicked compiling entry point '{}' ({:?}).\n\
-                 This is a naga limitation for some WGSL construct. Source follows:\n{}",
-                sf.entry_point, stage, sf.shader.source
+                 This is a naga HLSL limitation for some WGSL construct. Full \
+                 assembled module source follows:\n{}",
+                sf.entry_point, stage, assembled
             );
         }
     }
