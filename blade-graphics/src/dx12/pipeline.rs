@@ -340,6 +340,12 @@ fn compile_shader_function(
         fake_missing_bindings: true,
         sampler_heap_target,
         sampler_buffer_binding_map,
+        // naga's loop-bounding wraps every loop in a `while(true)` guarded by a
+        // ~4-billion countdown. FXC must unroll loops containing gradient ops
+        // (texture Sample), and that bound makes it give up: "loop does not
+        // terminate in a timely manner" (X3511). Metal disables it for the same
+        // reason; do the same here.
+        force_loop_bounding: false,
         ..Default::default()
     };
 
