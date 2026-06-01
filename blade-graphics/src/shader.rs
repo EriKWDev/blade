@@ -324,4 +324,64 @@ impl super::Shader {
         }
         attribute_mappings
     }
+
+    /// Prepare a single entry point's module for backend code generation.
+    ///
+    /// Shared by all backends: resolves pipeline-override constants, assigns
+    /// resource bindings and vertex input locations, then prunes the module to
+    /// just the requested entry point and compacts it — dropping every function,
+    /// type, and global that is unreachable from that entry point.
+    ///
+    /// Compaction matters because some backends emit the *entire* module rather
+    /// than only what the entry point reaches. naga's HLSL backend in particular
+    /// emits every function and panics (`write_array_size` hits `unreachable!()`)
+    /// on constructs that only appear in otherwise-dead functions; pruning them
+    /// here, in the common path, sidesteps that and also shrinks the SPIR-V/MSL
+    /// output. Doing it once here keeps behavior identical across backends rather
+    /// than adding per-backend special cases.
+    ///
+    /// Returns the prepared module, a freshly validated `ModuleInfo` matching it
+    /// (compaction remaps handles, invalidating the original), and the vertex
+    /// attribute mappings.
+    pub(crate) fn prepare(
+        sf: crate::ShaderFunction,
+        group_infos: &mut [crate::ShaderDataInfo],
+        group_layouts: &[&crate::ShaderDataLayout],
+        vertex_fetch_states: &[crate::VertexFetchState],
+    ) -> (
+        naga::Module,
+        naga::valid::ModuleInfo,
+        Vec<crate::VertexAttributeMapping>,
+    ) {
+        profiling::function_scope!();
+
+        let ep_index = sf.entry_point_index();
+        let ep_stage = sf.shader.module.entry_points[ep_index].stage;
+        let ep_info = sf.shader.info.get_entry_point(ep_index);
+
+        let (mut module, _) = sf.shader.resolve_constants(sf.constants);
+        Self::fill_resource_bindings(&mut module, group_infos, ep_stage, ep_info, group_layouts);
+        let attribute_mappings =
+            Self::fill_vertex_locations(&mut module, ep_index, vertex_fetch_states);
+
+        // Keep only the target entry point so compaction can drop functions/types/
+        // globals reachable only from the others.
+        module
+            .entry_points
+            .retain(|e| e.name.as_str() == sf.entry_point);
+
+        {
+            profiling::scope!("compact shader, dead code elim");
+            naga::compact::compact(&mut module, naga::compact::KeepUnused::No);
+        }
+
+        // Same flags as the initial validation in `Shader::new`: skip BINDINGS
+        // (blade assigns its own) and allow all capabilities.
+        let flags = naga::valid::ValidationFlags::all() ^ naga::valid::ValidationFlags::BINDINGS;
+        let module_info = naga::valid::Validator::new(flags, naga::valid::Capabilities::all())
+            .validate(&module)
+            .expect("re-validation after shader compaction failed");
+
+        (module, module_info, attribute_mappings)
+    }
 }

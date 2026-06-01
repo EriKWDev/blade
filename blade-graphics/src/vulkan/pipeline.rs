@@ -75,18 +75,9 @@ impl super::Context {
 
         let ep_index = sf.entry_point_index();
         let ep = &sf.shader.module.entry_points[ep_index];
-        let ep_info = sf.shader.info.get_entry_point(ep_index);
 
-        let (mut module, module_info) = sf.shader.resolve_constants(&sf.constants);
-        crate::Shader::fill_resource_bindings(
-            &mut module,
-            group_infos,
-            ep.stage,
-            ep_info,
-            group_layouts,
-        );
-        let attribute_mappings =
-            crate::Shader::fill_vertex_locations(&mut module, ep_index, vertex_fetch_states);
+        let (module, module_info, attribute_mappings) =
+            crate::Shader::prepare(sf, group_infos, group_layouts, vertex_fetch_states);
 
         let pipeline_options = spv::PipelineOptions {
             shader_stage: ep.stage,

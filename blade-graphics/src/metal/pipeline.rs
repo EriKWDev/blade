@@ -196,24 +196,22 @@ impl super::Context {
     ) -> CompiledShader {
         let ep_index = sf.entry_point_index();
         let ep = &sf.shader.module.entry_points[ep_index];
-        let ep_info = sf.shader.info.get_entry_point(ep_index);
         let _ = sf.shader.source;
 
-        let (mut module, module_info) = sf.shader.resolve_constants(&sf.constants);
-        crate::Shader::fill_resource_bindings(
-            &mut module,
+        let (module, module_info, attribute_mappings) = crate::Shader::prepare(
+            sf,
             &mut pipeline_layout.group_infos,
-            ep.stage,
-            ep_info,
             bind_group_layouts,
+            vertex_fetch_states,
         );
-        let attribute_mappings =
-            crate::Shader::fill_vertex_locations(&mut module, ep_index, vertex_fetch_states);
 
-        // figure out how much workgroup memory is needed for each binding
+        // figure out how much workgroup memory is needed for each binding.
+        // After `Shader::prepare` compacts the module, every remaining global is
+        // reachable from this entry point, so any workgroup global present here is
+        // necessarily live (no per-global `ep_info` liveness check needed).
         let mut wg_memory_sizes = Vec::new();
-        for (var_handle, var) in module.global_variables.iter() {
-            if var.space == naga::AddressSpace::WorkGroup && !ep_info[var_handle].is_empty() {
+        for (_var_handle, var) in module.global_variables.iter() {
+            if var.space == naga::AddressSpace::WorkGroup {
                 let size = module.types[var.ty].inner.size(module.to_ctx());
                 //TODO: use `u32::next_multiple_of`
                 wg_memory_sizes.push(((size - 1) | 0xF) + 1); // multiple of 16

@@ -321,25 +321,16 @@ fn compile_shader_function(
 ) -> (Vec<u8>, [u32; 3]) {
     let ep_index = sf.entry_point_index();
     let ep = &sf.shader.module.entry_points[ep_index];
-    let ep_info = sf.shader.info.get_entry_point(ep_index);
 
-    let (mut module, module_info) = sf.shader.resolve_constants(&sf.constants);
-    crate::Shader::fill_resource_bindings(
-        &mut module,
-        group_infos,
-        stage,
-        ep_info,
-        group_layouts,
-    );
-    // `fill_resource_bindings` only binds globals used by THIS entry point. The
-    // HLSL backend, unlike SPIR-V/MSL, emits *every* global in the module and
-    // unwraps each sampler's binding (writer.rs write_global_sampler) — so a
-    // fragment-only sampler would panic while compiling the vertex shader.
-    // Assign a binding to any still-unbound global that matches a layout entry.
-    assign_unused_bindings(&mut module, group_layouts);
-    if stage == naga::ShaderStage::Vertex {
-        crate::Shader::fill_vertex_locations(&mut module, ep_index, vertex_fetch_states);
-    }
+    // `Shader::prepare` resolves overrides, fills bindings + vertex locations, and
+    // — crucially for HLSL — prunes the module to just this entry point and
+    // compacts it. naga's HLSL backend emits *every* function/global in the
+    // module and unwraps each sampler binding (write_global_sampler) / panics in
+    // write_array_size on constructs in otherwise-dead functions. Compaction
+    // drops that unreachable code, which is why this no longer needs a bespoke
+    // `assign_unused_bindings` pass for unused samplers.
+    let (module, module_info, _attribute_mappings) =
+        crate::Shader::prepare(sf, group_infos, group_layouts, vertex_fetch_states);
 
     let binding_map = make_binding_map(groups);
     let (sampler_heap_target, sampler_buffer_binding_map) = make_sampler_options(groups);
@@ -414,43 +405,6 @@ fn compile_shader_function(
 
     let bytecode = compile_hlsl(&hlsl_source, sf.entry_point, target_str, debug);
     (bytecode, wg_size)
-}
-
-/// Assign `(group, binding)` to any global still lacking a binding whose name
-/// matches a data-layout entry. naga's HLSL writer emits all globals and
-/// unwraps sampler bindings, so unbound globals (unused by the current entry
-/// point) must still be given a binding present in `binding_map`.
-fn assign_unused_bindings(
-    module: &mut naga::Module,
-    group_layouts: &[&crate::ShaderDataLayout],
-) {
-    for (_handle, var) in module.global_variables.iter_mut() {
-        if var.binding.is_some() {
-            continue;
-        }
-        // Only resource globals carry bindings (uniform/storage/handle spaces).
-        match var.space {
-            naga::AddressSpace::Uniform
-            | naga::AddressSpace::Storage { .. }
-            | naga::AddressSpace::Handle => {}
-            _ => continue,
-        }
-        let name = match var.name.as_ref() {
-            Some(n) => n.as_str(),
-            None => continue,
-        };
-        'groups: for (g, layout) in group_layouts.iter().enumerate() {
-            for (bi, &(bname, _)) in layout.bindings.iter().enumerate() {
-                if bname == name {
-                    var.binding = Some(naga::ResourceBinding {
-                        group: g as u32,
-                        binding: bi as u32,
-                    });
-                    break 'groups;
-                }
-            }
-        }
-    }
 }
 
 // ── ShaderDevice impl ─────────────────────────────────────────────────────────
