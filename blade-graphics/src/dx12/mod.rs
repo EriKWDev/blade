@@ -967,6 +967,16 @@ pub(super) fn map_depth_srv_format(format: crate::TextureFormat) -> DXGI_FORMAT 
 /// so the resource can simultaneously host a typed DSV and a depth-readable SRV
 /// (D3D12 only allows that on a typeless resource). Color formats stay typed —
 /// they already support both RTV and SRV directly.
+/// Attach a debug name to a resource so RenderDoc/PIX/the debug layer show the
+/// blade name (e.g. "color with mips") instead of an auto-generated number.
+pub(super) fn set_resource_name(resource: &ID3D12Resource, name: &str) {
+    if name.is_empty() {
+        return;
+    }
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let _ = unsafe { resource.SetName(windows::core::PCWSTR(wide.as_ptr())) };
+}
+
 pub(super) fn map_resource_format(format: crate::TextureFormat) -> DXGI_FORMAT {
     match format {
         crate::TextureFormat::Depth32Float => DXGI_FORMAT_R32_TYPELESS,

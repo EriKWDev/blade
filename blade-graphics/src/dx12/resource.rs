@@ -84,6 +84,7 @@ impl crate::traits::ResourceDevice for super::Context {
             )
         });
         let resource = resource.unwrap();
+        super::set_resource_name(&resource, desc.name);
         let gpu_address = unsafe { resource.GetGPUVirtualAddress() };
 
         let mapped_ptr = if is_host_visible {
@@ -211,6 +212,7 @@ impl crate::traits::ResourceDevice for super::Context {
             )
         });
         let resource = resource.unwrap();
+        super::set_resource_name(&resource, desc.name);
         let resource_ptr = Box::into_raw(Box::new(resource)) as super::ResourcePtr;
         let array_layers = if desc.dimension == crate::TextureDimension::D3 {
             1
