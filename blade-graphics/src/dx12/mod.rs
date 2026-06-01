@@ -160,6 +160,12 @@ pub struct Surface {
     pub(super) alpha: crate::AlphaMode,
     pub(super) target_size: [u16; 2],
     pub(super) next_present_id: u64,
+    /// Frame-latency waitable handle of the swapchain. `acquire_frame` blocks on
+    /// it so the CPU does not race ahead and render into a back buffer still
+    /// queued for presentation — the DX12 analog of Vulkan's blocking
+    /// `acquire_next_image` (DXGI's FLIP model otherwise lets the CPU outrun the
+    /// present queue, which shows up as occasional whole-frame flicker/tearing).
+    pub(super) frame_latency_waitable: Option<windows::Win32::Foundation::HANDLE>,
 }
 
 unsafe impl Send for Surface {}
