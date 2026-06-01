@@ -720,6 +720,14 @@ pub struct CommandEncoder {
     /// from the pipeline. So binds are recorded here and (re)applied with the
     /// pipeline's strides at each `with()`. Cleared at `render()`.
     pub(super) pending_vertex: Vec<(u32, crate::BufferPiece)>,
+    /// Queue fence (cloned) + a private event, used by `start()` to CPU-wait for
+    /// the GPU to finish with an allocator before resetting it. Resetting an
+    /// allocator the GPU is still reading is illegal and removes the device.
+    pub(super) fence: ID3D12Fence,
+    pub(super) fence_event: HANDLE,
+    /// Parallel to `allocators`: the fence value each allocator's last submission
+    /// was signaled at (0 = never submitted). Rotated in lockstep in `start()`.
+    pub(super) allocator_fences: Vec<u64>,
 }
 
 unsafe impl Send for CommandEncoder {}
@@ -807,12 +815,20 @@ impl crate::traits::CommandDevice for Context {
             buffer_states: std::collections::HashMap::new(),
             texture_states: std::collections::HashMap::new(),
             pending_vertex: Vec::new(),
+            fence: self.queue.lock().unwrap().fence.clone(),
+            fence_event: unsafe {
+                windows::Win32::System::Threading::CreateEventW(None, false, false, None).unwrap()
+            },
+            allocator_fences: vec![0u64; desc.buffer_count as usize],
         }
     }
 
     fn destroy_command_encoder(&self, encoder: &mut CommandEncoder) {
         encoder.allocators.clear();
         encoder.list = None;
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(encoder.fence_event);
+        }
     }
 
     fn submit(&self, encoder: &mut CommandEncoder, after: Option<&SyncPoint>) -> SyncPoint {
@@ -850,6 +866,13 @@ impl crate::traits::CommandDevice for Context {
         queue.last_progress += 1;
         let progress = queue.last_progress;
         unsafe { queue.raw.Signal(&queue.fence, progress).unwrap() };
+
+        // Record this submission's fence value for the allocator currently in use
+        // (index 0 — no rotation happens between start() and submit()), so the
+        // next start() that rotates back to it CPU-waits before resetting it.
+        if let Some(slot) = encoder.allocator_fences.first_mut() {
+            *slot = progress;
+        }
 
         if let Some(pres) = encoder.present.take() {
             let sync_interval: u32 = if pres.display_sync { 1 } else { 0 };

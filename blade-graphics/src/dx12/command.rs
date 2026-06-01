@@ -518,6 +518,27 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
     fn start(&mut self) {
         profiling::function_scope!();
         self.allocators.rotate_left(1);
+        self.allocator_fences.rotate_left(1);
+        // The allocator now at the front may still be in use by the GPU from its
+        // previous submission (it was last used `buffer_count` submits ago).
+        // Resetting an allocator while the GPU is still reading the command list
+        // recorded from it is illegal — the debug layer reports "command allocator
+        // was reset after the command list was recorded" and the device is removed
+        // (which then cascades into bogus barrier-state and closed-list errors). So
+        // CPU-wait for that submission's fence value before resetting.
+        let target = self.allocator_fences[0];
+        if target != 0 && unsafe { self.fence.GetCompletedValue() } < target {
+            unsafe {
+                self.fence
+                    .SetEventOnCompletion(target, self.fence_event)
+                    .unwrap();
+                let _ = windows::Win32::System::Threading::WaitForSingleObjectEx(
+                    self.fence_event,
+                    windows::Win32::System::Threading::INFINITE,
+                    false,
+                );
+            }
+        }
         let allocator = &self.allocators[0];
         unsafe { allocator.Reset().unwrap() };
         unsafe { self.list.as_ref().unwrap().Reset(allocator, None).unwrap() };
