@@ -83,7 +83,6 @@ impl super::Context {
         let queue = self.queue.lock().unwrap();
 
         if let Some(ref sc) = surface.swapchain {
-            // Resize existing swapchain
             unsafe {
                 sc.ResizeBuffers(
                     num_frames,
@@ -95,7 +94,6 @@ impl super::Context {
                 .unwrap();
             }
         } else {
-            // Create new swapchain
             let swap_desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: config.size.width,
                 Height: config.size.height,
@@ -133,7 +131,6 @@ impl super::Context {
         surface.target_size = [config.size.width as u16, config.size.height as u16];
         surface.next_present_id = 1;
 
-        // Acquire RTVs for the new back buffers
         let sc = surface.swapchain.as_ref().unwrap();
         let buffer_count: u32 = {
             let desc = unsafe { sc.GetDesc1().unwrap() };

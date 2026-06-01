@@ -612,11 +612,9 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
             .require_buffer_state(&dst.buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         let enc = &mut *self.encoder;
 
-        // Allocate one slot in the GPU-visible ring for the UAV.
         let (ring_cpu, ring_gpu) = enc.cbv_srv_uav_ring.alloc(1);
         let uav_cpu = super::raw_cpu_handle(dst.buffer.uav_handle);
 
-        // Copy the buffer's CPU-visible UAV descriptor into the GPU-visible ring.
         unsafe {
             enc.device.CopyDescriptorsSimple(
                 1, ring_cpu, uav_cpu, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
@@ -879,8 +877,7 @@ impl super::ComputeCommandEncoder<'_> {
         unsafe {
             list.SetPipelineState(&pipeline.pso);
             list.SetComputeRootSignature(&pipeline.layout.root_signature);
-            // Bind both sampler heaps (standard + comparison) to the ring base.
-            if let Some((std_root, cmp_root)) = pipeline.layout.sampler_heap_roots {
+                if let Some((std_root, cmp_root)) = pipeline.layout.sampler_heap_roots {
                 list.SetComputeRootDescriptorTable(std_root, sampler_gpu);
                 list.SetComputeRootDescriptorTable(cmp_root, sampler_gpu);
             }

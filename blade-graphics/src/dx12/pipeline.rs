@@ -425,13 +425,9 @@ impl crate::traits::ShaderDevice for super::Context {
             .map(|l| l.to_info())
             .collect();
 
-        // Preliminary group analysis (before we know access modes from shader inspection).
-        // We'll re-analyze after fill_resource_bindings has been called.
-        // But analyze_group needs group_infos, which aren't filled yet at this point.
-        // So we do a two-phase approach: call fill_resource_bindings to get access modes,
-        // then rebuild the GroupDescriptors.
-
-        // Phase 1: fill bindings to get access modes
+        // analyze_group needs the per-binding access modes, which only
+        // fill_resource_bindings produces — so fill into a throwaway module first,
+        // build the descriptors, then compile from a fresh group_infos.
         let ep_index = desc.compute.entry_point_index();
         let ep_info = desc.compute.shader.info.get_entry_point(ep_index);
         let (mut module_temp, _) = desc.compute.shader.resolve_constants(&desc.compute.constants);
@@ -443,7 +439,6 @@ impl crate::traits::ShaderDevice for super::Context {
             desc.data_layouts,
         );
 
-        // Phase 2: build group descriptors now that we have access modes
         let mut root_base = 0u32;
         let groups: Vec<GroupDescriptors> = desc.data_layouts
             .iter()
@@ -453,10 +448,8 @@ impl crate::traits::ShaderDevice for super::Context {
             })
             .collect();
 
-        // Phase 3: compile the shader with the correct binding map
         let debug = self.validation_mode;
 
-        // Re-init group_infos for actual compilation
         let mut group_infos2: Vec<crate::ShaderDataInfo> = desc
             .data_layouts
             .iter()
@@ -519,7 +512,6 @@ impl crate::traits::ShaderDevice for super::Context {
             .map(|l| l.to_info())
             .collect();
 
-        // Fill resource bindings for vertex shader
         let vs_ep_index = desc.vertex.entry_point_index();
         let vs_ep_info = desc.vertex.shader.info.get_entry_point(vs_ep_index);
         let (mut vs_module, _) = desc.vertex.shader.resolve_constants(&desc.vertex.constants);
@@ -531,7 +523,6 @@ impl crate::traits::ShaderDevice for super::Context {
             desc.data_layouts,
         );
 
-        // Fill resource bindings for fragment shader
         if let Some(fs) = desc.fragment {
             let fs_ep_index = fs.entry_point_index();
             let fs_ep_info = fs.shader.info.get_entry_point(fs_ep_index);
@@ -545,7 +536,6 @@ impl crate::traits::ShaderDevice for super::Context {
             );
         }
 
-        // Merge access info (union of vs + fs accesses)
         let merged_infos: Vec<crate::ShaderDataInfo> = desc
             .data_layouts
             .iter()
@@ -572,7 +562,6 @@ impl crate::traits::ShaderDevice for super::Context {
 
         let debug = self.validation_mode;
 
-        // Compile vertex shader
         let mut group_infos_vs2: Vec<crate::ShaderDataInfo> = desc
             .data_layouts
             .iter()
@@ -588,7 +577,6 @@ impl crate::traits::ShaderDevice for super::Context {
             debug,
         );
 
-        // Compile fragment shader
         let fs_bytecode = if let Some(fs) = desc.fragment {
             let mut group_infos_fs2: Vec<crate::ShaderDataInfo> = desc
                 .data_layouts

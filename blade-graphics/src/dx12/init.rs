@@ -12,7 +12,6 @@ use super::{Context, DescriptorHeap, LinearAllocator, Queue};
 
 impl Context {
     pub unsafe fn init(desc: super::super::ContextDesc) -> Result<Self, super::super::NotSupportedError> {
-        // Enable debug layer in validation mode
         if desc.validation {
             let mut debug: Option<ID3D12Debug> = None;
             if D3D12GetDebugInterface(&mut debug).is_ok() {
@@ -30,7 +29,6 @@ impl Context {
         let factory: IDXGIFactory4 = CreateDXGIFactory2(factory_flags)
             .map_err(|e| super::super::NotSupportedError::Platform(e))?;
 
-        // Enumerate adapters and pick one
         let (adapter, adapter_desc) = pick_adapter(&factory, desc.device_id)?;
         let vendor = map_vendor(adapter_desc.VendorId);
 
@@ -41,7 +39,6 @@ impl Context {
             dev.unwrap()
         };
 
-        // Command queue
         let queue_desc = D3D12_COMMAND_QUEUE_DESC {
             Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
             Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
@@ -51,14 +48,12 @@ impl Context {
         let queue_raw: ID3D12CommandQueue =
             device.CreateCommandQueue(&queue_desc).map_err(|e| super::super::NotSupportedError::Platform(e))?;
 
-        // Fence + event for CPU synchronization
         let fence: ID3D12Fence = device
             .CreateFence(0, D3D12_FENCE_FLAG_NONE)
             .map_err(|e| super::super::NotSupportedError::Platform(e))?;
         let fence_event: HANDLE = CreateEventW(None, false, false, None)
             .map_err(|e| super::super::NotSupportedError::Platform(e))?;
 
-        // Static descriptor heaps
         let rtv_heap = DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, super::RTV_HEAP_SIZE, false);
         let dsv_heap = DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, super::DSV_HEAP_SIZE, false);
         let staging_heap = DescriptorHeap::new(
@@ -74,7 +69,6 @@ impl Context {
             false,
         );
 
-        // Command signatures for indirect rendering (no root argument modifications)
         let draw_sig = create_command_sig(&device, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, 16);
         let draw_indexed_sig = create_command_sig(&device, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, 20);
         let dispatch_sig = create_command_sig(&device, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, 12);
@@ -177,12 +171,10 @@ unsafe fn pick_adapter(
             Err(_) => continue,
         };
 
-        // Skip the software adapter
         if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
             continue;
         }
 
-        // Test that D3D12 is supported
         let mut test: Option<ID3D12Device> = None;
         if D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut test).is_err() {
             continue;
@@ -192,7 +184,6 @@ unsafe fn pick_adapter(
             return Ok((adapter, desc));
         }
 
-        // Otherwise take the first usable discrete adapter
         if best.is_none() {
             best = Some((adapter, desc));
         }
