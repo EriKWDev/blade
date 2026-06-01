@@ -50,6 +50,27 @@ impl Context {
             dev.unwrap()
         };
 
+        if desc.validation {
+            // GBV defaults to STATE_TRACKING_ONLY; GUARDED_VALIDATION additionally
+            // patches every shader resource access with a bounds guard, catching
+            // out-of-bounds buffer/texture/descriptor reads at the shader level
+            // (the deepest GPU-side check). Set per-device after creation.
+            if let Ok(debug_device) = device.cast::<ID3D12DebugDevice1>() {
+                let settings = D3D12_DEBUG_DEVICE_GPU_BASED_VALIDATION_SETTINGS {
+                    MaxMessagesPerCommandList: 1024,
+                    DefaultShaderPatchMode:
+                        D3D12_GPU_BASED_VALIDATION_SHADER_PATCH_MODE_GUARDED_VALIDATION,
+                    PipelineStateCreateFlags:
+                        D3D12_GPU_BASED_VALIDATION_PIPELINE_STATE_CREATE_FLAG_NONE,
+                };
+                let _ = debug_device.SetDebugParameter(
+                    D3D12_DEBUG_DEVICE_PARAMETER_GPU_BASED_VALIDATION_SETTINGS,
+                    &settings as *const _ as *const std::ffi::c_void,
+                    std::mem::size_of::<D3D12_DEBUG_DEVICE_GPU_BASED_VALIDATION_SETTINGS>() as u32,
+                );
+            }
+        }
+
         let queue_desc = D3D12_COMMAND_QUEUE_DESC {
             Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
             Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
