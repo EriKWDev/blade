@@ -990,10 +990,15 @@ pub(super) fn classify_binding(
 ) -> BindingKind {
     match binding {
         crate::ShaderBinding::Texture | crate::ShaderBinding::TextureArray { .. } => {
-            if access.contains(naga::StorageAccess::STORE) {
-                BindingKind::Uav
-            } else {
+            // naga's HLSL backend emits every storage texture as RWTexture2D (a `u`
+            // register) regardless of read/write access; only sampled textures
+            // (empty access) become Texture2D SRVs. A read-only storage texture
+            // therefore must be a UAV here, or its register collides with the `u`
+            // space naga assigns it.
+            if access.is_empty() {
                 BindingKind::Srv
+            } else {
+                BindingKind::Uav
             }
         }
         crate::ShaderBinding::Sampler => BindingKind::Sampler,
