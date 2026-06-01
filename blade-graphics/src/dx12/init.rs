@@ -88,8 +88,11 @@ impl Context {
             } else {
                 D3D12_RESOURCE_BINDING_TIER_1
             };
+            // Tier 3 has no 1M cap, so use 2M → 1M per frame at buffer_count=2,
+            // matching the capacity that worked single-buffered. (4M overflowed
+            // descriptor memory on a laptop GPU under GPU-based validation.)
             if tier.0 >= D3D12_RESOURCE_BINDING_TIER_3.0 {
-                4_000_000
+                2_000_000
             } else {
                 super::ENCODER_HEAP_SIZE
             }

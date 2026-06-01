@@ -598,13 +598,30 @@ impl DescriptorRing {
         capacity: u32,
         segment_count: u32,
     ) -> Self {
-        let heap: ID3D12DescriptorHeap = unsafe {
-            device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
-                Type: ty,
-                NumDescriptors: capacity,
-                Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
-                NodeMask: 0,
-            }).unwrap()
+        // A large shader-visible heap can exceed available descriptor memory
+        // (especially with GPU-based validation, which shadows descriptors). Rather
+        // than panic on E_OUTOFMEMORY, halve and retry down to a usable floor so the
+        // app still boots; if the result is too small for a frame, the per-segment
+        // overflow assert fires with a clear message instead of a startup crash.
+        let mut cap = capacity.max(segment_count);
+        let floor = (65536 * segment_count).min(capacity);
+        let (heap, capacity): (ID3D12DescriptorHeap, u32) = loop {
+            let result: windows::core::Result<ID3D12DescriptorHeap> = unsafe {
+                device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: ty,
+                    NumDescriptors: cap,
+                    Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                    NodeMask: 0,
+                })
+            };
+            match result {
+                Ok(heap) => break (heap, cap),
+                Err(e) if cap > floor => {
+                    log::warn!("CreateDescriptorHeap({cap}) failed ({e}); retrying smaller");
+                    cap = (cap / 2).max(floor);
+                }
+                Err(e) => panic!("CreateDescriptorHeap({cap}) failed: {e}"),
+            }
         };
         let cpu_start = unsafe { heap.GetCPUDescriptorHandleForHeapStart() };
         let gpu_start = unsafe { heap.GetGPUDescriptorHandleForHeapStart() };
