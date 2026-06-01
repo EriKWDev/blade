@@ -572,6 +572,11 @@ impl crate::traits::ShaderDevice for super::Context {
         let ep_index = desc.compute.entry_point_index();
         let ep_info = desc.compute.shader.info.get_entry_point(ep_index);
         let (mut module_temp, _) = desc.compute.shader.resolve_constants(&desc.compute.constants);
+        // Match compile_shader_function (which forces compute storage to UAV): the
+        // register/space assignment derived here MUST use the same classification
+        // as the emitted HLSL, or SRV/UAV registers collide (e.g. a read-only
+        // `renderables` and a read-write `visible_buffer` both landing at u0).
+        crate::Shader::force_storage_read_write(&mut module_temp);
         crate::Shader::fill_resource_bindings(
             &mut module_temp,
             &mut group_infos,
