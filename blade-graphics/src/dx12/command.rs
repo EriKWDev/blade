@@ -276,9 +276,11 @@ impl super::CommandEncoder {
         self.require_subresources(vtbl, total, std::iter::once(sub), needed);
     }
 
-    /// Transition a buffer (whole resource). Host-visible (UPLOAD/Shared) buffers
-    /// are permanently locked in GENERIC_READ and must never be transitioned;
-    /// GENERIC_READ already permits vertex/index/constant/SRV/copy-source reads.
+    /// Transition a buffer (whole resource). Host-visible buffers are skipped:
+    /// they live on a CUSTOM heap in COMMON, and buffers auto-promote from COMMON
+    /// to whatever state each use needs (then decay back at the ExecuteCommandLists
+    /// boundary), so an explicit transition is unnecessary and would only fight
+    /// the promotion.
     pub(super) fn require_buffer_state(
         &mut self,
         buffer: &super::Buffer,

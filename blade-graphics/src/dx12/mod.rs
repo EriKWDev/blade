@@ -261,7 +261,15 @@ pub(super) fn log_debug_messages(device: &ID3D12Device) {
             if info_queue.GetMessage(i, Some(msg), &mut len).is_ok() {
                 let m = &*msg;
                 let text = std::slice::from_raw_parts(m.pDescription, m.DescriptionByteLength);
-                log::error!("[D3D12] {}", String::from_utf8_lossy(text).trim_end_matches('\0'));
+                let text = String::from_utf8_lossy(text);
+                let text = text.trim_end_matches('\0');
+                match m.Severity {
+                    D3D12_MESSAGE_SEVERITY_CORRUPTION | D3D12_MESSAGE_SEVERITY_ERROR => {
+                        log::error!("[D3D12] {text}")
+                    }
+                    D3D12_MESSAGE_SEVERITY_WARNING => log::warn!("[D3D12] {text}"),
+                    _ => {}
+                }
             }
         }
         info_queue.ClearStoredMessages();

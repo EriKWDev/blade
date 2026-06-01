@@ -41,45 +41,26 @@ impl crate::traits::ResourceDevice for super::Context {
     fn create_buffer(&self, desc: super::super::BufferDesc) -> super::Buffer {
         let is_host_visible = desc.memory.is_host_visible();
 
-        // Heap selection. blade's `Shared` (CPU-visible, usable both ways) has no
-        // direct D3D12 equivalent: UPLOAD is CPU-write/GPU-read only and CANNOT be
-        // a copy destination, while READBACK is copy-dest only. A CUSTOM heap with
-        // WRITE_BACK CPU pages in the L0 (system) memory pool is CPU read+write AND
-        // a valid copy source/destination — i.e. exactly `Shared`'s contract
-        // (slow for the GPU on discrete adapters, which matches its semantics).
+        // blade buffers have no usage flags: any buffer may be a UAV, copy
+        // source/destination, vertex/index/etc. (the Vulkan model). So every buffer
+        // gets ALLOW_UNORDERED_ACCESS and starts in COMMON, from which buffers
+        // auto-promote to whatever state each use needs. Host-visible memory uses a
+        // CUSTOM L0 heap — unlike UPLOAD/READBACK it permits the UAV flag and the
+        // copy-dest state while remaining CPU-mappable.
         let heap_props = match desc.memory {
             crate::Memory::Device | crate::Memory::External(_) => D3D12_HEAP_PROPERTIES {
                 Type: D3D12_HEAP_TYPE_DEFAULT,
                 ..Default::default()
             },
-            crate::Memory::Upload => D3D12_HEAP_PROPERTIES {
-                Type: D3D12_HEAP_TYPE_UPLOAD,
-                ..Default::default()
-            },
-            crate::Memory::Shared => D3D12_HEAP_PROPERTIES {
+            crate::Memory::Shared | crate::Memory::Upload => D3D12_HEAP_PROPERTIES {
                 Type: D3D12_HEAP_TYPE_CUSTOM,
                 CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_WRITE_BACK,
                 MemoryPoolPreference: D3D12_MEMORY_POOL_L0,
                 ..Default::default()
             },
         };
-        let is_default = heap_props.Type == D3D12_HEAP_TYPE_DEFAULT;
-        // UPLOAD requires GENERIC_READ; DEFAULT and CUSTOM start in COMMON.
-        let initial_state = if heap_props.Type == D3D12_HEAP_TYPE_UPLOAD {
-            D3D12_RESOURCE_STATE_GENERIC_READ
-        } else {
-            D3D12_RESOURCE_STATE_COMMON
-        };
         let aligned_size = (desc.size + 255) & !255;
-
-        // A UAV requires ALLOW_UNORDERED_ACCESS, which is only valid on DEFAULT-heap
-        // buffers. CPU-visible (UPLOAD/CUSTOM) buffers get neither the flag nor a UAV;
-        // creating a UAV without the flag removes the device.
-        let res_flags = if is_default {
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
-        } else {
-            D3D12_RESOURCE_FLAG_NONE
-        };
+        let res_flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
         let mut resource: Option<ID3D12Resource> = None;
         super::expect_d3d12(&self.device, "CreateCommittedResource(buffer)", unsafe {
@@ -97,7 +78,7 @@ impl crate::traits::ResourceDevice for super::Context {
                     Flags: res_flags,
                     ..Default::default()
                 },
-                initial_state,
+                D3D12_RESOURCE_STATE_COMMON,
                 None,
                 &mut resource,
             )
@@ -135,33 +116,28 @@ impl crate::traits::ResourceDevice for super::Context {
             );
         }
 
-        // UAV only for DEFAULT-heap buffers (which carry ALLOW_UNORDERED_ACCESS).
-        let uav_handle = if is_default {
-            let h = self.alloc_staging(1);
-            unsafe {
-                self.device.CreateUnorderedAccessView(
-                    &resource,
-                    None,
-                    Some(&D3D12_UNORDERED_ACCESS_VIEW_DESC {
-                        Format: DXGI_FORMAT_R32_TYPELESS,
-                        ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
-                        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
-                            Buffer: D3D12_BUFFER_UAV {
-                                FirstElement: 0,
-                                NumElements: (aligned_size / 4) as u32,
-                                StructureByteStride: 0,
-                                CounterOffsetInBytes: 0,
-                                Flags: D3D12_BUFFER_UAV_FLAG_RAW,
-                            },
+        let uav_handle = self.alloc_staging(1);
+        unsafe {
+            self.device.CreateUnorderedAccessView(
+                &resource,
+                None,
+                Some(&D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                    Format: DXGI_FORMAT_R32_TYPELESS,
+                    ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                    Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                        Buffer: D3D12_BUFFER_UAV {
+                            FirstElement: 0,
+                            NumElements: (aligned_size / 4) as u32,
+                            StructureByteStride: 0,
+                            CounterOffsetInBytes: 0,
+                            Flags: D3D12_BUFFER_UAV_FLAG_RAW,
                         },
-                    }),
-                    h,
-                );
-            }
-            h.ptr as u64
-        } else {
-            0
-        };
+                    },
+                }),
+                uav_handle,
+            );
+        }
+        let uav_handle = uav_handle.ptr as u64;
 
         // Box the COM object so `resource_ptr` is a stable `Box<ID3D12Resource>` pointer.
         let resource_ptr = Box::into_raw(Box::new(resource)) as super::ResourcePtr;
