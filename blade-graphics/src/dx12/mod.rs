@@ -963,6 +963,19 @@ pub(super) fn map_depth_srv_format(format: crate::TextureFormat) -> DXGI_FORMAT 
     }
 }
 
+/// The format to create the *resource* with. Depth formats use the TYPELESS base
+/// so the resource can simultaneously host a typed DSV and a depth-readable SRV
+/// (D3D12 only allows that on a typeless resource). Color formats stay typed —
+/// they already support both RTV and SRV directly.
+pub(super) fn map_resource_format(format: crate::TextureFormat) -> DXGI_FORMAT {
+    match format {
+        crate::TextureFormat::Depth32Float => DXGI_FORMAT_R32_TYPELESS,
+        crate::TextureFormat::Depth32FloatStencil8Uint => DXGI_FORMAT_R32G8X24_TYPELESS,
+        crate::TextureFormat::Stencil8Uint => DXGI_FORMAT_R8_TYPELESS,
+        other => map_texture_format(other),
+    }
+}
+
 pub(super) fn map_comparison(fun: crate::CompareFunction) -> D3D12_COMPARISON_FUNC {
     use crate::CompareFunction as Cf;
     match fun {

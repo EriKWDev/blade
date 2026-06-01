@@ -161,7 +161,12 @@ impl crate::traits::ResourceDevice for super::Context {
     }
 
     fn create_texture(&self, desc: super::super::TextureDesc) -> super::Texture {
-        let format = super::map_texture_format(desc.format);
+        // Depth formats are created TYPELESS so the resource can carry both a
+        // typed DSV (D32_FLOAT[_S8X24_UINT]) and a depth-readable SRV
+        // (R32_FLOAT[_X8X24_TYPELESS]) — required to sample depth (e.g. refraction
+        // reads the copied scene depth). A typed depth resource cannot host the
+        // SRV, and CreateShaderResourceView fails silently (returns void).
+        let format = super::map_resource_format(desc.format);
         let dimension = match desc.dimension {
             crate::TextureDimension::D1 => D3D12_RESOURCE_DIMENSION_TEXTURE1D,
             crate::TextureDimension::D2 => D3D12_RESOURCE_DIMENSION_TEXTURE2D,
