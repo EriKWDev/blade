@@ -185,7 +185,16 @@ impl crate::ShaderBindable for crate::AccelerationStructure {
 
 // ── Barrier helpers ───────────────────────────────────────────────────────────
 
-/// Create a transition barrier that borrows the resource without changing its refcount.
+/// Wrap a COM resource pointer for a windows-rs descriptor field (barrier /
+/// copy-location `pResource`), which is typed as an *owned*
+/// `ManuallyDrop<Option<ID3D12Resource>>`. We are only borrowing for the
+/// duration of the API call: `from_raw` does not AddRef and `ManuallyDrop`
+/// suppresses the Release, so the refcount is unchanged — the owning reference
+/// stays with the Texture/Buffer and is released exactly once in `destroy_*`.
+fn borrowed_resource(raw: super::ResourcePtr) -> mem::ManuallyDrop<Option<ID3D12Resource>> {
+    mem::ManuallyDrop::new(Some(unsafe { ID3D12Resource::from_raw(raw as *mut _) }))
+}
+
 fn transition_barrier(
     resource_vtbl: super::ResourcePtr,
     before: D3D12_RESOURCE_STATES,
@@ -197,10 +206,7 @@ fn transition_barrier(
         Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
         Anonymous: D3D12_RESOURCE_BARRIER_0 {
             Transition: mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                // from_raw does NOT AddRef; ManuallyDrop prevents Release → net 0 refcount change.
-                pResource: mem::ManuallyDrop::new(Some(unsafe {
-                    ID3D12Resource::from_raw(resource_vtbl as *mut _)
-                })),
+                pResource: borrowed_resource(resource_vtbl),
                 Subresource: subresource,
                 StateBefore: before,
                 StateAfter: after,
@@ -666,14 +672,14 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         self.encoder.require_piece_state(&src, D3D12_RESOURCE_STATE_COPY_SOURCE);
         self.encoder.require_piece_state(&dst, D3D12_RESOURCE_STATE_COPY_DEST);
         let src_loc = D3D12_TEXTURE_COPY_LOCATION {
-            pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(src_res.as_raw())) }),
+            pResource: borrowed_resource(src_res.as_raw()),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                 SubresourceIndex: subresource_index(src.mip_level, src.array_layer, src.texture.mip_levels),
             },
         };
         let dst_loc = D3D12_TEXTURE_COPY_LOCATION {
-            pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(dst_res.as_raw())) }),
+            pResource: borrowed_resource(dst_res.as_raw()),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                 SubresourceIndex: subresource_index(dst.mip_level, dst.array_layer, dst.texture.mip_levels),
@@ -745,7 +751,7 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         };
 
         let src_loc = D3D12_TEXTURE_COPY_LOCATION {
-            pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(footprint_res)) }),
+            pResource: borrowed_resource(footprint_res),
             Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                 PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
@@ -759,7 +765,7 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
             },
         };
         let dst_loc = D3D12_TEXTURE_COPY_LOCATION {
-            pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(dst.texture.resource().as_raw())) }),
+            pResource: borrowed_resource(dst.texture.resource().as_raw()),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                 SubresourceIndex: subresource_index(dst.mip_level, dst.array_layer, dst.texture.mip_levels),
@@ -785,14 +791,14 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
             .require_buffer_state(&dst.buffer, D3D12_RESOURCE_STATE_COPY_DEST);
         let aligned_pitch = align_pitch(bytes_per_row as u64);
         let src_loc = D3D12_TEXTURE_COPY_LOCATION {
-            pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(src_res.as_raw())) }),
+            pResource: borrowed_resource(src_res.as_raw()),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                 SubresourceIndex: subresource_index(src.mip_level, src.array_layer, src.texture.mip_levels),
             },
         };
         let dst_loc = D3D12_TEXTURE_COPY_LOCATION {
-            pResource: mem::ManuallyDrop::new(unsafe { Some(ID3D12Resource::from_raw(dst.buffer.resource().as_raw())) }),
+            pResource: borrowed_resource(dst.buffer.resource().as_raw()),
             Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                 PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
