@@ -262,52 +262,87 @@ fn count_types(slots: &[super::BindingSlot]) -> (u32, u32, u32) {
 
 // ── HLSL compilation helpers ──────────────────────────────────────────────────
 
-fn compile_hlsl(source: &str, entry: &str, target: &str, debug: bool) -> Vec<u8> {
-    let source_bytes = source.as_bytes();
-    let entry_cstr = std::ffi::CString::new(entry).unwrap();
-    let target_cstr = std::ffi::CString::new(target).unwrap();
-    use windows::Win32::Graphics::Direct3D::Fxc::*;
-    let flags: u32 = if debug {
-        D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION
-    } else {
-        D3DCOMPILE_OPTIMIZATION_LEVEL3
-    };
-    let mut bytecode: Option<windows::Win32::Graphics::Direct3D::ID3DBlob> = None;
-    let mut errors: Option<windows::Win32::Graphics::Direct3D::ID3DBlob> = None;
+fn wide_nul(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
 
-    let result = unsafe {
-        D3DCompile(
-            source_bytes.as_ptr() as *const _,
-            source_bytes.len(),
-            PCSTR::null(),
-            None,
-            None,
-            PCSTR(entry_cstr.as_ptr() as _),
-            PCSTR(target_cstr.as_ptr() as _),
-            flags,
-            0,
-            &mut bytecode,
-            Some(&mut errors),
-        )
-    };
-
-    if let Some(err) = errors {
-        let ptr = unsafe { err.GetBufferPointer() };
-        let size = unsafe { err.GetBufferSize() };
-        let msg = unsafe { std::slice::from_raw_parts(ptr as *const u8, size) };
-        let msg_str = String::from_utf8_lossy(msg);
-        if result.is_err() {
-            panic!("HLSL compile error ({target}):\n{msg_str}\n\nSource:\n{source}");
-        } else {
-            log::warn!("HLSL compile warning ({target}): {msg_str}");
-        }
+/// Read an IDxcBlob's bytes as a UTF-8 string (for the DXC error/warning buffer).
+unsafe fn dxc_blob_str(blob: &windows::Win32::Graphics::Direct3D::Dxc::IDxcBlob) -> String {
+    let ptr = blob.GetBufferPointer() as *const u8;
+    let len = blob.GetBufferSize();
+    if ptr.is_null() || len == 0 {
+        return String::new();
     }
+    String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned()
+}
 
-    result.unwrap();
-    let blob = bytecode.unwrap();
-    let size = unsafe { blob.GetBufferSize() };
-    let ptr = unsafe { blob.GetBufferPointer() } as *const u8;
-    unsafe { std::slice::from_raw_parts(ptr, size).to_vec() }
+/// Compile HLSL to DXIL with DXC (SM 6.0). FXC/SM5.1 can't compile constructs
+/// this renderer relies on (texture Sample inside dynamic loops force-unroll and
+/// fail X3511); DXC handles them natively. Requires dxcompiler.dll (+ dxil.dll
+/// for signing) at runtime.
+fn compile_hlsl(source: &str, entry: &str, target: &str, debug: bool) -> Vec<u8> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Graphics::Direct3D::Dxc::*;
+
+    unsafe {
+        let utils: IDxcUtils = DxcCreateInstance(&CLSID_DxcUtils)
+            .expect("DxcCreateInstance(DxcUtils) failed — is dxcompiler.dll present?");
+        let compiler: IDxcCompiler = DxcCreateInstance(&CLSID_DxcCompiler)
+            .expect("DxcCreateInstance(DxcCompiler) failed — is dxcompiler.dll present?");
+
+        let source_blob = utils
+            .CreateBlobFromPinned(
+                source.as_ptr() as *const _,
+                source.len() as u32,
+                DXC_CP(65001), // UTF-8
+            )
+            .unwrap();
+
+        let entry_w = wide_nul(entry);
+        let target_w = wide_nul(target);
+        // -Zi (debug info) + -Od (no opt) in validation builds; DXC defaults to
+        // full optimization otherwise. Keep the DXIL validator on so dxil.dll
+        // signs the output (unsigned DXIL is rejected by the runtime).
+        let dbg = [wide_nul("-Zi"), wide_nul("-Od")];
+        let args: Vec<PCWSTR> = if debug {
+            vec![PCWSTR(dbg[0].as_ptr()), PCWSTR(dbg[1].as_ptr())]
+        } else {
+            Vec::new()
+        };
+
+        let result: IDxcOperationResult = compiler
+            .Compile(
+                &source_blob,
+                PCWSTR::null(),
+                PCWSTR(entry_w.as_ptr()),
+                PCWSTR(target_w.as_ptr()),
+                Some(&args),
+                &[],
+                None,
+            )
+            .unwrap();
+
+        let status = result.GetStatus().unwrap();
+        if status.is_err() {
+            let msg = result
+                .GetErrorBuffer()
+                .ok()
+                .map(|e| dxc_blob_str(&e))
+                .unwrap_or_default();
+            panic!("HLSL compile error ({target}):\n{msg}\n\nSource:\n{source}");
+        }
+        if let Ok(err) = result.GetErrorBuffer() {
+            let msg = dxc_blob_str(&err);
+            if !msg.trim().is_empty() {
+                log::warn!("HLSL compile warning ({target}): {msg}");
+            }
+        }
+
+        let object = result.GetResult().unwrap();
+        let ptr = object.GetBufferPointer() as *const u8;
+        let len = object.GetBufferSize();
+        std::slice::from_raw_parts(ptr, len).to_vec()
+    }
 }
 
 fn compile_shader_function(
@@ -335,7 +370,7 @@ fn compile_shader_function(
     let binding_map = make_binding_map(groups);
     let (sampler_heap_target, sampler_buffer_binding_map) = make_sampler_options(groups);
     let hlsl_options = naga::back::hlsl::Options {
-        shader_model: naga::back::hlsl::ShaderModel::V5_1,
+        shader_model: naga::back::hlsl::ShaderModel::V6_0,
         binding_map,
         fake_missing_bindings: true,
         sampler_heap_target,
@@ -403,9 +438,9 @@ fn compile_shader_function(
     };
 
     let target_str = match stage {
-        naga::ShaderStage::Compute => "cs_5_1",
-        naga::ShaderStage::Vertex => "vs_5_1",
-        naga::ShaderStage::Fragment => "ps_5_1",
+        naga::ShaderStage::Compute => "cs_6_0",
+        naga::ShaderStage::Vertex => "vs_6_0",
+        naga::ShaderStage::Fragment => "ps_6_0",
         _ => panic!("unsupported shader stage"),
     };
 
