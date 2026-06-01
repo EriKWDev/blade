@@ -54,6 +54,10 @@ impl super::Context {
         let hwnd = surface.hwnd.expect("surface has no window handle");
 
         let (format, dxgi_format, alpha) = pick_format(config.color_space, config.transparent);
+        // FLIP-model swapchains reject _SRGB backbuffer formats. Create the
+        // swapchain with the UNORM base and put the _SRGB view on the RTV, so the
+        // hardware still encodes linear shader output to sRGB on write.
+        let swapchain_format = swapchain_base_format(dxgi_format);
 
         let num_frames: u32 = if config.requested_num_frames == 0 {
             match config.display_sync {
@@ -88,7 +92,7 @@ impl super::Context {
                     num_frames,
                     config.size.width,
                     config.size.height,
-                    dxgi_format,
+                    swapchain_format,
                     tearing_flag,
                 )
                 .unwrap();
@@ -97,7 +101,7 @@ impl super::Context {
             let swap_desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: config.size.width,
                 Height: config.size.height,
-                Format: dxgi_format,
+                Format: swapchain_format,
                 Stereo: false.into(),
                 SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -259,6 +263,16 @@ fn log_dxgi_messages() {
                 log::error!("[DXGI] {}", String::from_utf8_lossy(text).trim_end_matches('\0'));
             }
         }
+    }
+}
+
+/// The UNORM base of an `_SRGB` format. FLIP swapchains require the non-sRGB
+/// format for the backbuffer; the sRGB-ness is applied via the RTV instead.
+fn swapchain_base_format(format: DXGI_FORMAT) -> DXGI_FORMAT {
+    match format {
+        DXGI_FORMAT_B8G8R8A8_UNORM_SRGB => DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB => DXGI_FORMAT_R8G8B8A8_UNORM,
+        other => other,
     }
 }
 
