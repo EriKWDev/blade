@@ -466,11 +466,11 @@ impl super::CommandEncoder {
     /// when `auto_barriers` is enabled (matching Vulkan's `begin_pass`).
     fn begin_pass(&mut self, label: &str) {
         self.active_render_targets.clear();
-        // Emit the pass label as a marker. PIX/RenderDoc surface it, and — the
-        // reason it's here — DRED records it as the breadcrumb context for the
-        // ops that follow, so a device-removal names the pass that hung.
-        if let Some(list) = self.list.as_ref() {
-            if !label.is_empty() {
+        // Emit the pass label as a marker (PIX/RenderDoc surface it) and record it
+        // in the DRED label table. Each begin_pass emits exactly one SetMarker op,
+        // so on a hang, counting marker ops up to the hung op indexes this label.
+        if !label.is_empty() {
+            if let Some(list) = self.list.as_ref() {
                 let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
                 // PIX_EVENT_UNICODE_VERSION: the marker payload is a UTF-16 string.
                 const PIX_EVENT_UNICODE_VERSION: u32 = 2;
@@ -482,6 +482,7 @@ impl super::CommandEncoder {
                     );
                 }
             }
+            super::dred_record_pass(self.id, label);
         }
         if self.auto_barriers {
             self.barrier();
@@ -704,6 +705,7 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         // fresh command list starts with every resource implicitly in COMMON.
         self.buffer_states.clear();
         self.texture_states.clear();
+        super::dred_clear_passes(self.id);
 
         let heaps: [Option<ID3D12DescriptorHeap>; 2] = [
             Some(self.cbv_srv_uav_ring.heap.clone()),

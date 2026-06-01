@@ -39,6 +39,7 @@ impl Context {
                 if let Some(dred) = dred {
                     dred.SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
                     dred.SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                    super::dred_set_enabled();
                 }
             }
         }

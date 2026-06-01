@@ -303,6 +303,71 @@ unsafe fn pcwstr_to_string(s: windows::core::PCWSTR) -> String {
     s.to_string().unwrap_or_default()
 }
 
+// Per-pass label tracking for DRED. DRED gives the hung op's *type* and the
+// command-list debug name, but not which blade pass it belonged to. We name
+// each list `blade-enc-{id}` and record the label of every pass (in marker-emit
+// order) keyed by id; on a hang, counting the SetMarker ops up to the hung op
+// indexes this table to the exact pass. Only active under validation.
+static DRED_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static NEXT_ENCODER_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static PASS_LABELS: std::sync::OnceLock<Mutex<std::collections::HashMap<u32, Vec<String>>>> =
+    std::sync::OnceLock::new();
+
+fn pass_label_table() -> &'static Mutex<std::collections::HashMap<u32, Vec<String>>> {
+    PASS_LABELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(super) fn dred_set_enabled() {
+    DRED_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(super) fn dred_next_encoder_id() -> u32 {
+    NEXT_ENCODER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(super) fn dred_record_pass(encoder_id: u32, label: &str) {
+    if !DRED_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    pass_label_table()
+        .lock()
+        .unwrap()
+        .entry(encoder_id)
+        .or_default()
+        .push(label.to_string());
+}
+
+pub(super) fn dred_clear_passes(encoder_id: u32) {
+    if !DRED_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(v) = pass_label_table().lock().unwrap().get_mut(&encoder_id) {
+        v.clear();
+    }
+}
+
+/// Map a hung command list's debug name + completed-op count to the blade pass
+/// label: parse `blade-enc-{id}`, count SetMarker ops up to `done` (each pass
+/// emits exactly one marker at its start), and index the recorded labels.
+fn dred_pass_for(
+    list_name: &str,
+    history: *const D3D12_AUTO_BREADCRUMB_OP,
+    done: u32,
+) -> Option<String> {
+    let id: u32 = list_name.strip_prefix("blade-enc-")?.parse().ok()?;
+    if history.is_null() {
+        return None;
+    }
+    let markers = (0..=done)
+        .filter(|&i| unsafe { *history.add(i as usize) } == D3D12_AUTO_BREADCRUMB_OP_SETMARKER)
+        .count();
+    if markers == 0 {
+        return None;
+    }
+    let table = pass_label_table().lock().unwrap();
+    table.get(&id).and_then(|v| v.get(markers - 1).cloned())
+}
+
 fn breadcrumb_op_name(op: D3D12_AUTO_BREADCRUMB_OP) -> &'static str {
     match op {
         D3D12_AUTO_BREADCRUMB_OP_SETMARKER => "SetMarker",
@@ -387,7 +452,14 @@ unsafe fn report_hung_node(
     } else {
         *history.add(done as usize)
     };
-    let pass = if context.is_empty() { "<unnamed>" } else { context };
+    // Prefer the DRED-provided context string; fall back to our own marker-count
+    // table (works even when the driver doesn't surface marker contexts).
+    let resolved = if context.is_empty() {
+        dred_pass_for(list, history, done)
+    } else {
+        Some(context.to_string())
+    };
+    let pass = resolved.as_deref().unwrap_or("<unknown>");
     log::error!(
         "[DRED] hung in pass '{pass}' (list '{list}', queue '{queue}') after {done}/{count} ops; hung op = {} {:?}",
         breadcrumb_op_name(hung),
@@ -925,6 +997,9 @@ pub(super) struct Presentation {
 
 pub struct CommandEncoder {
     pub(super) list: Option<ID3D12GraphicsCommandList>,
+    /// Stable id used to name the list `blade-enc-{id}` and key its per-pass
+    /// label table for DRED hang attribution.
+    pub(super) id: u32,
     pub(super) allocators: Vec<ID3D12CommandAllocator>,
     pub(super) device: ID3D12Device,
     pub(super) cbv_srv_uav_ring: DescriptorRing,
@@ -1072,6 +1147,15 @@ impl crate::traits::CommandDevice for Context {
         };
         unsafe { list.Close().unwrap() };
 
+        // Name the list so DRED reports it on a hang and we can map the hung node
+        // back to this encoder's per-pass label table.
+        let id = dred_next_encoder_id();
+        let list_name: Vec<u16> = format!("blade-enc-{id}")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let _ = unsafe { list.SetName(windows::core::PCWSTR(list_name.as_ptr())) };
+
         // Each ring is split into `buffer_count` per-frame segments so that
         // resetting one frame's region never clobbers descriptors/upload data a
         // still-in-flight frame is reading (the allocator pool already buffers
@@ -1087,6 +1171,7 @@ impl crate::traits::CommandDevice for Context {
 
         CommandEncoder {
             list: Some(list),
+            id,
             allocators,
             device: self.device.clone(),
             cbv_srv_uav_ring,
