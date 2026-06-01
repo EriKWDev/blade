@@ -30,6 +30,17 @@ impl Context {
                     }
                 }
             }
+            // DRED captures GPU auto-breadcrumbs + the page-fault VA, the only way
+            // to localize a DEVICE_HUNG/DEVICE_REMOVED that the debug layer and GBV
+            // do not flag with a specific message. Must be armed before device
+            // creation; read back via `log_dred` on removal.
+            let mut dred: Option<ID3D12DeviceRemovedExtendedDataSettings> = None;
+            if D3D12GetDebugInterface(&mut dred).is_ok() {
+                if let Some(dred) = dred {
+                    dred.SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                    dred.SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                }
+            }
         }
 
         let factory_flags = if desc.validation {

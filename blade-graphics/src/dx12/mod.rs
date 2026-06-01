@@ -296,6 +296,73 @@ pub(super) fn device_removed_reason(device: &ID3D12Device) -> Option<String> {
     }
 }
 
+unsafe fn pcwstr_to_string(s: windows::core::PCWSTR) -> String {
+    if s.is_null() {
+        return String::new();
+    }
+    s.to_string().unwrap_or_default()
+}
+
+/// Dump DRED auto-breadcrumbs and page-fault data after a device removal. The
+/// last completed breadcrumb value vs. the op count identifies the command-list
+/// operation the GPU was executing when it hung; the page-fault VA + the named
+/// allocation it falls in identifies a bad address. Only populated when DRED was
+/// armed at init (validation builds).
+pub(super) fn log_dred(device: &ID3D12Device) {
+    let dred: ID3D12DeviceRemovedExtendedData = match device.cast() {
+        Ok(d) => d,
+        Err(_) => return, // DRED not armed
+    };
+    unsafe {
+        if let Ok(bc) = dred.GetAutoBreadcrumbsOutput() {
+            let mut node = bc.pHeadAutoBreadcrumbNode;
+            while !node.is_null() {
+                let n = &*node;
+                let list = pcwstr_to_string(n.pCommandListDebugNameW);
+                let queue = pcwstr_to_string(n.pCommandQueueDebugNameW);
+                let done = if n.pLastBreadcrumbValue.is_null() {
+                    0
+                } else {
+                    *n.pLastBreadcrumbValue
+                };
+                // A node fully executed (done == count) didn't hang; report the
+                // one that stopped partway, where op[done] is the hung operation.
+                if done < n.BreadcrumbCount {
+                    log::error!(
+                        "[DRED] command list '{list}' (queue '{queue}') hung after {done}/{} ops; hung op = {:?}",
+                        n.BreadcrumbCount,
+                        if n.pCommandHistory.is_null() {
+                            D3D12_AUTO_BREADCRUMB_OP(-1)
+                        } else {
+                            *n.pCommandHistory.add(done as usize)
+                        },
+                    );
+                }
+                node = n.pNext;
+            }
+        }
+        if let Ok(pf) = dred.GetPageFaultAllocationOutput() {
+            if pf.PageFaultVA != 0 {
+                log::error!("[DRED] GPU page fault at VA {:#x}", pf.PageFaultVA);
+                for (label, mut alloc) in [
+                    ("existing", pf.pHeadExistingAllocationNode),
+                    ("recently-freed", pf.pHeadRecentFreedAllocationNode),
+                ] {
+                    while !alloc.is_null() {
+                        let a = &*alloc;
+                        log::error!(
+                            "[DRED]   {label} allocation '{}' type {:?}",
+                            pcwstr_to_string(a.ObjectNameW),
+                            a.AllocationType,
+                        );
+                        alloc = a.pNext;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Unwrap a D3D12 call's result, dumping debug-layer messages and the
 /// device-removed reason on failure so the panic is actionable.
 pub(super) fn expect_d3d12<T>(device: &ID3D12Device, what: &str, r: windows::core::Result<T>) -> T {
@@ -304,6 +371,7 @@ pub(super) fn expect_d3d12<T>(device: &ID3D12Device, what: &str, r: windows::cor
         Err(e) => {
             log_debug_messages(device);
             if let Some(reason) = device_removed_reason(device) {
+                log_dred(device);
                 panic!("DX12 {what} failed: {e}; device removed reason: {reason}");
             }
             panic!("DX12 {what} failed: {e}");
