@@ -631,9 +631,11 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         unsafe { allocator.Reset().unwrap() };
         unsafe { self.list.as_ref().unwrap().Reset(allocator, None).unwrap() };
 
-        self.cbv_srv_uav_ring.reset();
-        self.sampler_ring.reset();
-        self.upload_ring.reset();
+        let segment = (self.frame_index % self.allocators.len() as u64) as u32;
+        self.frame_index += 1;
+        self.cbv_srv_uav_ring.begin_segment(segment);
+        self.sampler_ring.begin_segment(segment);
+        self.upload_ring.begin_segment(segment as u64);
         // All resources decay to COMMON at the ExecuteCommandLists boundary, so a
         // fresh command list starts with every resource implicitly in COMMON.
         self.buffer_states.clear();

@@ -557,6 +557,15 @@ unsafe impl Sync for RenderPipeline {}
 
 // ── Per-encoder GPU-visible descriptor ring ───────────────────────────────────
 
+/// A GPU-visible descriptor heap partitioned into `segment_count` regions, one
+/// per in-flight frame. The heap is reused across frames, so the region a frame
+/// writes into MUST NOT be reset while a prior frame's command list is still
+/// reading it on the GPU. `begin_segment` rewinds only the current frame's
+/// region; the caller (`CommandEncoder::start`) advances the segment in lockstep
+/// with the allocator rotation, having already fence-waited on the submission
+/// that last used this segment. A single offset-0 reset (which is what a
+/// single-buffered ring does) would clobber descriptors of frames still in
+/// flight → garbage bindings, the classic source of intermittent glitches.
 pub(super) struct DescriptorRing {
     pub heap: ID3D12DescriptorHeap,
     pub cpu_start: D3D12_CPU_DESCRIPTOR_HANDLE,
@@ -564,12 +573,19 @@ pub(super) struct DescriptorRing {
     pub increment: u32,
     pub offset: u32,
     pub capacity: u32,
+    segment_count: u32,
+    segment: u32,
 }
 
 unsafe impl Send for DescriptorRing {}
 
 impl DescriptorRing {
-    fn new(device: &ID3D12Device, ty: D3D12_DESCRIPTOR_HEAP_TYPE, capacity: u32) -> Self {
+    fn new(
+        device: &ID3D12Device,
+        ty: D3D12_DESCRIPTOR_HEAP_TYPE,
+        capacity: u32,
+        segment_count: u32,
+    ) -> Self {
         let heap: ID3D12DescriptorHeap = unsafe {
             device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                 Type: ty,
@@ -581,15 +597,21 @@ impl DescriptorRing {
         let cpu_start = unsafe { heap.GetCPUDescriptorHandleForHeapStart() };
         let gpu_start = unsafe { heap.GetGPUDescriptorHandleForHeapStart() };
         let increment = unsafe { device.GetDescriptorHandleIncrementSize(ty) };
-        Self { heap, cpu_start, gpu_start, increment, offset: 0, capacity }
+        Self { heap, cpu_start, gpu_start, increment, offset: 0, capacity, segment_count, segment: 0 }
     }
 
-    pub fn reset(&mut self) {
-        self.offset = 0;
+    fn segment_capacity(&self) -> u32 {
+        self.capacity / self.segment_count
+    }
+
+    pub fn begin_segment(&mut self, segment: u32) {
+        self.segment = segment;
+        self.offset = segment * self.segment_capacity();
     }
 
     pub fn alloc(&mut self, count: u32) -> (D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE) {
-        assert!(self.offset + count <= self.capacity, "descriptor ring overflow");
+        let limit = (self.segment + 1) * self.segment_capacity();
+        assert!(self.offset + count <= limit, "descriptor ring segment overflow");
         let cpu = D3D12_CPU_DESCRIPTOR_HANDLE {
             ptr: self.cpu_start.ptr + (self.offset * self.increment) as usize,
         };
@@ -603,18 +625,23 @@ impl DescriptorRing {
 
 // ── Upload scratch ring (for CBV plain-data) ──────────────────────────────────
 
+/// Host-visible scratch buffer, partitioned per in-flight frame exactly like
+/// `DescriptorRing` (see its doc): the GPU reads this buffer's CBV/upload data
+/// while a frame is in flight, so a frame must only write into its own segment.
 pub(super) struct UploadRing {
     pub resource: ID3D12Resource,
     pub gpu_address: u64,
     pub mapped: *mut u8,
     pub offset: u64,
     pub capacity: u64,
+    segment_count: u64,
+    segment: u64,
 }
 
 unsafe impl Send for UploadRing {}
 
 impl UploadRing {
-    fn new(device: &ID3D12Device, capacity: u64) -> Self {
+    fn new(device: &ID3D12Device, capacity: u64, segment_count: u64) -> Self {
         let mut resource: Option<ID3D12Resource> = None;
         unsafe {
             device.CreateCommittedResource(
@@ -639,11 +666,20 @@ impl UploadRing {
         let gpu_address = unsafe { resource.GetGPUVirtualAddress() };
         let mut mapped_ptr: *mut std::ffi::c_void = ptr::null_mut();
         unsafe { resource.Map(0, None, Some(&mut mapped_ptr)).unwrap() };
-        Self { resource, gpu_address, mapped: mapped_ptr as *mut u8, offset: 0, capacity }
+        Self { resource, gpu_address, mapped: mapped_ptr as *mut u8, offset: 0, capacity, segment_count, segment: 0 }
     }
 
-    pub fn reset(&mut self) {
-        self.offset = 0;
+    fn segment_capacity(&self) -> u64 {
+        self.capacity / self.segment_count
+    }
+
+    fn segment_limit(&self) -> u64 {
+        (self.segment + 1) * self.segment_capacity()
+    }
+
+    pub fn begin_segment(&mut self, segment: u64) {
+        self.segment = segment;
+        self.offset = segment * self.segment_capacity();
     }
 
     /// Write `data` at an `align`-aligned offset; returns its GPU address.
@@ -651,7 +687,7 @@ impl UploadRing {
     pub fn write_aligned(&mut self, data: &[u8], align: u64) -> u64 {
         let aligned = (self.offset + align - 1) & !(align - 1);
         let end = aligned + data.len() as u64;
-        assert!(end <= self.capacity, "upload ring overflow");
+        assert!(end <= self.segment_limit(), "upload ring segment overflow");
         unsafe { ptr::copy_nonoverlapping(data.as_ptr(), self.mapped.add(aligned as usize), data.len()) };
         self.offset = end;
         self.gpu_address + aligned
@@ -664,7 +700,7 @@ impl UploadRing {
     pub fn alloc(&mut self, size: u64, align: u64) -> u64 {
         let aligned = (self.offset + align - 1) & !(align - 1);
         let end = aligned + size;
-        assert!(end <= self.capacity, "upload ring overflow");
+        assert!(end <= self.segment_limit(), "upload ring segment overflow");
         self.offset = end;
         aligned
     }
@@ -677,7 +713,7 @@ impl UploadRing {
         let aligned = (self.offset + CBV_ALIGN - 1) & !(CBV_ALIGN - 1);
         let size = data.len() as u64;
         let aligned_size = (size + CBV_ALIGN - 1) & !(CBV_ALIGN - 1);
-        assert!(aligned + aligned_size <= self.capacity, "upload ring overflow");
+        assert!(aligned + aligned_size <= self.segment_limit(), "upload ring segment overflow");
         unsafe { ptr::copy_nonoverlapping(data.as_ptr(), self.mapped.add(aligned as usize), data.len()) };
         self.offset = aligned + aligned_size;
         self.gpu_address + aligned
@@ -736,6 +772,11 @@ pub struct CommandEncoder {
     /// Parallel to `allocators`: the fence value each allocator's last submission
     /// was signaled at (0 = never submitted). Rotated in lockstep in `start()`.
     pub(super) allocator_fences: Vec<u64>,
+    /// Monotonic count of `start()` calls; `frame_index % buffer_count` selects
+    /// the per-frame ring segment. Advances in lockstep with the allocator
+    /// rotation, so the segment chosen now is the same one used `buffer_count`
+    /// frames ago — whose fence `start()` has just waited on.
+    pub(super) frame_index: u64,
     /// Resources bound as a color/depth attachment of the currently-open render
     /// pass. Vulkan keeps every sampled texture in GENERAL layout, so a texture
     /// that is both an attachment and an (unsampled) bound resource is harmless
@@ -835,11 +876,18 @@ impl crate::traits::CommandDevice for Context {
         };
         unsafe { list.Close().unwrap() };
 
-        let cbv_srv_uav_ring =
-            DescriptorRing::new(&self.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, ENCODER_HEAP_SIZE);
-        let sampler_ring =
-            DescriptorRing::new(&self.device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, ENCODER_SAMPLER_SIZE);
-        let upload_ring = UploadRing::new(&self.device, UPLOAD_RING_SIZE);
+        // Each ring is split into `buffer_count` per-frame segments so that
+        // resetting one frame's region never clobbers descriptors/upload data a
+        // still-in-flight frame is reading (the allocator pool already buffers
+        // `buffer_count` frames; the rings must match).
+        let segments = desc.buffer_count.max(1);
+        let cbv_srv_uav_ring = DescriptorRing::new(
+            &self.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, ENCODER_HEAP_SIZE, segments,
+        );
+        let sampler_ring = DescriptorRing::new(
+            &self.device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, ENCODER_SAMPLER_SIZE, segments,
+        );
+        let upload_ring = UploadRing::new(&self.device, UPLOAD_RING_SIZE, segments as u64);
 
         CommandEncoder {
             list: Some(list),
@@ -867,6 +915,7 @@ impl crate::traits::CommandDevice for Context {
                 windows::Win32::System::Threading::CreateEventW(None, false, false, None).unwrap()
             },
             allocator_fences: vec![0u64; desc.buffer_count as usize],
+            frame_index: 0,
         }
     }
 

@@ -280,15 +280,26 @@ fn pick_format(
     color_space: crate::ColorSpace,
     transparent: bool,
 ) -> (crate::TextureFormat, DXGI_FORMAT, crate::AlphaMode) {
+    // `ColorSpace::Linear` means the app writes LINEAR color and expects the
+    // presentation path to encode it to sRGB — matching Vulkan, which uses
+    // EXTENDED_SRGB_LINEAR_EXT (compositor encodes) or falls back to a _SRGB
+    // format (hardware encodes). DX12 has no scRGB-linear standard swapchain, so
+    // we take the fallback: report a _SRGB format and put a _SRGB RTV on a UNORM
+    // backbuffer (swapchain_base_format strips it) — the RTV hardware-encodes
+    // linear->sRGB on write. Reporting plain UNORM here (no encode) is what made
+    // the whole image render darker than on Vulkan.
+    //
+    // `ColorSpace::Srgb` means the app already writes sRGB-encoded values, so the
+    // RTV must NOT re-encode: plain UNORM.
     match (color_space, transparent) {
         (crate::ColorSpace::Linear, false) => (
-            crate::TextureFormat::Bgra8Unorm,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
+            crate::TextureFormat::Bgra8UnormSrgb,
+            DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
             crate::AlphaMode::Ignored,
         ),
         (crate::ColorSpace::Srgb, false) => (
-            crate::TextureFormat::Bgra8UnormSrgb,
-            DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+            crate::TextureFormat::Bgra8Unorm,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
             crate::AlphaMode::Ignored,
         ),
         (_, true) => (
