@@ -446,6 +446,12 @@ fn compile_shader_function(
     let ep_index = sf.entry_point_index();
     let ep = &sf.shader.module.entry_points[ep_index];
 
+    // Compute dispatches sub-allocate read inputs and read-write outputs from the
+    // same belt buffer; bind them all as UAVs so the shared D3D12 resource stays
+    // uniformly in UNORDERED_ACCESS (see `prepare`). Graphics draws only read
+    // storage (no in-draw writes), so they keep read-only buffers as SRVs.
+    let force_storage_read_write = ep.stage == naga::ShaderStage::Compute;
+
     // `Shader::prepare` resolves overrides, fills bindings + vertex locations, and
     // — crucially for HLSL — prunes the module to just this entry point and
     // compacts it. naga's HLSL backend emits *every* function/global in the
@@ -453,8 +459,13 @@ fn compile_shader_function(
     // write_array_size on constructs in otherwise-dead functions. Compaction
     // drops that unreachable code, which is why this no longer needs a bespoke
     // `assign_unused_bindings` pass for unused samplers.
-    let (module, module_info, _attribute_mappings) =
-        crate::Shader::prepare(sf, group_infos, group_layouts, vertex_fetch_states);
+    let (module, module_info, _attribute_mappings) = crate::Shader::prepare(
+        sf,
+        group_infos,
+        group_layouts,
+        vertex_fetch_states,
+        force_storage_read_write,
+    );
 
     let binding_map = make_binding_map(groups);
     let (sampler_heap_target, sampler_buffer_binding_map) = make_sampler_options(groups);

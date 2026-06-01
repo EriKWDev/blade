@@ -348,6 +348,7 @@ impl super::Shader {
         group_infos: &mut [crate::ShaderDataInfo],
         group_layouts: &[&crate::ShaderDataLayout],
         vertex_fetch_states: &[crate::VertexFetchState],
+        force_storage_read_write: bool,
     ) -> (
         naga::Module,
         naga::valid::ModuleInfo,
@@ -360,6 +361,28 @@ impl super::Shader {
         let ep_info = sf.shader.info.get_entry_point(ep_index);
 
         let (mut module, _) = sf.shader.resolve_constants(sf.constants);
+
+        // DX12 only: promote every storage buffer to read_write so naga emits it
+        // as an RWByteAddressBuffer (UAV) rather than a read-only ByteAddressBuffer
+        // (SRV). blade sub-allocates many logical buffers (e.g. a cull dispatch's
+        // visibility input and its draw-command output) from one belt buffer; on
+        // Vulkan they share a GENERAL-layout VkBuffer and can be read and written
+        // freely, but a single D3D12 resource has ONE state and cannot be both
+        // SHADER_RESOURCE (for an SRV binding) and UNORDERED_ACCESS (for a UAV
+        // binding) within one dispatch. Binding all storage as UAV keeps the
+        // resource uniformly in UNORDERED_ACCESS — the DX12 analog of blade's
+        // existing "every buffer gets a UAV" model. Done before
+        // fill_resource_bindings so binding_access (which classify_binding reads)
+        // and the emitted HLSL agree. Storage *textures* are AddressSpace::Handle,
+        // not Storage, so they are unaffected.
+        if force_storage_read_write {
+            for (_, var) in module.global_variables.iter_mut() {
+                if let naga::AddressSpace::Storage { ref mut access } = var.space {
+                    *access |= naga::StorageAccess::LOAD | naga::StorageAccess::STORE;
+                }
+            }
+        }
+
         Self::fill_resource_bindings(&mut module, group_infos, ep_stage, ep_info, group_layouts);
         let attribute_mappings =
             Self::fill_vertex_locations(&mut module, ep_index, vertex_fetch_states);

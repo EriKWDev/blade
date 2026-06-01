@@ -203,6 +203,7 @@ impl super::Context {
             &mut pipeline_layout.group_infos,
             bind_group_layouts,
             vertex_fetch_states,
+            false,
         );
 
         // figure out how much workgroup memory is needed for each binding.
