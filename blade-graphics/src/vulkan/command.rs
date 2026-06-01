@@ -1100,8 +1100,11 @@ impl crate::traits::RenderEncoder for super::RenderCommandEncoder<'_> {
 #[hidden_trait::expose]
 impl crate::traits::PipelineEncoder for super::PipelineEncoder<'_, '_> {
     fn bind<D: crate::ShaderData>(&mut self, group: u32, data: &D) {
+        profiling::function_scope!();
+
         let dsl = &self.layout.descriptor_set_layouts[group as usize];
         if !dsl.is_empty() {
+            profiling::scope!("data fill");
             self.update_data.clear();
             self.update_data.resize(dsl.template_size as usize, 0);
             data.fill(super::PipelineContext {

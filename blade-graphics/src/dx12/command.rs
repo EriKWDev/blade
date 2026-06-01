@@ -224,6 +224,20 @@ const READ_STATE: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATES(
     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0 | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0,
 );
 
+/// Buffer states that are read-only and therefore OR-able into a single
+/// combined state — the same buffer can legally sit in several of these at once
+/// (a device-belt chunk read as both index buffer and a vertex-stage storage
+/// SRV within one draw is exactly this). Write states (UNORDERED_ACCESS,
+/// COPY_DEST, RENDER_TARGET, …) are exclusive and never combined.
+const BUFFER_READ_STATES: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATES(
+    D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER.0
+        | D3D12_RESOURCE_STATE_INDEX_BUFFER.0
+        | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0
+        | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0
+        | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT.0
+        | D3D12_RESOURCE_STATE_COPY_SOURCE.0,
+);
+
 // ── CommandEncoder: private helpers ──────────────────────────────────────────
 
 impl super::CommandEncoder {
@@ -332,11 +346,22 @@ impl super::CommandEncoder {
             .get(&key)
             .copied()
             .unwrap_or(D3D12_RESOURCE_STATE_COMMON);
-        if cur.0 != needed.0 {
+        // When both current and needed are read-only, widen to their union so a
+        // buffer bound two ways at once (index buffer + shader SRV) ends up in a
+        // state valid for every concurrent read, rather than the last writer
+        // winning and leaving the other access in an incompatible state.
+        let both_read = (cur.0 & !BUFFER_READ_STATES.0) == 0
+            && (needed.0 & !BUFFER_READ_STATES.0) == 0;
+        let target = if both_read {
+            D3D12_RESOURCE_STATES(cur.0 | needed.0)
+        } else {
+            needed
+        };
+        if cur.0 != target.0 {
             let barrier =
-                transition_barrier(vtbl, cur, needed, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
+                transition_barrier(vtbl, cur, target, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
             unsafe { self.list.as_ref().unwrap().ResourceBarrier(&[barrier]) };
-            self.buffer_states.insert(key, needed);
+            self.buffer_states.insert(key, target);
         }
     }
 
