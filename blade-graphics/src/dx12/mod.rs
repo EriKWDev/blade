@@ -736,6 +736,14 @@ pub struct CommandEncoder {
     /// Parallel to `allocators`: the fence value each allocator's last submission
     /// was signaled at (0 = never submitted). Rotated in lockstep in `start()`.
     pub(super) allocator_fences: Vec<u64>,
+    /// Resources bound as a color/depth attachment of the currently-open render
+    /// pass. Vulkan keeps every sampled texture in GENERAL layout, so a texture
+    /// that is both an attachment and an (unsampled) bound resource is harmless
+    /// there; DX12 has no such shared state, so binding such a resource as an SRV
+    /// would transition it out of RENDER_TARGET and break the in-flight draws.
+    /// We keep it in its attachment state and skip the inert SRV transition.
+    /// Repopulated by `render()`, cleared by `begin_pass()`.
+    pub(super) active_render_targets: Vec<ResourcePtr>,
 }
 
 unsafe impl Send for CommandEncoder {}
@@ -752,9 +760,39 @@ pub struct ComputeCommandEncoder<'a> {
     pub(super) encoder: &'a mut CommandEncoder,
 }
 
+/// A `FinishOp::ResolveTo` deferred to the end of the render pass.
+pub(super) struct PendingResolve {
+    pub(super) src: TextureView,
+    pub(super) dst: TextureView,
+    pub(super) mode: crate::ResolveMode,
+}
+
 pub struct RenderCommandEncoder<'a> {
     pub(super) encoder: &'a mut CommandEncoder,
     pub(super) target_size: [u16; 2],
+    pub(super) resolves: Vec<PendingResolve>,
+}
+
+impl Drop for RenderCommandEncoder<'_> {
+    fn drop(&mut self) {
+        let resolves = std::mem::take(&mut self.resolves);
+        if resolves.is_empty() {
+            return;
+        }
+        // Unbind the render targets before resolving: transitioning an attachment
+        // out of RENDER_TARGET while it is still bound on the OM stage is flagged
+        // by the debug layer.
+        unsafe {
+            self.encoder
+                .list
+                .as_ref()
+                .unwrap()
+                .OMSetRenderTargets(0, None, false, None);
+        }
+        for r in resolves {
+            self.encoder.resolve_view(&r.src, &r.dst, r.mode);
+        }
+    }
 }
 
 pub struct ComputePipelineContext<'a> {
@@ -824,6 +862,7 @@ impl crate::traits::CommandDevice for Context {
             texture_states: std::collections::HashMap::new(),
             pending_vertex: Vec::new(),
             fence: self.queue.lock().unwrap().fence.clone(),
+            active_render_targets: Vec::new(),
             fence_event: unsafe {
                 windows::Win32::System::Threading::CreateEventW(None, false, false, None).unwrap()
             },

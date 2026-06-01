@@ -40,18 +40,30 @@ impl<T: bytemuck::Pod> crate::ShaderBindable for T {
 impl crate::ShaderBindable for super::TextureView {
     fn bind_to(&self, ctx: &mut super::PipelineContext, index: u32) {
         let slot = &ctx.group_descriptors.slots[index as usize];
+        // A resource that is also a live attachment of the open render pass stays
+        // in its RENDER_TARGET/DEPTH state: the shader cannot legally sample it
+        // (Vulkan only tolerates it because the binding is inert in GENERAL
+        // layout), so transitioning it here would break the in-flight draws.
+        let is_attachment = ctx
+            .encoder
+            .active_render_targets
+            .contains(&self.resource_ptr);
         let src = match slot.kind {
             super::BindingKind::Srv => {
                 // Storage/sampled textures do NOT auto-promote to a read state from
                 // an arbitrary prior state (e.g. UNORDERED_ACCESS), so transition.
-                ctx.encoder.require_view_state(self, READ_STATE);
+                if !is_attachment {
+                    ctx.encoder.require_view_state(self, READ_STATE);
+                }
                 super::raw_cpu_handle(self.srv_handle)
             }
             super::BindingKind::Uav => {
                 // Regular textures never auto-promote COMMON->UNORDERED_ACCESS, so
                 // this explicit transition is mandatory for storage textures.
-                ctx.encoder
-                    .require_view_state(self, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                if !is_attachment {
+                    ctx.encoder
+                        .require_view_state(self, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                }
                 super::raw_cpu_handle(self.uav_handle)
             }
             other => panic!("unexpected binding kind {:?} for TextureView", other),
@@ -410,6 +422,7 @@ impl super::CommandEncoder {
     /// Called at the start of every pass. Inserts the automatic barrier
     /// when `auto_barriers` is enabled (matching Vulkan's `begin_pass`).
     fn begin_pass(&mut self, _label: &str) {
+        self.active_render_targets.clear();
         if self.auto_barriers {
             self.barrier();
         }
@@ -450,6 +463,7 @@ impl super::CommandEncoder {
         let mut target_size = [0u16; 2];
         let mut rtv_handles: Vec<D3D12_CPU_DESCRIPTOR_HANDLE> = Vec::new();
         let mut dsv_handle: Option<D3D12_CPU_DESCRIPTOR_HANDLE> = None;
+        let mut resolves: Vec<super::PendingResolve> = Vec::new();
 
         // Transition all attachments first (require_state borrows the list internally),
         // then record clears / OMSetRenderTargets under a single list borrow.
@@ -458,12 +472,20 @@ impl super::CommandEncoder {
             // -> RENDER_TARGET (not a promotable state; tracked so a later sample
             // or present transitions out of it correctly).
             self.require_view_state(&rt.view, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            self.active_render_targets.push(rt.view.resource_ptr);
             rtv_handles.push(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
+            if let crate::FinishOp::ResolveTo { view, mode, .. } = rt.finish_op {
+                resolves.push(super::PendingResolve { src: rt.view, dst: view, mode });
+            }
         }
         if let Some(ref rt) = targets.depth_stencil {
             target_size = rt.view.target_size;
             self.require_view_state(&rt.view, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            self.active_render_targets.push(rt.view.resource_ptr);
             dsv_handle = Some(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
+            if let crate::FinishOp::ResolveTo { view, mode, .. } = rt.depth_finish_op {
+                resolves.push(super::PendingResolve { src: rt.view, dst: view, mode });
+            }
         }
 
         let list = self.list.as_ref().unwrap();
@@ -512,7 +534,65 @@ impl super::CommandEncoder {
             }]);
         }
 
-        super::RenderCommandEncoder { encoder: self, target_size }
+        super::RenderCommandEncoder { encoder: self, target_size, resolves }
+    }
+
+    /// Perform an MSAA resolve from `src` (the multisampled attachment) into `dst`.
+    /// Emitted at render-pass end for each `FinishOp::ResolveTo`. Mirrors Vulkan's
+    /// resolve-attachment, which blade expresses as a finish op.
+    pub(super) fn resolve_view(
+        &mut self,
+        src: &super::TextureView,
+        dst: &super::TextureView,
+        mode: crate::ResolveMode,
+    ) {
+        self.require_view_state(src, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+        self.require_view_state(dst, D3D12_RESOURCE_STATE_RESOLVE_DEST);
+        let format = super::map_texture_format(dst.format);
+        let src_res = borrowed_resource(src.resource_ptr);
+        let dst_res = borrowed_resource(dst.resource_ptr);
+        let src_subs = src.subresources();
+        let dst_subs = dst.subresources();
+        let list = self.list.as_ref().unwrap();
+        for (&s, &d) in src_subs.iter().zip(dst_subs.iter()) {
+            match mode {
+                crate::ResolveMode::Average => unsafe {
+                    list.ResolveSubresource(
+                        dst_res.as_ref().unwrap(),
+                        d,
+                        src_res.as_ref().unwrap(),
+                        s,
+                        format,
+                    );
+                },
+                _ => {
+                    // Min/Max/Sample0 (e.g. depth resolve) need the typed-mode
+                    // entry point on ID3D12GraphicsCommandList1.
+                    let d3d_mode = match mode {
+                        crate::ResolveMode::Min => D3D12_RESOLVE_MODE_MIN,
+                        crate::ResolveMode::Max => D3D12_RESOLVE_MODE_MAX,
+                        // Sample0 has no DX12 equivalent; MIN matches the common
+                        // "nearest depth" reduction used for depth resolves.
+                        crate::ResolveMode::Sample0 => D3D12_RESOLVE_MODE_MIN,
+                        crate::ResolveMode::Average => D3D12_RESOLVE_MODE_AVERAGE,
+                    };
+                    let list1: ID3D12GraphicsCommandList1 = list.cast().unwrap();
+                    unsafe {
+                        list1.ResolveSubresourceRegion(
+                            dst_res.as_ref().unwrap(),
+                            d,
+                            0,
+                            0,
+                            src_res.as_ref().unwrap(),
+                            s,
+                            None,
+                            format,
+                            d3d_mode,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
