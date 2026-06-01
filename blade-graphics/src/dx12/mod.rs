@@ -144,6 +144,12 @@ pub struct Context {
     pub(super) device_information: crate::DeviceInformation,
     pub(super) vendor: crate::GpuVendor,
     pub(super) factory: IDXGIFactory4,
+    /// Per-encoder shader-visible CBV/SRV/UAV heap capacity. The heap is split
+    /// into `buffer_count` per-frame segments, so this must be large enough that
+    /// one frame's binds fit in `size / buffer_count`. Resource-binding tier 1/2
+    /// cap a shader-visible heap at 1,000,000; tier 3 (most discrete GPUs) has no
+    /// such cap, so we use a larger heap there to keep per-frame headroom.
+    pub(super) cbv_srv_uav_heap_size: u32,
 }
 
 unsafe impl Send for Context {}
@@ -892,7 +898,7 @@ impl crate::traits::CommandDevice for Context {
         // `buffer_count` frames; the rings must match).
         let segments = desc.buffer_count.max(1);
         let cbv_srv_uav_ring = DescriptorRing::new(
-            &self.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, ENCODER_HEAP_SIZE, segments,
+            &self.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, self.cbv_srv_uav_heap_size, segments,
         );
         let sampler_ring = DescriptorRing::new(
             &self.device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, ENCODER_SAMPLER_SIZE, segments,

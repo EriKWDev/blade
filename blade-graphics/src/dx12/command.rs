@@ -308,17 +308,21 @@ impl super::CommandEncoder {
         self.require_subresources(vtbl, total, std::iter::once(sub), needed);
     }
 
-    /// Transition a buffer (whole resource). Host-visible buffers are skipped:
-    /// they live on a CUSTOM heap in COMMON, and buffers auto-promote from COMMON
-    /// to whatever state each use needs (then decay back at the ExecuteCommandLists
-    /// boundary), so an explicit transition is unnecessary and would only fight
-    /// the promotion.
+    /// Transition a buffer (whole resource). Host-visible buffers are tracked the
+    /// same as device buffers: they live on a CUSTOM heap (NOT the GENERIC_READ-
+    /// locked UPLOAD heap), so they are transitionable, and they MUST be
+    /// transitioned. The "buffers auto-promote from COMMON" rule only holds while
+    /// the buffer is still in COMMON — once a belt copy promotes it to COPY_DEST
+    /// (write state), it stays there and does NOT auto-promote to
+    /// INDIRECT_ARGUMENT / UNORDERED_ACCESS for a later use. Skipping host-visible
+    /// buffers here left compute-produced indirect-arg/count buffers in COPY_DEST
+    /// at ExecuteIndirect → device removal (DEVICE_HUNG).
     pub(super) fn require_buffer_state(
         &mut self,
         buffer: &super::Buffer,
         needed: D3D12_RESOURCE_STATES,
     ) {
-        if !buffer.mapped_ptr.is_null() || buffer.resource_ptr.is_null() {
+        if buffer.resource_ptr.is_null() {
             return;
         }
         let vtbl = unsafe { buffer.resource().as_raw() as super::ResourcePtr };

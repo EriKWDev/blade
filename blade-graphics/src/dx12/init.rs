@@ -71,6 +71,30 @@ impl Context {
             }
         }
 
+        // The per-encoder CBV/SRV/UAV ring is split into per-frame segments, so a
+        // heavy frame can need well over the tier-1/2 cap of 1,000,000 once halved.
+        // Resource-binding tier 3 lifts that cap, so use a larger heap there.
+        let cbv_srv_uav_heap_size = {
+            let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
+            let tier = if device
+                .CheckFeatureSupport(
+                    D3D12_FEATURE_D3D12_OPTIONS,
+                    &mut options as *mut _ as *mut std::ffi::c_void,
+                    std::mem::size_of::<D3D12_FEATURE_DATA_D3D12_OPTIONS>() as u32,
+                )
+                .is_ok()
+            {
+                options.ResourceBindingTier
+            } else {
+                D3D12_RESOURCE_BINDING_TIER_1
+            };
+            if tier.0 >= D3D12_RESOURCE_BINDING_TIER_3.0 {
+                4_000_000
+            } else {
+                super::ENCODER_HEAP_SIZE
+            }
+        };
+
         let queue_desc = D3D12_COMMAND_QUEUE_DESC {
             Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
             Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
@@ -144,6 +168,7 @@ impl Context {
             },
             vendor,
             factory,
+            cbv_srv_uav_heap_size,
         })
     }
 
