@@ -1,3 +1,4 @@
+use windows::core::Interface;
 use windows::Win32::{
         Foundation::HANDLE,
         Graphics::{
@@ -17,6 +18,16 @@ impl Context {
             if D3D12GetDebugInterface(&mut debug).is_ok() {
                 if let Some(debug) = debug {
                     debug.EnableDebugLayer();
+                    // GPU-based validation instruments shader execution and is the
+                    // only layer that catches GPU-side hazards — descriptor-heap
+                    // corruption, out-of-bounds / uninitialized reads, a descriptor
+                    // pointing at the wrong resource — none of which the base debug
+                    // layer (API-parameter checks only) reports. It is expensive but
+                    // exactly what surfaces otherwise-silent intermittent glitches.
+                    if let Ok(debug1) = debug.cast::<ID3D12Debug1>() {
+                        debug1.SetEnableGPUBasedValidation(true);
+                        debug1.SetEnableSynchronizedCommandQueueValidation(true);
+                    }
                 }
             }
         }
