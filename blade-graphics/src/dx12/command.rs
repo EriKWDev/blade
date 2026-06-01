@@ -40,30 +40,22 @@ impl<T: bytemuck::Pod> crate::ShaderBindable for T {
 impl crate::ShaderBindable for super::TextureView {
     fn bind_to(&self, ctx: &mut super::PipelineContext, index: u32) {
         let slot = &ctx.group_descriptors.slots[index as usize];
-        // A resource that is also a live attachment of the open render pass stays
-        // in its RENDER_TARGET/DEPTH state: the shader cannot legally sample it
-        // (Vulkan only tolerates it because the binding is inert in GENERAL
-        // layout), so transitioning it here would break the in-flight draws.
-        let is_attachment = ctx
-            .encoder
-            .active_render_targets
-            .contains(&self.resource_ptr);
         let src = match slot.kind {
             super::BindingKind::Srv => {
                 // Storage/sampled textures do NOT auto-promote to a read state from
-                // an arbitrary prior state (e.g. UNORDERED_ACCESS), so transition.
-                if !is_attachment {
-                    ctx.encoder.require_view_state(self, READ_STATE);
-                }
+                // an arbitrary prior state (e.g. UNORDERED_ACCESS), so transition —
+                // except for any subresource that is the open pass's live
+                // attachment (kept in its RT/DEPTH state).
+                ctx.encoder.require_view_state_skip_active_rt(self, READ_STATE);
                 super::raw_cpu_handle(self.srv_handle)
             }
             super::BindingKind::Uav => {
                 // Regular textures never auto-promote COMMON->UNORDERED_ACCESS, so
                 // this explicit transition is mandatory for storage textures.
-                if !is_attachment {
-                    ctx.encoder
-                        .require_view_state(self, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                }
+                ctx.encoder.require_view_state_skip_active_rt(
+                    self,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                );
                 super::raw_cpu_handle(self.uav_handle)
             }
             other => panic!("unexpected binding kind {:?} for TextureView", other),
@@ -279,6 +271,28 @@ impl super::CommandEncoder {
         self.require_subresources(view.resource_ptr, total, subs.into_iter(), needed);
     }
 
+    /// Like `require_view_state`, but leaves any subresource that is a live
+    /// attachment of the open render pass in its RENDER_TARGET/DEPTH state. Used
+    /// when binding a sampled/storage texture: a subresource that is also the
+    /// current attachment cannot be transitioned without breaking the in-flight
+    /// draws (Vulkan tolerates the overlap via GENERAL layout; DX12 cannot). Any
+    /// *other* subresource of the same resource (e.g. a different bloom mip) is
+    /// transitioned normally.
+    pub(super) fn require_view_state_skip_active_rt(
+        &mut self,
+        view: &super::TextureView,
+        needed: D3D12_RESOURCE_STATES,
+    ) {
+        let total = view.total_subresources();
+        let resource = view.resource_ptr;
+        let subs: Vec<u32> = view
+            .subresources()
+            .into_iter()
+            .filter(|&s| !self.active_render_targets.contains(&(resource, s)))
+            .collect();
+        self.require_subresources(resource, total, subs.into_iter(), needed);
+    }
+
     /// Transition the single (plane-0) subresource a texture *piece* (copy)
     /// addresses. `total` must include planes so the tracking Vec stays the same
     /// size as the view path uses for the same texture.
@@ -472,7 +486,9 @@ impl super::CommandEncoder {
             // -> RENDER_TARGET (not a promotable state; tracked so a later sample
             // or present transitions out of it correctly).
             self.require_view_state(&rt.view, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            self.active_render_targets.push(rt.view.resource_ptr);
+            for sub in rt.view.subresources() {
+                self.active_render_targets.push((rt.view.resource_ptr, sub));
+            }
             rtv_handles.push(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
             if let crate::FinishOp::ResolveTo { view, mode, .. } = rt.finish_op {
                 resolves.push(super::PendingResolve { src: rt.view, dst: view, mode });
@@ -481,7 +497,9 @@ impl super::CommandEncoder {
         if let Some(ref rt) = targets.depth_stencil {
             target_size = rt.view.target_size;
             self.require_view_state(&rt.view, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-            self.active_render_targets.push(rt.view.resource_ptr);
+            for sub in rt.view.subresources() {
+                self.active_render_targets.push((rt.view.resource_ptr, sub));
+            }
             dsv_handle = Some(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
             if let crate::FinishOp::ResolveTo { view, mode, .. } = rt.depth_finish_op {
                 resolves.push(super::PendingResolve { src: rt.view, dst: view, mode });

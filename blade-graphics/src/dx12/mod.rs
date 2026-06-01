@@ -777,14 +777,18 @@ pub struct CommandEncoder {
     /// rotation, so the segment chosen now is the same one used `buffer_count`
     /// frames ago — whose fence `start()` has just waited on.
     pub(super) frame_index: u64,
-    /// Resources bound as a color/depth attachment of the currently-open render
-    /// pass. Vulkan keeps every sampled texture in GENERAL layout, so a texture
-    /// that is both an attachment and an (unsampled) bound resource is harmless
-    /// there; DX12 has no such shared state, so binding such a resource as an SRV
-    /// would transition it out of RENDER_TARGET and break the in-flight draws.
-    /// We keep it in its attachment state and skip the inert SRV transition.
+    /// (resource, subresource) pairs bound as a color/depth attachment of the
+    /// currently-open render pass. Vulkan keeps every sampled texture in GENERAL
+    /// layout, so a subresource that is both an attachment and an (unsampled)
+    /// bound resource is harmless there; DX12 has no such shared state, so
+    /// transitioning it to SHADER_RESOURCE on bind would break the in-flight
+    /// draws. We keep exactly those subresources in their attachment state and
+    /// skip only their transition. This MUST be per-subresource: bloom binds mip
+    /// `i-1` (SRV) of the same texture whose mip `i` is the render target — those
+    /// are different subresources and the SRV mip absolutely must be transitioned
+    /// (keying on the resource alone would skip it → stale RT data sampled).
     /// Repopulated by `render()`, cleared by `begin_pass()`.
-    pub(super) active_render_targets: Vec<ResourcePtr>,
+    pub(super) active_render_targets: Vec<(ResourcePtr, u32)>,
 }
 
 unsafe impl Send for CommandEncoder {}
