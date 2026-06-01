@@ -534,6 +534,19 @@ unsafe fn log_breadcrumb_node_v0(mut node: *const D3D12_AUTO_BREADCRUMB_NODE) {
     }
 }
 
+/// If the device has been removed, dump debug messages + DRED and panic with
+/// `what` as context. A no-op while the device is healthy, so it can be called
+/// after fallible calls (Present, ExecuteCommandLists, Signal) whose own error
+/// is otherwise swallowed — turning a later silent abort into an actionable
+/// device-removal report at the point it actually happened.
+pub(super) fn panic_if_device_removed(device: &ID3D12Device, what: &str) {
+    if let Some(reason) = device_removed_reason(device) {
+        log_debug_messages(device);
+        log_dred(device);
+        panic!("DX12 device removed during {what}: {reason}");
+    }
+}
+
 /// Unwrap a D3D12 call's result, dumping debug-layer messages and the
 /// device-removed reason on failure so the panic is actionable.
 pub(super) fn expect_d3d12<T>(device: &ID3D12Device, what: &str, r: windows::core::Result<T>) -> T {
@@ -1237,16 +1250,25 @@ impl crate::traits::CommandDevice for Context {
         };
 
         if let Some(sp) = after {
-            unsafe { queue.raw.Wait(&queue.fence, sp.progress).unwrap() };
+            if let Err(e) = unsafe { queue.raw.Wait(&queue.fence, sp.progress) } {
+                panic_if_device_removed(&self.device, "queue Wait");
+                panic!("DX12 queue Wait failed: {e}");
+            }
         }
 
         let cmd_lists: [Option<ID3D12CommandList>; 1] =
             [Some(list.cast::<ID3D12CommandList>().unwrap())];
         unsafe { queue.raw.ExecuteCommandLists(&cmd_lists) };
+        // ExecuteCommandLists reports a bad command list only via device removal;
+        // surface it here (with DRED) instead of at some later silent failure.
+        panic_if_device_removed(&self.device, "ExecuteCommandLists");
 
         queue.last_progress += 1;
         let progress = queue.last_progress;
-        unsafe { queue.raw.Signal(&queue.fence, progress).unwrap() };
+        if let Err(e) = unsafe { queue.raw.Signal(&queue.fence, progress) } {
+            panic_if_device_removed(&self.device, "Signal");
+            panic!("DX12 queue Signal failed: {e}");
+        }
 
         // Record this submission's fence value for the allocator currently in use
         // (index 0 — no rotation happens between start() and submit()), so the
@@ -1258,6 +1280,10 @@ impl crate::traits::CommandDevice for Context {
         if let Some(pres) = encoder.present.take() {
             let sync_interval: u32 = if pres.display_sync { 1 } else { 0 };
             let _ = unsafe { pres.swapchain.Present(sync_interval, DXGI_PRESENT(0)) };
+            // Present swallows benign errors (occluded/resize), but a removed
+            // device must not pass silently — it is the usual place a prior
+            // frame's GPU fault first becomes visible on the CPU.
+            panic_if_device_removed(&self.device, "Present");
         }
 
         SyncPoint { progress }
@@ -1268,6 +1294,10 @@ impl crate::traits::CommandDevice for Context {
         if unsafe { queue.fence.GetCompletedValue() } >= sp.progress {
             return true;
         }
+        // A removed device resets the fence to UINT64_MAX, so GetCompletedValue
+        // above passes and we never reach here — but if it didn't, the event
+        // would never fire. Surface a removal rather than blocking/timing out.
+        panic_if_device_removed(&self.device, "wait_for");
         unsafe {
             queue.fence.SetEventOnCompletion(sp.progress, queue.fence_event).unwrap();
         }
