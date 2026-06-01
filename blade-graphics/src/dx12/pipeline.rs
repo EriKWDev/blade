@@ -233,10 +233,6 @@ fn build_root_signature(
     }
 
     let blob = blob.unwrap();
-    // Use expect_d3d12 (not bare unwrap): if a prior frame's GPU work already
-    // removed the device, this call fails with 0x887A0005 and expect_d3d12 prints
-    // GetDeviceRemovedReason + drains the debug queue, which is far more
-    // actionable than a bare "device suspended" unwrap panic here.
     let rs: ID3D12RootSignature = super::expect_d3d12(device, "CreateRootSignature", unsafe {
         device.CreateRootSignature(
             0,
