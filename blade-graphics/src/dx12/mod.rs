@@ -354,7 +354,11 @@ fn dred_pass_for(
     history: *const D3D12_AUTO_BREADCRUMB_OP,
     done: u32,
 ) -> Option<String> {
-    let id: u32 = list_name.strip_prefix("blade-enc-")?.parse().ok()?;
+    // The debug layer appends suffixes (e.g. "blade-enc-1 (debug layer
+    // indirect)"), so take the leading run of digits after the prefix.
+    let rest = list_name.strip_prefix("blade-enc-")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let id: u32 = digits.parse().ok()?;
     if history.is_null() {
         return None;
     }

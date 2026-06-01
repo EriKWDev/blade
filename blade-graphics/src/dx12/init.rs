@@ -13,6 +13,18 @@ use super::{Context, DescriptorHeap, LinearAllocator, Queue};
 
 impl Context {
     pub unsafe fn init(desc: super::super::ContextDesc) -> Result<Self, super::super::NotSupportedError> {
+        // GPU-based validation is enormously expensive (it patches every shader
+        // memory access) and can itself push a heavy frame past the Windows TDR
+        // timeout — a device "hang" that is a validation artifact, not an app bug.
+        // It is on by default under validation, but can be disabled with
+        // BLADE_DX12_GPU_VALIDATION=0 to keep the base debug layer + DRED while
+        // isolating whether a hang is real. The base layer's API checks and DRED
+        // breadcrumbs stay on regardless.
+        let gpu_validation = desc.validation
+            && !matches!(
+                std::env::var("BLADE_DX12_GPU_VALIDATION").as_deref(),
+                Ok("0") | Ok("off") | Ok("false")
+            );
         if desc.validation {
             let mut debug: Option<ID3D12Debug> = None;
             if D3D12GetDebugInterface(&mut debug).is_ok() {
@@ -22,11 +34,12 @@ impl Context {
                     // only layer that catches GPU-side hazards — descriptor-heap
                     // corruption, out-of-bounds / uninitialized reads, a descriptor
                     // pointing at the wrong resource — none of which the base debug
-                    // layer (API-parameter checks only) reports. It is expensive but
-                    // exactly what surfaces otherwise-silent intermittent glitches.
-                    if let Ok(debug1) = debug.cast::<ID3D12Debug1>() {
-                        debug1.SetEnableGPUBasedValidation(true);
-                        debug1.SetEnableSynchronizedCommandQueueValidation(true);
+                    // layer (API-parameter checks only) reports.
+                    if gpu_validation {
+                        if let Ok(debug1) = debug.cast::<ID3D12Debug1>() {
+                            debug1.SetEnableGPUBasedValidation(true);
+                            debug1.SetEnableSynchronizedCommandQueueValidation(true);
+                        }
                     }
                 }
             }
@@ -62,7 +75,7 @@ impl Context {
             dev.unwrap()
         };
 
-        if desc.validation {
+        if gpu_validation {
             // GBV defaults to STATE_TRACKING_ONLY; GUARDED_VALIDATION additionally
             // patches every shader resource access with a bounds guard, catching
             // out-of-bounds buffer/texture/descriptor reads at the shader level
