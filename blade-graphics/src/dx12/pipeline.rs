@@ -300,15 +300,18 @@ fn compile_hlsl(source: &str, entry: &str, target: &str, debug: bool) -> Vec<u8>
 
         let entry_w = wide_nul(entry);
         let target_w = wide_nul(target);
+        // naga emits HLSL-2018-style code (notably vector `?:` ternaries for
+        // `select`); DXC defaults to HLSL 2021, which rejects them. Pin 2018.
         // -Zi (debug info) + -Od (no opt) in validation builds; DXC defaults to
         // full optimization otherwise. Keep the DXIL validator on so dxil.dll
         // signs the output (unsigned DXIL is rejected by the runtime).
+        let hv = [wide_nul("-HV"), wide_nul("2018")];
         let dbg = [wide_nul("-Zi"), wide_nul("-Od")];
-        let args: Vec<PCWSTR> = if debug {
-            vec![PCWSTR(dbg[0].as_ptr()), PCWSTR(dbg[1].as_ptr())]
-        } else {
-            Vec::new()
-        };
+        let mut args: Vec<PCWSTR> = vec![PCWSTR(hv[0].as_ptr()), PCWSTR(hv[1].as_ptr())];
+        if debug {
+            args.push(PCWSTR(dbg[0].as_ptr()));
+            args.push(PCWSTR(dbg[1].as_ptr()));
+        }
 
         let result: IDxcOperationResult = compiler
             .Compile(
