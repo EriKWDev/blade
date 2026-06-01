@@ -266,6 +266,70 @@ fn wide_nul(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Drop top-level function definitions whose signature was already emitted.
+///
+/// naga's HLSL backend keys its image-query/sample helpers (`NagaRWDimensions2D`
+/// etc.) on `ImageClass`, which for storage textures includes the format and
+/// access — but the generated function *name* collapses all storage to `"RW"`.
+/// Two storage textures that differ only in format/access thus emit two
+/// identically-named, identical-bodied helpers. FXC tolerated that; DXC rejects
+/// it ("redefinition of 'NagaRWDimensions2D'"). The duplicates are byte-identical,
+/// so dropping the repeats is semantically inert.
+///
+/// A top-level item is a brace-balanced block (functions, `cbuffer`, `struct`)
+/// or a `;`-terminated statement. Only function definitions are deduplicated, and
+/// only when an identical normalized signature has already been kept — distinct
+/// overloads (e.g. `naga_mod(int,int)` vs `naga_mod(uint,uint)`) have different
+/// signatures and are preserved.
+fn dedup_hlsl_functions(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut item_start = 0usize;
+    let mut i = 0usize;
+    while i < n {
+        match bytes[i] {
+            b';' => {
+                out.push_str(&src[item_start..=i]);
+                item_start = i + 1;
+                i += 1;
+            }
+            b'{' => {
+                let header = &src[item_start..i];
+                let mut depth = 1u32;
+                let mut j = i + 1;
+                while j < n && depth != 0 {
+                    match bytes[j] {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                let block = &src[item_start..j];
+                let trimmed = header.trim_start();
+                let is_fn = header.contains(')')
+                    && !trimmed.starts_with("cbuffer")
+                    && !trimmed.starts_with("struct");
+                if is_fn {
+                    let sig: String = header.split_whitespace().collect::<Vec<_>>().join(" ");
+                    if seen.insert(sig) {
+                        out.push_str(block);
+                    }
+                } else {
+                    out.push_str(block);
+                }
+                item_start = j;
+                i = j;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&src[item_start..]);
+    out
+}
+
 /// Read an IDxcBlob's bytes as a UTF-8 string (for the DXC error/warning buffer).
 unsafe fn dxc_blob_str(blob: &windows::Win32::Graphics::Direct3D::Dxc::IDxcBlob) -> String {
     let ptr = blob.GetBufferPointer() as *const u8;
@@ -283,6 +347,9 @@ unsafe fn dxc_blob_str(blob: &windows::Win32::Graphics::Direct3D::Dxc::IDxcBlob)
 fn compile_hlsl(source: &str, entry: &str, target: &str, debug: bool) -> Vec<u8> {
     use windows::core::PCWSTR;
     use windows::Win32::Graphics::Direct3D::Dxc::*;
+
+    let source = dedup_hlsl_functions(source);
+    let source = source.as_str();
 
     unsafe {
         let utils: IDxcUtils = DxcCreateInstance(&CLSID_DxcUtils)
