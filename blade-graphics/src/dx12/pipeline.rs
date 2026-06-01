@@ -306,8 +306,20 @@ fn compile_hlsl(source: &str, entry: &str, target: &str, debug: bool) -> Vec<u8>
         // full optimization otherwise. Keep the DXIL validator on so dxil.dll
         // signs the output (unsigned DXIL is rejected by the runtime).
         let hv = [wide_nul("-HV"), wide_nul("2018")];
+        // naga always emits `if ((a == b))` (redundant parens) and writes vectors
+        // to narrower storage targets; both are harmless codegen artifacts that
+        // otherwise flood the log on every shader. Silence those categories.
+        let wno = [
+            wide_nul("-Wno-parentheses-equality"),
+            wide_nul("-Wno-conversion"),
+        ];
         let dbg = [wide_nul("-Zi"), wide_nul("-Od")];
-        let mut args: Vec<PCWSTR> = vec![PCWSTR(hv[0].as_ptr()), PCWSTR(hv[1].as_ptr())];
+        let mut args: Vec<PCWSTR> = vec![
+            PCWSTR(hv[0].as_ptr()),
+            PCWSTR(hv[1].as_ptr()),
+            PCWSTR(wno[0].as_ptr()),
+            PCWSTR(wno[1].as_ptr()),
+        ];
         if debug {
             args.push(PCWSTR(dbg[0].as_ptr()));
             args.push(PCWSTR(dbg[1].as_ptr()));
