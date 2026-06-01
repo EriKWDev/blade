@@ -464,8 +464,25 @@ impl super::CommandEncoder {
 
     /// Called at the start of every pass. Inserts the automatic barrier
     /// when `auto_barriers` is enabled (matching Vulkan's `begin_pass`).
-    fn begin_pass(&mut self, _label: &str) {
+    fn begin_pass(&mut self, label: &str) {
         self.active_render_targets.clear();
+        // Emit the pass label as a marker. PIX/RenderDoc surface it, and — the
+        // reason it's here — DRED records it as the breadcrumb context for the
+        // ops that follow, so a device-removal names the pass that hung.
+        if let Some(list) = self.list.as_ref() {
+            if !label.is_empty() {
+                let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+                // PIX_EVENT_UNICODE_VERSION: the marker payload is a UTF-16 string.
+                const PIX_EVENT_UNICODE_VERSION: u32 = 2;
+                unsafe {
+                    list.SetMarker(
+                        PIX_EVENT_UNICODE_VERSION,
+                        Some(wide.as_ptr() as *const std::ffi::c_void),
+                        (wide.len() * 2) as u32,
+                    );
+                }
+            }
+        }
         if self.auto_barriers {
             self.barrier();
         }

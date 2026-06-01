@@ -303,44 +303,47 @@ unsafe fn pcwstr_to_string(s: windows::core::PCWSTR) -> String {
     s.to_string().unwrap_or_default()
 }
 
+fn breadcrumb_op_name(op: D3D12_AUTO_BREADCRUMB_OP) -> &'static str {
+    match op {
+        D3D12_AUTO_BREADCRUMB_OP_SETMARKER => "SetMarker",
+        D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT => "BeginEvent",
+        D3D12_AUTO_BREADCRUMB_OP_ENDEVENT => "EndEvent",
+        D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED => "DrawInstanced",
+        D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED => "DrawIndexedInstanced",
+        D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT => "ExecuteIndirect",
+        D3D12_AUTO_BREADCRUMB_OP_DISPATCH => "Dispatch",
+        D3D12_AUTO_BREADCRUMB_OP_COPYBUFFERREGION => "CopyBufferRegion",
+        D3D12_AUTO_BREADCRUMB_OP_COPYTEXTUREREGION => "CopyTextureRegion",
+        D3D12_AUTO_BREADCRUMB_OP_RESOLVESUBRESOURCE => "ResolveSubresource",
+        D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW => "ClearRenderTargetView",
+        D3D12_AUTO_BREADCRUMB_OP_CLEARDEPTHSTENCILVIEW => "ClearDepthStencilView",
+        D3D12_AUTO_BREADCRUMB_OP_CLEARUNORDEREDACCESSVIEW => "ClearUnorderedAccessView",
+        _ => "other",
+    }
+}
+
 /// Dump DRED auto-breadcrumbs and page-fault data after a device removal. The
 /// last completed breadcrumb value vs. the op count identifies the command-list
-/// operation the GPU was executing when it hung; the page-fault VA + the named
-/// allocation it falls in identifies a bad address. Only populated when DRED was
-/// armed at init (validation builds).
+/// operation the GPU was executing when it hung; the breadcrumb context (the
+/// pass label emitted as a marker in `begin_pass`) names the pass; the
+/// page-fault VA + named allocation identifies a bad address. Only populated
+/// when DRED was armed at init (validation builds).
 pub(super) fn log_dred(device: &ID3D12Device) {
+    // Prefer the v1 output, which carries per-op context strings (our pass
+    // markers); fall back to v0 (op type only) on older runtimes.
+    if let Ok(dred1) = device.cast::<ID3D12DeviceRemovedExtendedData1>() {
+        unsafe { log_dred_breadcrumbs1(&dred1) };
+    } else if let Ok(dred) = device.cast::<ID3D12DeviceRemovedExtendedData>() {
+        if let Ok(bc) = unsafe { dred.GetAutoBreadcrumbsOutput() } {
+            unsafe { log_breadcrumb_node_v0(bc.pHeadAutoBreadcrumbNode) };
+        }
+    }
+
     let dred: ID3D12DeviceRemovedExtendedData = match device.cast() {
         Ok(d) => d,
-        Err(_) => return, // DRED not armed
+        Err(_) => return,
     };
     unsafe {
-        if let Ok(bc) = dred.GetAutoBreadcrumbsOutput() {
-            let mut node = bc.pHeadAutoBreadcrumbNode;
-            while !node.is_null() {
-                let n = &*node;
-                let list = pcwstr_to_string(n.pCommandListDebugNameW);
-                let queue = pcwstr_to_string(n.pCommandQueueDebugNameW);
-                let done = if n.pLastBreadcrumbValue.is_null() {
-                    0
-                } else {
-                    *n.pLastBreadcrumbValue
-                };
-                // A node fully executed (done == count) didn't hang; report the
-                // one that stopped partway, where op[done] is the hung operation.
-                if done < n.BreadcrumbCount {
-                    log::error!(
-                        "[DRED] command list '{list}' (queue '{queue}') hung after {done}/{} ops; hung op = {:?}",
-                        n.BreadcrumbCount,
-                        if n.pCommandHistory.is_null() {
-                            D3D12_AUTO_BREADCRUMB_OP(-1)
-                        } else {
-                            *n.pCommandHistory.add(done as usize)
-                        },
-                    );
-                }
-                node = n.pNext;
-            }
-        }
         if let Ok(pf) = dred.GetPageFaultAllocationOutput() {
             if pf.PageFaultVA != 0 {
                 log::error!("[DRED] GPU page fault at VA {:#x}", pf.PageFaultVA);
@@ -360,6 +363,98 @@ pub(super) fn log_dred(device: &ID3D12Device) {
                 }
             }
         }
+    }
+}
+
+/// Report a hung breadcrumb node: the op the GPU stopped on, the few ops
+/// preceding it (the pass's command pattern), and `context` (the pass label
+/// marker active at the hung op, empty if unavailable).
+unsafe fn report_hung_node(
+    list: &str,
+    queue: &str,
+    history: *const D3D12_AUTO_BREADCRUMB_OP,
+    count: u32,
+    done: u32,
+    context: &str,
+) {
+    // Skip nodes that fully executed (done == count) — those didn't hang. Also
+    // skip the debug layer's own GBV helper lists (1-op internal command lists).
+    if done >= count || count <= 1 {
+        return;
+    }
+    let hung = if history.is_null() {
+        D3D12_AUTO_BREADCRUMB_OP(-1)
+    } else {
+        *history.add(done as usize)
+    };
+    let pass = if context.is_empty() { "<unnamed>" } else { context };
+    log::error!(
+        "[DRED] hung in pass '{pass}' (list '{list}', queue '{queue}') after {done}/{count} ops; hung op = {} {:?}",
+        breadcrumb_op_name(hung),
+        hung,
+    );
+    if !history.is_null() {
+        let start = done.saturating_sub(8);
+        let recent: Vec<&str> = (start..done)
+            .map(|i| breadcrumb_op_name(*history.add(i as usize)))
+            .collect();
+        log::error!("[DRED]   preceding ops [{start}..{done}]: {}", recent.join(", "));
+    }
+}
+
+unsafe fn log_dred_breadcrumbs1(dred: &ID3D12DeviceRemovedExtendedData1) {
+    let bc = match dred.GetAutoBreadcrumbsOutput1() {
+        Ok(bc) => bc,
+        Err(_) => return,
+    };
+    let mut node = bc.pHeadAutoBreadcrumbNode;
+    while !node.is_null() {
+        let n = &*node;
+        let done = if n.pLastBreadcrumbValue.is_null() {
+            0
+        } else {
+            *n.pLastBreadcrumbValue
+        };
+        // Find the marker context whose breadcrumb index is the greatest <= the
+        // hung op — that is the pass label that was active when the GPU stopped.
+        let mut context = String::new();
+        let mut best: i64 = -1;
+        for c in 0..n.BreadcrumbContextsCount {
+            let ctx = &*n.pBreadcrumbContexts.add(c as usize);
+            if ctx.BreadcrumbIndex <= done && ctx.BreadcrumbIndex as i64 > best {
+                best = ctx.BreadcrumbIndex as i64;
+                context = pcwstr_to_string(ctx.pContextString);
+            }
+        }
+        report_hung_node(
+            &pcwstr_to_string(n.pCommandListDebugNameW),
+            &pcwstr_to_string(n.pCommandQueueDebugNameW),
+            n.pCommandHistory,
+            n.BreadcrumbCount,
+            done,
+            &context,
+        );
+        node = n.pNext;
+    }
+}
+
+unsafe fn log_breadcrumb_node_v0(mut node: *const D3D12_AUTO_BREADCRUMB_NODE) {
+    while !node.is_null() {
+        let n = &*node;
+        let done = if n.pLastBreadcrumbValue.is_null() {
+            0
+        } else {
+            *n.pLastBreadcrumbValue
+        };
+        report_hung_node(
+            &pcwstr_to_string(n.pCommandListDebugNameW),
+            &pcwstr_to_string(n.pCommandQueueDebugNameW),
+            n.pCommandHistory,
+            n.BreadcrumbCount,
+            done,
+            "",
+        );
+        node = n.pNext;
     }
 }
 
