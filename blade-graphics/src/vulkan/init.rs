@@ -84,6 +84,7 @@ struct AdapterCapabilities {
     timing: bool,
     bugs: SystemBugs,
     multidraw_indirect: bool,
+    draw_indirect_first_instance: bool,
     draw_indirect_count: bool,
     present_wait: bool,
     vendor: crate::GpuVendor,
@@ -205,6 +206,8 @@ unsafe fn inspect_adapter(
         .get_physical_device_features2(phd, &mut features2_khr);
 
     let multidraw_indirect = features2_khr.features.multi_draw_indirect == vk::TRUE;
+    let draw_indirect_first_instance =
+        features2_khr.features.draw_indirect_first_instance == vk::TRUE;
 
     let has_inline_ub = supported_extensions.contains(&vk::EXT_INLINE_UNIFORM_BLOCK_NAME)
         && inline_uniform_block_properties.max_inline_uniform_block_size
@@ -352,6 +355,7 @@ unsafe fn inspect_adapter(
         timing,
         bugs,
         multidraw_indirect,
+        draw_indirect_first_instance,
         draw_indirect_count,
         present_wait,
         vendor: map_vendor(properties.vendor_id),
@@ -609,6 +613,9 @@ impl super::Context {
 
             if capabilities.multidraw_indirect {
                 features = features.multi_draw_indirect(true);
+            }
+            if capabilities.draw_indirect_first_instance {
+                features = features.draw_indirect_first_instance(true);
             }
 
             let mut device_create_info = vk::DeviceCreateInfo::default()
