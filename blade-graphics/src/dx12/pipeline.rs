@@ -633,6 +633,7 @@ impl crate::traits::ShaderDevice for super::Context {
             },
         );
 
+        super::set_resource_name(&pso, desc.name);
         super::ComputePipeline {
             pso,
             layout: PipelineLayout { root_signature, groups, sampler_heap_roots },
@@ -847,6 +848,7 @@ impl crate::traits::ShaderDevice for super::Context {
             .map(|vf| vf.layout.stride)
             .collect();
 
+        super::set_resource_name(&pso, desc.name);
         super::RenderPipeline {
             pso,
             layout: PipelineLayout { root_signature, groups, sampler_heap_roots },

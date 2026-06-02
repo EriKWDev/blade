@@ -850,19 +850,53 @@ fn create_shader_visible_heap(
     }
 }
 
+#[derive(Clone)]
+struct HeapBlock {
+    heap: ID3D12DescriptorHeap,
+    cpu: D3D12_CPU_DESCRIPTOR_HANDLE,
+    gpu: D3D12_GPU_DESCRIPTOR_HANDLE,
+}
+
+impl HeapBlock {
+    fn new(device: &ID3D12Device, ty: D3D12_DESCRIPTOR_HEAP_TYPE, cap: u32) -> Self {
+        let heap = create_shader_visible_heap(device, ty, cap)
+            .unwrap_or_else(|e| panic!("CreateDescriptorHeap({cap}) failed: {e}"));
+        let cpu = unsafe { heap.GetCPUDescriptorHandleForHeapStart() };
+        let gpu = unsafe { heap.GetGPUDescriptorHandleForHeapStart() };
+        Self { heap, cpu, gpu }
+    }
+}
+
+/// Per-frame GPU-visible descriptor allocator. The `base..limit` window is the
+/// region the current frame allocates into; it normally lives in a segment of
+/// the permanent `main` heap (per-frame isolation by offset), but on overflow it
+/// either grows the main heap (copy live region into a bigger heap) or, once the
+/// main heap is at the hardware cap, SPILLS into a dedicated cap-sized heap and
+/// keeps going. Spill heaps are pooled and reused per frame; outgrown main heaps
+/// are returned to the caller to destroy (they are smaller and never reused).
 pub(super) struct DescriptorRing {
+    // Active allocation cursor — the main segment or a spill heap.
     pub heap: ID3D12DescriptorHeap,
     pub cpu_start: D3D12_CPU_DESCRIPTOR_HANDLE,
     pub gpu_start: D3D12_GPU_DESCRIPTOR_HANDLE,
     pub increment: u32,
     pub offset: u32,
-    pub capacity: u32,
-    /// Hard cap the heap may grow to (the hardware shader-visible limit for this
-    /// heap type, e.g. 1,000,000 CBV/SRV/UAV on binding tier 1/2, 2048 samplers).
+    base: u32,
+    limit: u32,
+    on_spill: bool,
+    // Permanent, segmented, growable main heap.
+    main: HeapBlock,
+    main_capacity: u32,
+    /// Hard cap any single heap may reach (the hardware shader-visible limit for
+    /// this type: 1,000,000 CBV/SRV/UAV on tier 1/2, 2048 samplers).
     pub max_capacity: u32,
     ty: D3D12_DESCRIPTOR_HEAP_TYPE,
     segment_count: u32,
     segment: u32,
+    // Cap-sized spill heaps in use by the in-progress frame.
+    spill_in_use: Vec<HeapBlock>,
+    // Spill heaps from past frames, reusable once `free_after` <= frame_index.
+    spill_pool: Vec<(u64, HeapBlock)>,
 }
 
 unsafe impl Send for DescriptorRing {}
@@ -875,96 +909,148 @@ impl DescriptorRing {
         max_capacity: u32,
         segment_count: u32,
     ) -> Self {
-        let cap = capacity.max(segment_count).min(max_capacity.max(segment_count));
-        let heap = create_shader_visible_heap(device, ty, cap)
-            .unwrap_or_else(|e| panic!("CreateDescriptorHeap({cap}) failed: {e}"));
-        let cpu_start = unsafe { heap.GetCPUDescriptorHandleForHeapStart() };
-        let gpu_start = unsafe { heap.GetGPUDescriptorHandleForHeapStart() };
+        let max_capacity = max_capacity.max(segment_count);
+        let cap = capacity.max(segment_count).min(max_capacity);
+        let main = HeapBlock::new(device, ty, cap);
         let increment = unsafe { device.GetDescriptorHandleIncrementSize(ty) };
         Self {
-            heap, cpu_start, gpu_start, increment, offset: 0,
-            capacity: cap, max_capacity, ty, segment_count, segment: 0,
+            heap: main.heap.clone(),
+            cpu_start: main.cpu,
+            gpu_start: main.gpu,
+            increment,
+            offset: 0,
+            base: 0,
+            limit: cap / segment_count,
+            on_spill: false,
+            main,
+            main_capacity: cap,
+            max_capacity,
+            ty,
+            segment_count,
+            segment: 0,
+            spill_in_use: Vec::new(),
+            spill_pool: Vec::new(),
         }
     }
 
-    fn segment_capacity(&self) -> u32 {
-        self.capacity / self.segment_count
+    fn main_segment_capacity(&self) -> u32 {
+        self.main_capacity / self.segment_count
     }
 
-    pub fn begin_segment(&mut self, segment: u32) {
+    /// Reset to a fresh frame: bind the main heap's segment, and recycle the
+    /// previous frame's spill heaps (tagged complete-after `frame_index +
+    /// buffer_count - 1`, since they were used by the frame that just ended).
+    pub fn begin_segment(&mut self, segment: u32, frame_index: u64, buffer_count: u64) {
+        let prev_frame = frame_index.saturating_sub(1);
+        for block in self.spill_in_use.drain(..) {
+            self.spill_pool.push((prev_frame + buffer_count, block));
+        }
+        let seg_cap = self.main_segment_capacity();
         self.segment = segment;
-        self.offset = segment * self.segment_capacity();
+        self.on_spill = false;
+        self.heap = self.main.heap.clone();
+        self.cpu_start = self.main.cpu;
+        self.gpu_start = self.main.gpu;
+        self.base = segment * seg_cap;
+        self.limit = self.base + seg_cap;
+        self.offset = self.base;
     }
 
-    /// Descriptors already written into the current segment this frame (the live
-    /// region that must be carried over when the heap is grown).
-    fn used_in_segment(&self) -> u32 {
-        self.offset - self.segment * self.segment_capacity()
+    fn used(&self) -> u32 {
+        self.offset - self.base
     }
 
-    /// Offset of `abs` relative to the current segment's base (stable across a
-    /// grow, since grow copies the segment to the same relative layout).
-    fn rel_in_segment(&self, abs: u32) -> u32 {
-        abs - self.segment * self.segment_capacity()
+    /// Offset relative to the current `base` (stable across a grow, which copies
+    /// the live region to the same relative layout).
+    fn rel(&self, abs: u32) -> u32 {
+        abs - self.base
     }
 
     fn would_overflow(&self, count: u32) -> bool {
-        self.offset + count > (self.segment + 1) * self.segment_capacity()
+        self.offset + count > self.limit
     }
 
-    /// Grow the heap so the current segment can hold `used_in_segment() + count`
-    /// more descriptors, copying the segment's live region into the new heap.
-    /// Returns the OLD heap (still referenced by already-recorded draws, so the
-    /// caller must keep it alive until those draws complete). `None` if already
-    /// at `max_capacity` (caller asserts/handles the hard limit).
-    fn grow(&mut self, device: &ID3D12Device, count: u32) -> Option<ID3D12DescriptorHeap> {
-        let used = self.used_in_segment();
-        let mut new_seg_cap = self.segment_capacity();
+    /// Grow the main heap so the current segment holds `used() + count`, copying
+    /// the live region into the bigger heap. Returns the OLD main heap (still read
+    /// by already-recorded draws — keep alive until they complete). Returns `None`
+    /// if already on a spill heap or at `max_capacity`.
+    fn grow_main(&mut self, device: &ID3D12Device, count: u32) -> Option<ID3D12DescriptorHeap> {
+        if self.on_spill {
+            return None;
+        }
+        let used = self.used();
+        let mut new_seg_cap = self.main_segment_capacity();
         while new_seg_cap < used + count {
             new_seg_cap = new_seg_cap.saturating_mul(2);
         }
-        let new_cap = (new_seg_cap.saturating_mul(self.segment_count)).min(self.max_capacity);
-        if new_cap <= self.capacity {
-            return None; // at the hardware limit; cannot grow further
+        let new_cap = new_seg_cap.saturating_mul(self.segment_count).min(self.max_capacity);
+        if new_cap <= self.main_capacity {
+            return None; // at the hardware cap
         }
         let new_seg_cap = new_cap / self.segment_count;
-        let new_heap = create_shader_visible_heap(device, self.ty, new_cap)
-            .unwrap_or_else(|e| panic!("CreateDescriptorHeap(grow {new_cap}) failed: {e}"));
-        let new_cpu = unsafe { new_heap.GetCPUDescriptorHandleForHeapStart() };
-        let new_gpu = unsafe { new_heap.GetGPUDescriptorHandleForHeapStart() };
-        // Copy this frame's live descriptors from old segment base to new segment
-        // base (same relative layout, so recorded relative offsets stay valid).
+        let new = HeapBlock::new(device, self.ty, new_cap);
         if used > 0 {
-            let old_seg_base = self.segment * self.segment_capacity();
             let new_seg_base = self.segment * new_seg_cap;
             let dst = D3D12_CPU_DESCRIPTOR_HANDLE {
-                ptr: new_cpu.ptr + (new_seg_base * self.increment) as usize,
+                ptr: new.cpu.ptr + (new_seg_base * self.increment) as usize,
             };
             let src = D3D12_CPU_DESCRIPTOR_HANDLE {
-                ptr: self.cpu_start.ptr + (old_seg_base * self.increment) as usize,
+                ptr: self.main.cpu.ptr + (self.base * self.increment) as usize,
             };
             unsafe { device.CopyDescriptorsSimple(used, dst, src, self.ty) };
         }
-        let old_heap = std::mem::replace(&mut self.heap, new_heap);
+        let old = std::mem::replace(&mut self.main, new);
+        self.main_capacity = new_cap;
         let new_seg_base = self.segment * new_seg_cap;
-        self.cpu_start = new_cpu;
-        self.gpu_start = new_gpu;
-        self.capacity = new_cap;
+        self.heap = self.main.heap.clone();
+        self.cpu_start = self.main.cpu;
+        self.gpu_start = self.main.gpu;
+        self.base = new_seg_base;
+        self.limit = new_seg_base + new_seg_cap;
         self.offset = new_seg_base + used;
-        Some(old_heap)
+        Some(old.heap)
     }
 
-    /// GPU handle for an in-segment-relative offset in the current heap.
+    /// Take a cap-sized spill heap (reuse a pooled one proven GPU-complete, else
+    /// allocate). Switch the active cursor to it with the cursor at `carry` (the
+    /// caller has copied `carry` carried-over descriptors to its front). The
+    /// previous active heap stays alive (main is permanent; a previous spill heap
+    /// is still in `spill_in_use`), so already-recorded draws keep reading it.
+    fn spill(&mut self, device: &ID3D12Device, carry: u32, frame_index: u64) {
+        let reuse = self
+            .spill_pool
+            .iter()
+            .position(|(free_after, _)| *free_after <= frame_index);
+        let block = match reuse {
+            Some(i) => self.spill_pool.swap_remove(i).1,
+            None => HeapBlock::new(device, self.ty, self.max_capacity),
+        };
+        self.heap = block.heap.clone();
+        self.cpu_start = block.cpu;
+        self.gpu_start = block.gpu;
+        self.base = 0;
+        self.limit = self.max_capacity;
+        self.offset = carry;
+        self.on_spill = true;
+        self.spill_in_use.push(block);
+    }
+
+    /// CPU handle of the current active heap at relative offset `rel`.
+    fn cpu_handle_rel(&self, rel: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        D3D12_CPU_DESCRIPTOR_HANDLE {
+            ptr: self.cpu_start.ptr + ((self.base + rel) * self.increment) as usize,
+        }
+    }
+
+    /// GPU handle of the current active heap at relative offset `rel`.
     fn gpu_handle_rel(&self, rel: u32) -> D3D12_GPU_DESCRIPTOR_HANDLE {
-        let abs = self.segment * self.segment_capacity() + rel;
         D3D12_GPU_DESCRIPTOR_HANDLE {
-            ptr: self.gpu_start.ptr + (abs * self.increment) as u64,
+            ptr: self.gpu_start.ptr + ((self.base + rel) * self.increment) as u64,
         }
     }
 
     pub fn alloc(&mut self, count: u32) -> (D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE) {
-        let limit = (self.segment + 1) * self.segment_capacity();
-        assert!(self.offset + count <= limit, "descriptor ring segment overflow");
+        assert!(self.offset + count <= self.limit, "descriptor ring segment overflow");
         let cpu = D3D12_CPU_DESCRIPTOR_HANDLE {
             ptr: self.cpu_start.ptr + (self.offset * self.increment) as usize,
         };
@@ -1151,11 +1237,12 @@ pub struct CommandEncoder {
     /// later `start()` once that frame's submission is known complete.
     pub(super) retired_cbv_heaps: Vec<(u64, ID3D12DescriptorHeap)>,
     /// CBV/SRV/UAV root descriptor tables bound since the last root-signature
-    /// change (set by `with()`), as (root_index, in-segment-relative offset,
-    /// is_compute). On a heap grow these are re-pointed into the new heap — a
-    /// descriptor-heap switch invalidates table bindings, and the renderer may
-    /// not re-bind a group before its next draw.
-    pub(super) active_cbv_tables: Vec<(u32, u32, bool)>,
+    /// change (set by `with()`), as (root_index, relative offset, descriptor
+    /// count, is_compute). On a grow these are re-pointed into the new heap; on a
+    /// spill their descriptors are copied (hence the count) and re-pointed. A
+    /// descriptor-heap switch invalidates table bindings and a later draw may
+    /// reuse a group without re-binding it, so all active tables are replayed.
+    pub(super) active_cbv_tables: Vec<(u32, u32, u32, bool)>,
     /// The pipeline's sampler-heap root table indices (std, cmp, is_compute),
     /// set by `with()`; re-issued after a grow's `SetDescriptorHeaps`.
     pub(super) bound_sampler_roots: Option<(u32, u32, bool)>,
@@ -1467,14 +1554,18 @@ pub(super) fn map_depth_srv_format(format: crate::TextureFormat) -> DXGI_FORMAT 
 /// so the resource can simultaneously host a typed DSV and a depth-readable SRV
 /// (D3D12 only allows that on a typeless resource). Color formats stay typed —
 /// they already support both RTV and SRV directly.
-/// Attach a debug name to a resource so RenderDoc/PIX/the debug layer show the
-/// blade name (e.g. "color with mips") instead of an auto-generated number.
-pub(super) fn set_resource_name(resource: &ID3D12Resource, name: &str) {
+/// Attach a debug name to any D3D12 object (resource, pipeline state, …) so
+/// RenderDoc/PIX, the debug layer, and DRED show the blade name instead of an
+/// auto-generated number — DRED in particular reports the bound PSO by name, so
+/// naming pipelines is what turns a device-removal report into something
+/// localizable.
+pub(super) fn set_resource_name<T: windows::core::Interface>(object: &T, name: &str) {
     if name.is_empty() {
         return;
     }
+    let Ok(object) = object.cast::<ID3D12Object>() else { return };
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let _ = unsafe { resource.SetName(windows::core::PCWSTR(wide.as_ptr())) };
+    let _ = unsafe { object.SetName(windows::core::PCWSTR(wide.as_ptr())) };
 }
 
 pub(super) fn map_resource_format(format: crate::TextureFormat) -> DXGI_FORMAT {

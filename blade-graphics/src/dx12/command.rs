@@ -369,54 +369,91 @@ impl super::CommandEncoder {
         self.list.as_ref().unwrap()
     }
 
-    /// Allocate `count` CBV/SRV/UAV descriptors, growing the heap first if this
-    /// frame's segment would overflow. Returns the base CPU/GPU handles and the
-    /// in-segment-relative offset (recorded so the binding can be re-pointed if a
-    /// later grow moves the heap).
+    /// Allocate `count` CBV/SRV/UAV descriptors, first ensuring the active heap
+    /// has room (grow the main heap, or spill to another heap once at the
+    /// hardware cap). Returns the base CPU/GPU handles and the relative offset
+    /// (recorded so the binding can be re-pointed if a later grow/spill moves the
+    /// active heap).
     pub(super) fn cbv_alloc(
         &mut self,
         count: u32,
     ) -> (D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE, u32) {
         if self.cbv_srv_uav_ring.would_overflow(count) {
-            self.grow_cbv_ring(count);
+            self.ensure_cbv_space(count);
         }
-        let rel = self.cbv_srv_uav_ring.rel_in_segment(self.cbv_srv_uav_ring.offset);
+        let rel = self.cbv_srv_uav_ring.rel(self.cbv_srv_uav_ring.offset);
         let (cpu, gpu) = self.cbv_srv_uav_ring.alloc(count);
         (cpu, gpu, rel)
     }
 
-    /// Grow the CBV/SRV/UAV heap mid-frame: the ring copies this frame's live
-    /// descriptors into the larger heap; we then retire the old heap (kept alive
-    /// for already-recorded draws), rebind the heaps, and re-issue every active
-    /// root descriptor table into the new heap (a heap switch invalidates table
-    /// bindings, and groups are not necessarily re-bound before their next draw).
-    fn grow_cbv_ring(&mut self, count: u32) {
+    /// Make room for `count` more descriptors. First try to grow the main heap
+    /// (bigger heap, live region copied, relative offsets preserved). If the main
+    /// heap is already at the hardware cap, spill: copy the live binding set into
+    /// a fresh cap-sized heap (compacted), and continue there. Either way the old
+    /// heap stays alive for already-recorded draws, the heaps are rebound, and
+    /// every active root table is re-issued (a heap switch invalidates table
+    /// bindings, and a later draw may reuse a group without re-binding it).
+    fn ensure_cbv_space(&mut self, count: u32) {
         let device = self.device.clone();
-        let Some(old) = self.cbv_srv_uav_ring.grow(&device, count) else {
-            // At the hardware tier limit — nothing we can do; the alloc assert
-            // will fire with a clear message.
-            return;
-        };
-        self.retired_cbv_heaps.push((self.frame_index, old));
+        if let Some(old) = self.cbv_srv_uav_ring.grow_main(&device, count) {
+            self.retired_cbv_heaps.push((self.frame_index, old));
+            self.rebind_cbv_heap();
+            if !self.cbv_srv_uav_ring.would_overflow(count) {
+                return;
+            }
+            // Grew to the cap but still short — fall through to spill.
+        }
+        // Spill: compact the active binding set into a fresh cap-sized heap. The
+        // set any single draw needs at once is small (a few groups) and <= cap;
+        // only the frame total exceeds it.
+        let carry: u32 = self.active_cbv_tables.iter().map(|&(_, _, c, _)| c).sum();
+        assert!(
+            carry + count <= self.cbv_srv_uav_ring.max_capacity,
+            "single draw needs more descriptors than one heap holds"
+        );
+        // Copy each active group from the current heap to the new spill heap,
+        // compacted from offset 0, and rewrite its relative offset.
+        let srcs: Vec<(usize, D3D12_CPU_DESCRIPTOR_HANDLE, u32)> = self
+            .active_cbv_tables
+            .iter()
+            .enumerate()
+            .map(|(i, &(_, rel, c, _))| (i, self.cbv_srv_uav_ring.cpu_handle_rel(rel), c))
+            .collect();
+        self.cbv_srv_uav_ring.spill(&device, carry, self.frame_index);
+        let mut dst_off = 0u32;
+        for (i, src, c) in srcs {
+            let dst = self.cbv_srv_uav_ring.cpu_handle_rel(dst_off);
+            unsafe {
+                self.device.CopyDescriptorsSimple(
+                    c, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                )
+            };
+            self.active_cbv_tables[i].1 = dst_off;
+            dst_off += c;
+        }
+        self.rebind_cbv_heap();
+    }
 
+    /// After a grow/spill switched the active CBV/SRV/UAV heap: rebind both heaps
+    /// and re-issue every active root descriptor table into the new heap (offsets
+    /// in `active_cbv_tables` are current — grow preserves them, spill rewrote
+    /// them).
+    fn rebind_cbv_heap(&mut self) {
         let heaps: [Option<ID3D12DescriptorHeap>; 2] = [
             Some(self.cbv_srv_uav_ring.heap.clone()),
             Some(self.sampler_ring.heap.clone()),
         ];
         let list = self.list.as_ref().unwrap();
         unsafe { list.SetDescriptorHeaps(&heaps) };
-
-        // Re-point CBV/SRV/UAV group tables into the new heap (same relative
-        // offsets — grow preserved the segment layout).
-        for &(root, rel, is_compute) in &self.active_cbv_tables {
+        for &(root, rel, _count, is_compute) in &self.active_cbv_tables {
             let gpu = self.cbv_srv_uav_ring.gpu_handle_rel(rel);
             unsafe {
                 if is_compute { list.SetComputeRootDescriptorTable(root, gpu); }
                 else { list.SetGraphicsRootDescriptorTable(root, gpu); }
             }
         }
-        // Re-issue the sampler heap tables (unchanged heap, but the SetDescriptorHeaps
-        // above invalidated the binding).
+        // Sampler heap is unchanged, but SetDescriptorHeaps invalidated its
+        // table binding too; re-issue it.
         if let Some((std_root, cmp_root, is_compute)) = self.bound_sampler_roots {
             let sampler_gpu = self.sampler_ring.gpu_start;
             unsafe {
@@ -431,13 +468,13 @@ impl super::CommandEncoder {
         }
     }
 
-    /// Record that `root` now points at the CBV/SRV/UAV table at in-segment
-    /// offset `rel`, so a later grow can re-point it. Replaces any prior entry
-    /// for the same root index (a re-bind of the same group).
-    pub(super) fn record_cbv_table(&mut self, root: u32, rel: u32, is_compute: bool) {
-        match self.active_cbv_tables.iter_mut().find(|(r, _, _)| *r == root) {
-            Some(e) => *e = (root, rel, is_compute),
-            None => self.active_cbv_tables.push((root, rel, is_compute)),
+    /// Record that `root` now points at the CBV/SRV/UAV table of `count`
+    /// descriptors at relative offset `rel`, so a later grow/spill can re-point
+    /// (and, for spill, copy) it. Replaces any prior entry for the same root.
+    pub(super) fn record_cbv_table(&mut self, root: u32, rel: u32, count: u32, is_compute: bool) {
+        match self.active_cbv_tables.iter_mut().find(|(r, _, _, _)| *r == root) {
+            Some(e) => *e = (root, rel, count, is_compute),
+            None => self.active_cbv_tables.push((root, rel, count, is_compute)),
         }
     }
 
@@ -771,8 +808,8 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         let buffer_count = self.allocators.len() as u64;
         let segment = (self.frame_index % buffer_count) as u32;
         self.frame_index += 1;
-        self.cbv_srv_uav_ring.begin_segment(segment);
-        self.sampler_ring.begin_segment(segment);
+        self.cbv_srv_uav_ring.begin_segment(segment, self.frame_index, buffer_count);
+        self.sampler_ring.begin_segment(segment, self.frame_index, buffer_count);
         self.upload_ring.begin_segment(segment as u64);
         // Free heaps retired by a mid-frame grow once their frame's submission is
         // complete. start() just CPU-waited the allocator last used buffer_count
@@ -1262,8 +1299,8 @@ fn bind_group<D: crate::ShaderData>(
             let list = encoder.list.as_ref().unwrap();
             if is_compute { unsafe { list.SetComputeRootDescriptorTable(idx, ring_gpu_base) }; }
             else          { unsafe { list.SetGraphicsRootDescriptorTable(idx, ring_gpu_base) }; }
-            // Remember this table so a mid-frame heap grow can re-point it.
-            encoder.record_cbv_table(idx, cbv_rel, is_compute);
+            // Remember this table so a mid-frame heap grow/spill can re-point it.
+            encoder.record_cbv_table(idx, cbv_rel, gd.cbv_srv_uav_count, is_compute);
         }
     }
 }
