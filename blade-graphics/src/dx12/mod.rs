@@ -1475,18 +1475,26 @@ impl crate::traits::CommandDevice for Context {
 
     fn wait_for(&self, sp: &SyncPoint, timeout_ms: u32) -> bool {
         let queue = self.queue.lock().unwrap();
+        // Check removal BEFORE trusting the fence: a removed device resets every
+        // fence to UINT64_MAX, which trivially satisfies `>= sp.progress` and would
+        // make wait_for report success. Callers (belts, transient encoders, the
+        // frame pacer) then free GPU-referenced resources believing the work
+        // completed — turning one device-lost into a use-after-free cascade and
+        // burying the original fault. Surfacing it here (with DRED) pins the panic
+        // to the first wait after the fault, naming the frame that hung.
+        panic_if_device_removed(&self.device, "wait_for");
         if unsafe { queue.fence.GetCompletedValue() } >= sp.progress {
             return true;
         }
-        // A removed device resets the fence to UINT64_MAX, so GetCompletedValue
-        // above passes and we never reach here — but if it didn't, the event
-        // would never fire. Surface a removal rather than blocking/timing out.
-        panic_if_device_removed(&self.device, "wait_for");
         unsafe {
             queue.fence.SetEventOnCompletion(sp.progress, queue.fence_event).unwrap();
         }
         let timeout = if timeout_ms == !0 { INFINITE } else { timeout_ms };
-        unsafe { WaitForSingleObjectEx(queue.fence_event, timeout, false) == WAIT_EVENT(0u32) }
+        let ok = unsafe { WaitForSingleObjectEx(queue.fence_event, timeout, false) == WAIT_EVENT(0u32) };
+        // The wait can also return because the device was lost while we blocked
+        // (the event is signaled on removal); re-check so we fault here, not later.
+        panic_if_device_removed(&self.device, "wait_for");
+        ok
     }
 }
 
