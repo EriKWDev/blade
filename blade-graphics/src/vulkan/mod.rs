@@ -552,9 +552,7 @@ impl crate::traits::CommandDevice for Context {
             Some(ref presentation) => {
                 wait_semaphores_all[num_wait] = presentation.acquire_semaphore;
                 wait_values_all[num_wait] = 0; // binary semaphore, value ignored
-                wait_stages_all[num_wait] = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                    | vk::PipelineStageFlags::COMPUTE_SHADER
-                    | vk::PipelineStageFlags::TRANSFER;
+                wait_stages_all[num_wait] = vk::PipelineStageFlags::ALL_COMMANDS;
                 num_wait += 1;
                 signal_semaphores_all[1] = presentation.present_semaphore;
                 2

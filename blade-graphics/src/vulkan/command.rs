@@ -671,6 +671,7 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
                 base_array_layer: 0,
                 layer_count: vk::REMAINING_ARRAY_LAYERS,
             },
+            dst_access_mask: vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
             ..Default::default()
         };
         unsafe {
