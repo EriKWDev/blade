@@ -137,19 +137,20 @@ impl super::Context {
                 }
             };
             let sc3 = sc1.cast::<IDXGISwapChain3>().unwrap();
-            // Max frame latency = BufferCount - 1, so the allowed frames in
-            // flight scale with the requested back-buffer count (request N
-            // frames -> N-1 in flight). This must stay < BufferCount: DXGI's
-            // waitable gates on queued-present count vs this value, NOT on buffer
-            // availability (unlike Metal's nextDrawable). At BufferCount, all
-            // buffers could be queued with none free while the waitable still
-            // signals -> GetCurrentBackBufferIndex returns an in-use buffer ->
-            // flicker (and the GPU writing a live buffer -> crash). N-1 keeps >=1
-            // buffer free. acquire_frame waiting on the object is the CPU-side
-            // stand-in for Vulkan's GPU-side acquire-semaphore present-readiness.
-            let max_latency = num_frames.saturating_sub(1).max(1);
+            // Max frame latency = 1. This is a DISPLAY-LATENCY/pacing knob (how
+            // many presents the CPU may queue ahead of the DISPLAY), which is
+            // distinct from BufferCount (how many back buffers exist — still
+            // `num_frames`). At 1, acquire_frame's wait on the waitable releases
+            // only when the prior present is consumed at vblank, so the CPU is
+            // locked to a regular display cadence (one new frame per vblank) at
+            // minimum latency. Raising it lets the CPU run further ahead of the
+            // display, which hands frame pacing to the caller's (jittery,
+            // GPU-render-time) fences and produces stutter for a vsync'd app that
+            // pipelines one frame. Frames-in-flight at the buffer level is
+            // BufferCount and is unaffected by this; deeper CPU-ahead pipelining
+            // would be an explicit caller choice, not derived from buffer count.
             unsafe {
-                let _ = sc3.SetMaximumFrameLatency(max_latency);
+                let _ = sc3.SetMaximumFrameLatency(1);
             }
             surface.frame_latency_waitable =
                 Some(unsafe { sc3.GetFrameLatencyWaitableObject() });
@@ -235,10 +236,11 @@ impl super::Surface {
     }
 
     pub fn acquire_frame(&mut self) -> super::Frame {
-        // Wait until a back buffer is free for rendering (see swapchain creation
-        // for why this is required and not covered by the caller's SyncPoint
-        // pacing). Called once per frame — only the presenting submission
-        // acquires — so this is a single, bounded (latency-1) wait per frame.
+        // Wait until the swapchain can accept the next frame (see swapchain
+        // creation for why this is required and not covered by the caller's
+        // SyncPoint pacing). At max-frame-latency 1 this releases at the prior
+        // present's vblank, locking the CPU to a regular display cadence. Called
+        // once per frame — only the presenting submission acquires.
         if let Some(waitable) = self.frame_latency_waitable {
             unsafe {
                 WaitForSingleObjectEx(waitable, 1000, false);
