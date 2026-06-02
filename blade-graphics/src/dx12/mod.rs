@@ -27,6 +27,11 @@ pub(super) const STAGING_SAMPLER_SIZE: u32 = 2048;
 // so a frame with N draws needs ~N entries. 1,000,000 is the D3D12 tier-1 max
 // for a shader-visible CBV/SRV/UAV heap. Reset each `start()`.
 pub(super) const ENCODER_HEAP_SIZE: u32 = 1_000_000;
+// Every encoder's CBV/SRV/UAV heap STARTS at this size and grows on demand up to
+// its tier max (see DescriptorRing::grow). Small start = transient transfer/copy
+// encoders (which bind ~nothing) stay tiny instead of each reserving a huge heap;
+// a heavy render encoder grows a few times on its first frames, then is stable.
+pub(super) const ENCODER_HEAP_START: u32 = 16384;
 pub(super) const ENCODER_SAMPLER_SIZE: u32 = 2048;
 // Per-encoder upload scratch for plain/CBV data: ~256 B per uniform bind, so a
 // frame with many per-draw binds needs room. 64 MiB ~= 256k binds. Reset each frame.
@@ -830,6 +835,21 @@ unsafe impl Sync for RenderPipeline {}
 /// that last used this segment. A single offset-0 reset (which is what a
 /// single-buffered ring does) would clobber descriptors of frames still in
 /// flight → garbage bindings, the classic source of intermittent glitches.
+fn create_shader_visible_heap(
+    device: &ID3D12Device,
+    ty: D3D12_DESCRIPTOR_HEAP_TYPE,
+    capacity: u32,
+) -> windows::core::Result<ID3D12DescriptorHeap> {
+    unsafe {
+        device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+            Type: ty,
+            NumDescriptors: capacity,
+            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            NodeMask: 0,
+        })
+    }
+}
+
 pub(super) struct DescriptorRing {
     pub heap: ID3D12DescriptorHeap,
     pub cpu_start: D3D12_CPU_DESCRIPTOR_HANDLE,
@@ -837,6 +857,10 @@ pub(super) struct DescriptorRing {
     pub increment: u32,
     pub offset: u32,
     pub capacity: u32,
+    /// Hard cap the heap may grow to (the hardware shader-visible limit for this
+    /// heap type, e.g. 1,000,000 CBV/SRV/UAV on binding tier 1/2, 2048 samplers).
+    pub max_capacity: u32,
+    ty: D3D12_DESCRIPTOR_HEAP_TYPE,
     segment_count: u32,
     segment: u32,
 }
@@ -848,37 +872,19 @@ impl DescriptorRing {
         device: &ID3D12Device,
         ty: D3D12_DESCRIPTOR_HEAP_TYPE,
         capacity: u32,
+        max_capacity: u32,
         segment_count: u32,
     ) -> Self {
-        // A large shader-visible heap can exceed available descriptor memory
-        // (especially with GPU-based validation, which shadows descriptors). Rather
-        // than panic on E_OUTOFMEMORY, halve and retry down to a usable floor so the
-        // app still boots; if the result is too small for a frame, the per-segment
-        // overflow assert fires with a clear message instead of a startup crash.
-        let mut cap = capacity.max(segment_count);
-        let floor = (65536 * segment_count).min(capacity);
-        let (heap, capacity): (ID3D12DescriptorHeap, u32) = loop {
-            let result: windows::core::Result<ID3D12DescriptorHeap> = unsafe {
-                device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
-                    Type: ty,
-                    NumDescriptors: cap,
-                    Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
-                    NodeMask: 0,
-                })
-            };
-            match result {
-                Ok(heap) => break (heap, cap),
-                Err(e) if cap > floor => {
-                    log::warn!("CreateDescriptorHeap({cap}) failed ({e}); retrying smaller");
-                    cap = (cap / 2).max(floor);
-                }
-                Err(e) => panic!("CreateDescriptorHeap({cap}) failed: {e}"),
-            }
-        };
+        let cap = capacity.max(segment_count).min(max_capacity.max(segment_count));
+        let heap = create_shader_visible_heap(device, ty, cap)
+            .unwrap_or_else(|e| panic!("CreateDescriptorHeap({cap}) failed: {e}"));
         let cpu_start = unsafe { heap.GetCPUDescriptorHandleForHeapStart() };
         let gpu_start = unsafe { heap.GetGPUDescriptorHandleForHeapStart() };
         let increment = unsafe { device.GetDescriptorHandleIncrementSize(ty) };
-        Self { heap, cpu_start, gpu_start, increment, offset: 0, capacity, segment_count, segment: 0 }
+        Self {
+            heap, cpu_start, gpu_start, increment, offset: 0,
+            capacity: cap, max_capacity, ty, segment_count, segment: 0,
+        }
     }
 
     fn segment_capacity(&self) -> u32 {
@@ -888,6 +894,72 @@ impl DescriptorRing {
     pub fn begin_segment(&mut self, segment: u32) {
         self.segment = segment;
         self.offset = segment * self.segment_capacity();
+    }
+
+    /// Descriptors already written into the current segment this frame (the live
+    /// region that must be carried over when the heap is grown).
+    fn used_in_segment(&self) -> u32 {
+        self.offset - self.segment * self.segment_capacity()
+    }
+
+    /// Offset of `abs` relative to the current segment's base (stable across a
+    /// grow, since grow copies the segment to the same relative layout).
+    fn rel_in_segment(&self, abs: u32) -> u32 {
+        abs - self.segment * self.segment_capacity()
+    }
+
+    fn would_overflow(&self, count: u32) -> bool {
+        self.offset + count > (self.segment + 1) * self.segment_capacity()
+    }
+
+    /// Grow the heap so the current segment can hold `used_in_segment() + count`
+    /// more descriptors, copying the segment's live region into the new heap.
+    /// Returns the OLD heap (still referenced by already-recorded draws, so the
+    /// caller must keep it alive until those draws complete). `None` if already
+    /// at `max_capacity` (caller asserts/handles the hard limit).
+    fn grow(&mut self, device: &ID3D12Device, count: u32) -> Option<ID3D12DescriptorHeap> {
+        let used = self.used_in_segment();
+        let mut new_seg_cap = self.segment_capacity();
+        while new_seg_cap < used + count {
+            new_seg_cap = new_seg_cap.saturating_mul(2);
+        }
+        let new_cap = (new_seg_cap.saturating_mul(self.segment_count)).min(self.max_capacity);
+        if new_cap <= self.capacity {
+            return None; // at the hardware limit; cannot grow further
+        }
+        let new_seg_cap = new_cap / self.segment_count;
+        let new_heap = create_shader_visible_heap(device, self.ty, new_cap)
+            .unwrap_or_else(|e| panic!("CreateDescriptorHeap(grow {new_cap}) failed: {e}"));
+        let new_cpu = unsafe { new_heap.GetCPUDescriptorHandleForHeapStart() };
+        let new_gpu = unsafe { new_heap.GetGPUDescriptorHandleForHeapStart() };
+        // Copy this frame's live descriptors from old segment base to new segment
+        // base (same relative layout, so recorded relative offsets stay valid).
+        if used > 0 {
+            let old_seg_base = self.segment * self.segment_capacity();
+            let new_seg_base = self.segment * new_seg_cap;
+            let dst = D3D12_CPU_DESCRIPTOR_HANDLE {
+                ptr: new_cpu.ptr + (new_seg_base * self.increment) as usize,
+            };
+            let src = D3D12_CPU_DESCRIPTOR_HANDLE {
+                ptr: self.cpu_start.ptr + (old_seg_base * self.increment) as usize,
+            };
+            unsafe { device.CopyDescriptorsSimple(used, dst, src, self.ty) };
+        }
+        let old_heap = std::mem::replace(&mut self.heap, new_heap);
+        let new_seg_base = self.segment * new_seg_cap;
+        self.cpu_start = new_cpu;
+        self.gpu_start = new_gpu;
+        self.capacity = new_cap;
+        self.offset = new_seg_base + used;
+        Some(old_heap)
+    }
+
+    /// GPU handle for an in-segment-relative offset in the current heap.
+    fn gpu_handle_rel(&self, rel: u32) -> D3D12_GPU_DESCRIPTOR_HANDLE {
+        let abs = self.segment * self.segment_capacity() + rel;
+        D3D12_GPU_DESCRIPTOR_HANDLE {
+            ptr: self.gpu_start.ptr + (abs * self.increment) as u64,
+        }
     }
 
     pub fn alloc(&mut self, count: u32) -> (D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE) {
@@ -1073,6 +1145,20 @@ pub struct CommandEncoder {
     /// (keying on the resource alone would skip it → stale RT data sampled).
     /// Repopulated by `render()`, cleared by `begin_pass()`.
     pub(super) active_render_targets: Vec<(ResourcePtr, u32)>,
+    /// CBV/SRV/UAV heaps replaced by a mid-frame grow, paired with the
+    /// `frame_index` at which they were retired. Already-recorded draws in the
+    /// current command list still read from them, so they are freed only in a
+    /// later `start()` once that frame's submission is known complete.
+    pub(super) retired_cbv_heaps: Vec<(u64, ID3D12DescriptorHeap)>,
+    /// CBV/SRV/UAV root descriptor tables bound since the last root-signature
+    /// change (set by `with()`), as (root_index, in-segment-relative offset,
+    /// is_compute). On a heap grow these are re-pointed into the new heap — a
+    /// descriptor-heap switch invalidates table bindings, and the renderer may
+    /// not re-bind a group before its next draw.
+    pub(super) active_cbv_tables: Vec<(u32, u32, bool)>,
+    /// The pipeline's sampler-heap root table indices (std, cmp, is_compute),
+    /// set by `with()`; re-issued after a grow's `SetDescriptorHeaps`.
+    pub(super) bound_sampler_roots: Option<(u32, u32, bool)>,
 }
 
 unsafe impl Send for CommandEncoder {}
@@ -1178,11 +1264,19 @@ impl crate::traits::CommandDevice for Context {
         // still-in-flight frame is reading (the allocator pool already buffers
         // `buffer_count` frames; the rings must match).
         let segments = desc.buffer_count.max(1);
+        // Start small and grow on demand (DescriptorRing::grow), capped at the
+        // device's tier max. A transient transfer/copy encoder that binds nothing
+        // stays at the start size instead of reserving the full tier heap; the
+        // render encoder grows over its first frames to its steady need.
         let cbv_srv_uav_ring = DescriptorRing::new(
-            &self.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, self.cbv_srv_uav_heap_size, segments,
+            &self.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+            ENCODER_HEAP_START, self.cbv_srv_uav_heap_size, segments,
         );
+        // Samplers cannot grow past the 2048 shader-visible-sampler-heap limit,
+        // so start at and cap at that maximum.
         let sampler_ring = DescriptorRing::new(
-            &self.device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, ENCODER_SAMPLER_SIZE, segments,
+            &self.device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+            ENCODER_SAMPLER_SIZE, ENCODER_SAMPLER_SIZE, segments,
         );
         let upload_ring = UploadRing::new(&self.device, UPLOAD_RING_SIZE, segments as u64);
 
@@ -1214,6 +1308,9 @@ impl crate::traits::CommandDevice for Context {
             },
             allocator_fences: vec![0u64; desc.buffer_count as usize],
             frame_index: 0,
+            retired_cbv_heaps: Vec::new(),
+            active_cbv_tables: Vec::new(),
+            bound_sampler_roots: None,
         }
     }
 
