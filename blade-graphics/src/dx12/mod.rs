@@ -166,6 +166,12 @@ pub struct Surface {
     pub(super) alpha: crate::AlphaMode,
     pub(super) target_size: [u16; 2],
     pub(super) next_present_id: u64,
+    /// Swapchain frame-latency waitable. `acquire_frame` waits on it so the GPU
+    /// does not render into a back buffer still being presented. Required for
+    /// correctness: a blade SyncPoint is a GPU-render-completion fence, which is
+    /// NOT present completion — DXGI FLIP has no acquire-semaphore (Vulkan's
+    /// GPU-side present-readiness sync), so this CPU wait is the substitute.
+    pub(super) frame_latency_waitable: Option<windows::Win32::Foundation::HANDLE>,
 }
 
 unsafe impl Send for Surface {}

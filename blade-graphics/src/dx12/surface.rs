@@ -33,6 +33,7 @@ impl super::Context {
             alpha: crate::AlphaMode::Ignored,
             target_size: [0; 2],
             next_present_id: 1,
+            frame_latency_waitable: None,
         })
     }
 
@@ -78,12 +79,16 @@ impl super::Context {
             }
             _ => DXGI_SWAP_CHAIN_FLAG(0),
         };
-        // No FRAME_LATENCY_WAITABLE_OBJECT: acquire_frame does not CPU-block
-        // (matching Vulkan, whose acquire is GPU-synchronized via semaphore). The
-        // caller's frame pacing — SyncPoint waits bounding frames-in-flight —
-        // plus the FLIP_DISCARD back-buffer rotation handle present correctness;
-        // a CPU stall here would just be redundant double-pacing.
-        let swap_flags = tearing_flag.0;
+        // FRAME_LATENCY_WAITABLE_OBJECT: acquire_frame waits on this so the GPU
+        // does not render into a back buffer the compositor is still presenting.
+        // This is NOT redundant with the caller's frame pacing: a blade SyncPoint
+        // is a GPU-render-completion fence (signaled when ExecuteCommandLists
+        // finishes), whereas present is asynchronous to that — render-done does
+        // not mean the displayed buffer was released. Vulkan synchronizes this
+        // GPU-side via the acquire semaphore the submission waits on; DXGI FLIP
+        // has no such semaphore, so the waitable is the standard substitute.
+        // Without it, FLIP_DISCARD shows occasional whole-frame flicker.
+        let swap_flags = tearing_flag.0 | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0;
 
         // Drop old swapchain frames before resizing
         for frame in surface.frames.drain(..) {
@@ -132,6 +137,16 @@ impl super::Context {
                 }
             };
             let sc3 = sc1.cast::<IDXGISwapChain3>().unwrap();
+            // Max latency 1: the CPU may run at most one frame ahead of the
+            // display, so acquire_frame's wait is minimal (lowest input latency)
+            // while still guaranteeing a free back buffer. The caller's own
+            // frames-in-flight pacing overlaps this but gates a different thing
+            // (GPU resource reuse, not present-readiness).
+            unsafe {
+                let _ = sc3.SetMaximumFrameLatency(1);
+            }
+            surface.frame_latency_waitable =
+                Some(unsafe { sc3.GetFrameLatencyWaitableObject() });
             surface.swapchain = Some(sc3);
         }
         drop(queue);
@@ -214,6 +229,16 @@ impl super::Surface {
     }
 
     pub fn acquire_frame(&mut self) -> super::Frame {
+        // Wait until a back buffer is free for rendering (see swapchain creation
+        // for why this is required and not covered by the caller's SyncPoint
+        // pacing). Called once per frame — only the presenting submission
+        // acquires — so this is a single, bounded (latency-1) wait per frame.
+        if let Some(waitable) = self.frame_latency_waitable {
+            unsafe {
+                WaitForSingleObjectEx(waitable, 1000, false);
+            }
+        }
+
         let sc = self.swapchain.as_ref().expect("surface not configured");
         let index = unsafe { sc.GetCurrentBackBufferIndex() };
         let frame = &self.frames[index as usize];
