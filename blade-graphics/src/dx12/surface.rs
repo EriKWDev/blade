@@ -137,13 +137,17 @@ impl super::Context {
                 }
             };
             let sc3 = sc1.cast::<IDXGISwapChain3>().unwrap();
-            // Max latency 1: the CPU may run at most one frame ahead of the
-            // display, so acquire_frame's wait is minimal (lowest input latency)
-            // while still guaranteeing a free back buffer. The caller's own
-            // frames-in-flight pacing overlaps this but gates a different thing
-            // (GPU resource reuse, not present-readiness).
+            // Max latency = back-buffer count, mirroring Metal's
+            // maximumDrawableCount (= num_frames): the waitable is a present-
+            // readiness BACKSTOP, not the primary pacer. The caller's own
+            // frames-in-flight pacing (e.g. 1) binds first, exactly as on Vulkan
+            // (app paces; the acquire semaphore is the safety net) and Metal
+            // (nextDrawable only blocks once num_frames drawables are checked
+            // out). acquire_frame still waits on the object so a free back buffer
+            // is guaranteed before rendering — correctness comes from waiting on
+            // it, this value only sets how deep the queue may get first.
             unsafe {
-                let _ = sc3.SetMaximumFrameLatency(1);
+                let _ = sc3.SetMaximumFrameLatency(num_frames);
             }
             surface.frame_latency_waitable =
                 Some(unsafe { sc3.GetFrameLatencyWaitableObject() });
