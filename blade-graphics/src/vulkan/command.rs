@@ -671,13 +671,14 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
                 base_array_layer: 0,
                 layer_count: vk::REMAINING_ARRAY_LAYERS,
             },
+            src_access_mask: vk::AccessFlags::MEMORY_WRITE,
             dst_access_mask: vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
             ..Default::default()
         };
         unsafe {
             self.device.core.cmd_pipeline_barrier(
                 self.buffers[0].raw,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::ALL_COMMANDS,
                 vk::PipelineStageFlags::ALL_COMMANDS,
                 vk::DependencyFlags::empty(),
                 &[],
