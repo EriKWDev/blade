@@ -137,17 +137,20 @@ impl super::Context {
                 }
             };
             let sc3 = sc1.cast::<IDXGISwapChain3>().unwrap();
-            // Max latency = back-buffer count, mirroring Metal's
-            // maximumDrawableCount (= num_frames): the waitable is a present-
-            // readiness BACKSTOP, not the primary pacer. The caller's own
-            // frames-in-flight pacing (e.g. 1) binds first, exactly as on Vulkan
-            // (app paces; the acquire semaphore is the safety net) and Metal
-            // (nextDrawable only blocks once num_frames drawables are checked
-            // out). acquire_frame still waits on the object so a free back buffer
-            // is guaranteed before rendering — correctness comes from waiting on
-            // it, this value only sets how deep the queue may get first.
+            // Max latency 1. Unlike Metal's nextDrawable (a hard buffer-
+            // availability gate, so maximumDrawableCount=num_frames is safe),
+            // DXGI's waitable gates on pending-present count vs this value, NOT
+            // on whether a buffer is free. If it were >= BufferCount, all buffers
+            // could be queued for present with none free, yet the waitable would
+            // still signal -> GetCurrentBackBufferIndex hands back an in-use
+            // buffer -> flicker. With the caller keeping ~1 frame in flight, a
+            // higher value also means the waitable never blocks (render fence
+            // fires first), so it would stop gating present-readiness entirely.
+            // 1 keeps >=1 buffer free and makes the present-readiness wait
+            // actually fire each frame — the DX12 stand-in for Vulkan's GPU-side
+            // acquire-semaphore wait, which is unavoidably CPU-side here.
             unsafe {
-                let _ = sc3.SetMaximumFrameLatency(num_frames);
+                let _ = sc3.SetMaximumFrameLatency(1);
             }
             surface.frame_latency_waitable =
                 Some(unsafe { sc3.GetFrameLatencyWaitableObject() });
