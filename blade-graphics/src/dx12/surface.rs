@@ -33,7 +33,6 @@ impl super::Context {
             alpha: crate::AlphaMode::Ignored,
             target_size: [0; 2],
             next_present_id: 1,
-            frame_latency_waitable: None,
         })
     }
 
@@ -79,9 +78,12 @@ impl super::Context {
             }
             _ => DXGI_SWAP_CHAIN_FLAG(0),
         };
-        // FRAME_LATENCY_WAITABLE_OBJECT gives us a handle to block on in
-        // acquire_frame, bounding how far the CPU runs ahead of presentation.
-        let swap_flags = tearing_flag.0 | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0;
+        // No FRAME_LATENCY_WAITABLE_OBJECT: acquire_frame does not CPU-block
+        // (matching Vulkan, whose acquire is GPU-synchronized via semaphore). The
+        // caller's frame pacing — SyncPoint waits bounding frames-in-flight —
+        // plus the FLIP_DISCARD back-buffer rotation handle present correctness;
+        // a CPU stall here would just be redundant double-pacing.
+        let swap_flags = tearing_flag.0;
 
         // Drop old swapchain frames before resizing
         for frame in surface.frames.drain(..) {
@@ -130,14 +132,6 @@ impl super::Context {
                 }
             };
             let sc3 = sc1.cast::<IDXGISwapChain3>().unwrap();
-            // Bound the present queue to one frame so the waitable releases as
-            // soon as the prior frame's present is consumed, then grab the handle
-            // acquire_frame blocks on.
-            unsafe {
-                let _ = sc3.SetMaximumFrameLatency(1);
-            }
-            surface.frame_latency_waitable =
-                Some(unsafe { sc3.GetFrameLatencyWaitableObject() });
             surface.swapchain = Some(sc3);
         }
         drop(queue);
@@ -220,16 +214,6 @@ impl super::Surface {
     }
 
     pub fn acquire_frame(&mut self) -> super::Frame {
-        // Block until the swapchain is ready for a new frame — the DX12 analog of
-        // Vulkan's acquire blocking on the image-available semaphore. Without this
-        // the CPU races ahead of the present queue and can record into a back
-        // buffer still owned by the presenter, producing occasional flicker.
-        if let Some(waitable) = self.frame_latency_waitable {
-            unsafe {
-                WaitForSingleObjectEx(waitable, 1000, false);
-            }
-        }
-
         let sc = self.swapchain.as_ref().expect("surface not configured");
         let index = unsafe { sc.GetCurrentBackBufferIndex() };
         let frame = &self.frames[index as usize];
