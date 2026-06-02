@@ -137,20 +137,19 @@ impl super::Context {
                 }
             };
             let sc3 = sc1.cast::<IDXGISwapChain3>().unwrap();
-            // Max latency 1. Unlike Metal's nextDrawable (a hard buffer-
-            // availability gate, so maximumDrawableCount=num_frames is safe),
-            // DXGI's waitable gates on pending-present count vs this value, NOT
-            // on whether a buffer is free. If it were >= BufferCount, all buffers
-            // could be queued for present with none free, yet the waitable would
-            // still signal -> GetCurrentBackBufferIndex hands back an in-use
-            // buffer -> flicker. With the caller keeping ~1 frame in flight, a
-            // higher value also means the waitable never blocks (render fence
-            // fires first), so it would stop gating present-readiness entirely.
-            // 1 keeps >=1 buffer free and makes the present-readiness wait
-            // actually fire each frame — the DX12 stand-in for Vulkan's GPU-side
-            // acquire-semaphore wait, which is unavoidably CPU-side here.
+            // Max frame latency = BufferCount - 1, so the allowed frames in
+            // flight scale with the requested back-buffer count (request N
+            // frames -> N-1 in flight). This must stay < BufferCount: DXGI's
+            // waitable gates on queued-present count vs this value, NOT on buffer
+            // availability (unlike Metal's nextDrawable). At BufferCount, all
+            // buffers could be queued with none free while the waitable still
+            // signals -> GetCurrentBackBufferIndex returns an in-use buffer ->
+            // flicker (and the GPU writing a live buffer -> crash). N-1 keeps >=1
+            // buffer free. acquire_frame waiting on the object is the CPU-side
+            // stand-in for Vulkan's GPU-side acquire-semaphore present-readiness.
+            let max_latency = num_frames.saturating_sub(1).max(1);
             unsafe {
-                let _ = sc3.SetMaximumFrameLatency(1);
+                let _ = sc3.SetMaximumFrameLatency(max_latency);
             }
             surface.frame_latency_waitable =
                 Some(unsafe { sc3.GetFrameLatencyWaitableObject() });
