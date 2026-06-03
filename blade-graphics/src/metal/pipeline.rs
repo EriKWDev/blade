@@ -322,8 +322,10 @@ impl super::Context {
                 panic!("MSL compilation error:\n{}", err.localizedDescription());
             });
 
-        let ep = &module.entry_points[ep_index];
-        let name = info.entry_point_names[ep_index].as_ref().unwrap();
+        // naga renames the entry point in the emitted MSL, so recover the actual
+        // function name from the generated info. `Shader::prepare` pruned the
+        // module to just this entry point, so it is the sole one at index 0.
+        let name = info.entry_point_names[0].as_ref().unwrap();
         let wg_size = metal::MTLSize {
             width: ep.workgroup_size[0] as _,
             height: ep.workgroup_size[1] as _,
