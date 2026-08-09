@@ -106,6 +106,8 @@ pub struct ContextDesc {
     pub timing: bool,
     /// Enable capture support with GAPI tools.
     pub capture: bool,
+    /// Emit command labels without enabling shader debug information or API capture.
+    pub command_labels: bool,
     /// Enable GAPI overlay.
     pub overlay: bool,
     /// Force selection of a specific Device ID, unless 0.

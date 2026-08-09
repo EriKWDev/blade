@@ -567,7 +567,7 @@ impl Context {
             info: PrivateInfo {
                 //TODO: determine based on OS version
                 language_version: metal::MTLLanguageVersion::Version2_4,
-                enable_debug_groups: desc.capture,
+                enable_debug_groups: desc.capture || desc.command_labels,
                 enable_dispatch_type: true,
             },
             device_information,

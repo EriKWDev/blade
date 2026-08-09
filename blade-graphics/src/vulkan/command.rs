@@ -204,7 +204,9 @@ impl AsVkClear for crate::TextureColor {
             crate::TextureColor::White => [1.0, 1.0, 1.0, 1.0],
             crate::TextureColor::RgbaFloat { rgba } => {
                 if backing != crate::util::TexelBacking::Float {
-                    log::warn!("TextureColor::RgbaFloat used for texture with non-float format '{format:?}'");
+                    log::warn!(
+                        "TextureColor::RgbaFloat used for texture with non-float format '{format:?}'"
+                    );
                 }
 
                 rgba
@@ -435,12 +437,13 @@ impl super::CommandEncoder {
         }
     }
 
-    pub fn barrier_modifies_indirect(&mut self) {
+    pub fn barrier_compute_to_indirect_and_vertex(&mut self) {
         profiling::function_scope!();
 
         let barrier = vk::MemoryBarrier {
             src_access_mask: vk::AccessFlags::SHADER_WRITE,
-            dst_access_mask: vk::AccessFlags::INDIRECT_COMMAND_READ,
+            dst_access_mask: vk::AccessFlags::INDIRECT_COMMAND_READ
+                | vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
             ..Default::default()
         };
 
@@ -448,7 +451,7 @@ impl super::CommandEncoder {
             self.device.core.cmd_pipeline_barrier(
                 self.buffers[0].raw,
                 vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::DRAW_INDIRECT | vk::PipelineStageFlags::VERTEX_SHADER,
+                vk::PipelineStageFlags::DRAW_INDIRECT | vk::PipelineStageFlags::VERTEX_INPUT,
                 vk::DependencyFlags::empty(),
                 &[barrier],
                 &[],

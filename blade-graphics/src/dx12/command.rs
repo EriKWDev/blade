@@ -46,16 +46,15 @@ impl crate::ShaderBindable for super::TextureView {
                 // an arbitrary prior state (e.g. UNORDERED_ACCESS), so transition —
                 // except for any subresource that is the open pass's live
                 // attachment (kept in its RT/DEPTH state).
-                ctx.encoder.require_view_state_skip_active_rt(self, READ_STATE);
+                ctx.encoder
+                    .require_view_state_skip_active_rt(self, READ_STATE);
                 super::raw_cpu_handle(self.srv_handle)
             }
             super::BindingKind::Uav => {
                 // Regular textures never auto-promote COMMON->UNORDERED_ACCESS, so
                 // this explicit transition is mandatory for storage textures.
-                ctx.encoder.require_view_state_skip_active_rt(
-                    self,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                );
+                ctx.encoder
+                    .require_view_state_skip_active_rt(self, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 super::raw_cpu_handle(self.uav_handle)
             }
             other => panic!("unexpected binding kind {:?} for TextureView", other),
@@ -65,9 +64,12 @@ impl crate::ShaderBindable for super::TextureView {
                 + (slot.heap_offset * ctx.encoder.cbv_srv_uav_ring.increment) as usize,
         };
         unsafe {
-            ctx.encoder
-                .device
-                .CopyDescriptorsSimple(1, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+            ctx.encoder.device.CopyDescriptorsSimple(
+                1,
+                dst,
+                src,
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+            )
         };
     }
 }
@@ -90,7 +92,12 @@ impl crate::ShaderBindable for super::Sampler {
                 + (slot.register * ctx.encoder.sampler_ring.increment) as usize,
         };
         unsafe {
-            ctx.encoder.device.CopyDescriptorsSimple(1, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
+            ctx.encoder.device.CopyDescriptorsSimple(
+                1,
+                dst,
+                src,
+                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+            )
         };
     }
 }
@@ -156,8 +163,10 @@ impl crate::ShaderBindable for crate::BufferPiece {
                 };
             }
             super::BindingKind::Cbv => {
-                ctx.encoder
-                    .require_buffer_state(&self.buffer, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+                ctx.encoder.require_buffer_state(
+                    &self.buffer,
+                    D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER,
+                );
                 let addr = self.buffer.gpu_address + self.offset;
                 let size = ((self.buffer.size.saturating_sub(self.offset) as u32) + 255) & !255;
                 unsafe {
@@ -350,8 +359,8 @@ impl super::CommandEncoder {
         // buffer bound two ways at once (index buffer + shader SRV) ends up in a
         // state valid for every concurrent read, rather than the last writer
         // winning and leaving the other access in an incompatible state.
-        let both_read = (cur.0 & !BUFFER_READ_STATES.0) == 0
-            && (needed.0 & !BUFFER_READ_STATES.0) == 0;
+        let both_read =
+            (cur.0 & !BUFFER_READ_STATES.0) == 0 && (needed.0 & !BUFFER_READ_STATES.0) == 0;
         let target = if both_read {
             D3D12_RESOURCE_STATES(cur.0 | needed.0)
         } else {
@@ -377,7 +386,11 @@ impl super::CommandEncoder {
     pub(super) fn cbv_alloc(
         &mut self,
         count: u32,
-    ) -> (D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE, u32) {
+    ) -> (
+        D3D12_CPU_DESCRIPTOR_HANDLE,
+        D3D12_GPU_DESCRIPTOR_HANDLE,
+        u32,
+    ) {
         if self.cbv_srv_uav_ring.would_overflow(count) {
             self.ensure_cbv_space(count);
         }
@@ -419,13 +432,17 @@ impl super::CommandEncoder {
             .enumerate()
             .map(|(i, &(_, rel, c, _))| (i, self.cbv_srv_uav_ring.cpu_handle_rel(rel), c))
             .collect();
-        self.cbv_srv_uav_ring.spill(&device, carry, self.frame_index);
+        self.cbv_srv_uav_ring
+            .spill(&device, carry, self.frame_index);
         let mut dst_off = 0u32;
         for (i, src, c) in srcs {
             let dst = self.cbv_srv_uav_ring.cpu_handle_rel(dst_off);
             unsafe {
                 self.device.CopyDescriptorsSimple(
-                    c, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                    c,
+                    dst,
+                    src,
+                    D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                 )
             };
             self.active_cbv_tables[i].1 = dst_off;
@@ -448,8 +465,11 @@ impl super::CommandEncoder {
         for &(root, rel, _count, is_compute) in &self.active_cbv_tables {
             let gpu = self.cbv_srv_uav_ring.gpu_handle_rel(rel);
             unsafe {
-                if is_compute { list.SetComputeRootDescriptorTable(root, gpu); }
-                else { list.SetGraphicsRootDescriptorTable(root, gpu); }
+                if is_compute {
+                    list.SetComputeRootDescriptorTable(root, gpu);
+                } else {
+                    list.SetGraphicsRootDescriptorTable(root, gpu);
+                }
             }
         }
         // Sampler heap is unchanged, but SetDescriptorHeaps invalidated its
@@ -472,7 +492,11 @@ impl super::CommandEncoder {
     /// descriptors at relative offset `rel`, so a later grow/spill can re-point
     /// (and, for spill, copy) it. Replaces any prior entry for the same root.
     pub(super) fn record_cbv_table(&mut self, root: u32, rel: u32, count: u32, is_compute: bool) {
-        match self.active_cbv_tables.iter_mut().find(|(r, _, _, _)| *r == root) {
+        match self
+            .active_cbv_tables
+            .iter_mut()
+            .find(|(r, _, _, _)| *r == root)
+        {
             Some(e) => *e = (root, rel, count, is_compute),
             None => self.active_cbv_tables.push((root, rel, count, is_compute)),
         }
@@ -530,9 +554,7 @@ impl super::CommandEncoder {
         unsafe { self.list.as_ref().unwrap().ResourceBarrier(&[uav_barrier]) };
     }
 
-    /// Matches Vulkan's `barrier_modifies_indirect` — a focused barrier
-    /// when indirect buffers were written in the previous compute pass.
-    pub fn barrier_modifies_indirect(&mut self) {
+    pub fn barrier_compute_to_indirect_and_vertex(&mut self) {
         self.barrier();
     }
 
@@ -647,7 +669,11 @@ impl super::CommandEncoder {
             }
             rtv_handles.push(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
             if let crate::FinishOp::ResolveTo { view, mode, .. } = rt.finish_op {
-                resolves.push(super::PendingResolve { src: rt.view, dst: view, mode });
+                resolves.push(super::PendingResolve {
+                    src: rt.view,
+                    dst: view,
+                    mode,
+                });
             }
         }
         if let Some(ref rt) = targets.depth_stencil {
@@ -658,7 +684,11 @@ impl super::CommandEncoder {
             }
             dsv_handle = Some(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
             if let crate::FinishOp::ResolveTo { view, mode, .. } = rt.depth_finish_op {
-                resolves.push(super::PendingResolve { src: rt.view, dst: view, mode });
+                resolves.push(super::PendingResolve {
+                    src: rt.view,
+                    dst: view,
+                    mode,
+                });
             }
         }
 
@@ -692,23 +722,35 @@ impl super::CommandEncoder {
         unsafe {
             list.OMSetRenderTargets(
                 rtv_handles.len() as u32,
-                if rtv_handles.is_empty() { None } else { Some(rtv_handles.as_ptr()) },
+                if rtv_handles.is_empty() {
+                    None
+                } else {
+                    Some(rtv_handles.as_ptr())
+                },
                 false,
                 dsv_handle.as_ref().map(|h| h as *const _),
             );
             list.RSSetViewports(&[D3D12_VIEWPORT {
-                TopLeftX: 0.0, TopLeftY: 0.0,
-                Width: target_size[0] as f32, Height: target_size[1] as f32,
-                MinDepth: 0.0, MaxDepth: 1.0,
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: target_size[0] as f32,
+                Height: target_size[1] as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
             }]);
             list.RSSetScissorRects(&[RECT {
-                left: 0, top: 0,
+                left: 0,
+                top: 0,
                 right: target_size[0] as i32,
                 bottom: target_size[1] as i32,
             }]);
         }
 
-        super::RenderCommandEncoder { encoder: self, target_size, resolves }
+        super::RenderCommandEncoder {
+            encoder: self,
+            target_size,
+            resolves,
+        }
     }
 
     /// Perform an MSAA resolve from `src` (the multisampled attachment) into `dst`.
@@ -808,8 +850,10 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         let buffer_count = self.allocators.len() as u64;
         let segment = (self.frame_index % buffer_count) as u32;
         self.frame_index += 1;
-        self.cbv_srv_uav_ring.begin_segment(segment, self.frame_index, buffer_count);
-        self.sampler_ring.begin_segment(segment, self.frame_index, buffer_count);
+        self.cbv_srv_uav_ring
+            .begin_segment(segment, self.frame_index, buffer_count);
+        self.sampler_ring
+            .begin_segment(segment, self.frame_index, buffer_count);
         self.upload_ring.begin_segment(segment as u64);
         // Free heaps retired by a mid-frame grow once their frame's submission is
         // complete. start() just CPU-waited the allocator last used buffer_count
@@ -849,7 +893,12 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         // require_subresources is a no-op if it's already COMMON, so it never
         // emits an illegal before==after barrier.
         let frame_vtbl = unsafe { frame.resource.as_raw() as super::ResourcePtr };
-        self.require_subresources(frame_vtbl, 1, std::iter::once(0), D3D12_RESOURCE_STATE_COMMON);
+        self.require_subresources(
+            frame_vtbl,
+            1,
+            std::iter::once(0),
+            D3D12_RESOURCE_STATE_COMMON,
+        );
 
         self.present = Some(super::Presentation {
             swapchain: frame.swapchain,
@@ -894,7 +943,10 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
 
         unsafe {
             enc.device.CopyDescriptorsSimple(
-                1, ring_cpu, uav_cpu, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                1,
+                ring_cpu,
+                uav_cpu,
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
             );
 
             // ClearUnorderedAccessViewUint fills the entire resource; we'd need
@@ -923,8 +975,10 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
             .require_buffer_state(&dst.buffer, D3D12_RESOURCE_STATE_COPY_DEST);
         unsafe {
             self.encoder.current_list().CopyBufferRegion(
-                dst.buffer.resource(), dst.offset,
-                src.buffer.resource(), src.offset,
+                dst.buffer.resource(),
+                dst.offset,
+                src.buffer.resource(),
+                src.offset,
                 size,
             );
         }
@@ -938,31 +992,48 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
     ) {
         let src_res = src.texture.resource();
         let dst_res = dst.texture.resource();
-        self.encoder.require_piece_state(&src, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        self.encoder.require_piece_state(&dst, D3D12_RESOURCE_STATE_COPY_DEST);
+        self.encoder
+            .require_piece_state(&src, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        self.encoder
+            .require_piece_state(&dst, D3D12_RESOURCE_STATE_COPY_DEST);
         let src_loc = D3D12_TEXTURE_COPY_LOCATION {
             pResource: borrowed_resource(src_res.as_raw()),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                SubresourceIndex: subresource_index(src.mip_level, src.array_layer, src.texture.mip_levels),
+                SubresourceIndex: subresource_index(
+                    src.mip_level,
+                    src.array_layer,
+                    src.texture.mip_levels,
+                ),
             },
         };
         let dst_loc = D3D12_TEXTURE_COPY_LOCATION {
             pResource: borrowed_resource(dst_res.as_raw()),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                SubresourceIndex: subresource_index(dst.mip_level, dst.array_layer, dst.texture.mip_levels),
+                SubresourceIndex: subresource_index(
+                    dst.mip_level,
+                    dst.array_layer,
+                    dst.texture.mip_levels,
+                ),
             },
         };
         let src_box = D3D12_BOX {
-            left: src.origin[0], top: src.origin[1], front: src.origin[2],
+            left: src.origin[0],
+            top: src.origin[1],
+            front: src.origin[2],
             right: src.origin[0] + size.width,
             bottom: src.origin[1] + size.height,
             back: src.origin[2] + size.depth,
         };
         unsafe {
             self.encoder.current_list().CopyTextureRegion(
-                &dst_loc, dst.origin[0], dst.origin[1], dst.origin[2], &src_loc, Some(&src_box),
+                &dst_loc,
+                dst.origin[0],
+                dst.origin[1],
+                dst.origin[2],
+                &src_loc,
+                Some(&src_box),
             );
         }
     }
@@ -974,7 +1045,8 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         dst: crate::TexturePiece,
         size: crate::Extent,
     ) {
-        self.encoder.require_piece_state(&dst, D3D12_RESOURCE_STATE_COPY_DEST);
+        self.encoder
+            .require_piece_state(&dst, D3D12_RESOURCE_STATE_COPY_DEST);
 
         // D3D12 placed footprints require the source offset to be a multiple of
         // 512 (D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT) and the row pitch a multiple
@@ -990,10 +1062,7 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         let (footprint_res, footprint_offset) = if direct {
             self.encoder
                 .require_buffer_state(&src.buffer, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            (
-                unsafe { src.buffer.resource().as_raw() },
-                src.offset,
-            )
+            (unsafe { src.buffer.resource().as_raw() }, src.offset)
         } else {
             assert!(
                 !src.buffer.mapped_ptr.is_null(),
@@ -1027,7 +1096,9 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
                     Offset: footprint_offset,
                     Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
                         Format: super::map_texture_format(dst.texture.format),
-                        Width: size.width, Height: size.height, Depth: size.depth,
+                        Width: size.width,
+                        Height: size.height,
+                        Depth: size.depth,
                         RowPitch: aligned_pitch as u32,
                     },
                 },
@@ -1037,12 +1108,21 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
             pResource: borrowed_resource(dst.texture.resource().as_raw()),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                SubresourceIndex: subresource_index(dst.mip_level, dst.array_layer, dst.texture.mip_levels),
+                SubresourceIndex: subresource_index(
+                    dst.mip_level,
+                    dst.array_layer,
+                    dst.texture.mip_levels,
+                ),
             },
         };
         unsafe {
             self.encoder.current_list().CopyTextureRegion(
-                &dst_loc, dst.origin[0], dst.origin[1], dst.origin[2], &src_loc, None,
+                &dst_loc,
+                dst.origin[0],
+                dst.origin[1],
+                dst.origin[2],
+                &src_loc,
+                None,
             );
         }
     }
@@ -1055,7 +1135,8 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         size: crate::Extent,
     ) {
         let src_res = src.texture.resource();
-        self.encoder.require_piece_state(&src, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        self.encoder
+            .require_piece_state(&src, D3D12_RESOURCE_STATE_COPY_SOURCE);
         self.encoder
             .require_buffer_state(&dst.buffer, D3D12_RESOURCE_STATE_COPY_DEST);
         let aligned_pitch = align_pitch(bytes_per_row as u64);
@@ -1063,7 +1144,11 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
             pResource: borrowed_resource(src_res.as_raw()),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                SubresourceIndex: subresource_index(src.mip_level, src.array_layer, src.texture.mip_levels),
+                SubresourceIndex: subresource_index(
+                    src.mip_level,
+                    src.array_layer,
+                    src.texture.mip_levels,
+                ),
             },
         };
         let dst_loc = D3D12_TEXTURE_COPY_LOCATION {
@@ -1074,21 +1159,30 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
                     Offset: dst.offset,
                     Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
                         Format: super::map_texture_format(src.texture.format),
-                        Width: size.width, Height: size.height, Depth: size.depth,
+                        Width: size.width,
+                        Height: size.height,
+                        Depth: size.depth,
                         RowPitch: aligned_pitch as u32,
                     },
                 },
             },
         };
         let src_box = D3D12_BOX {
-            left: src.origin[0], top: src.origin[1], front: src.origin[2],
+            left: src.origin[0],
+            top: src.origin[1],
+            front: src.origin[2],
             right: src.origin[0] + size.width,
             bottom: src.origin[1] + size.height,
             back: src.origin[2] + size.depth,
         };
         unsafe {
             self.encoder.current_list().CopyTextureRegion(
-                &dst_loc, 0, 0, 0, &src_loc, Some(&src_box),
+                &dst_loc,
+                0,
+                0,
+                0,
+                &src_loc,
+                Some(&src_box),
             );
         }
     }
@@ -1146,15 +1240,16 @@ impl super::ComputeCommandEncoder<'_> {
         unsafe { self.encoder.current_list().ResourceBarrier(&[uav_barrier]) };
     }
 
-    pub fn with<'p>(&'p mut self, pipeline: &'p super::ComputePipeline)
-        -> super::ComputePipelineContext<'p>
-    {
+    pub fn with<'p>(
+        &'p mut self,
+        pipeline: &'p super::ComputePipeline,
+    ) -> super::ComputePipelineContext<'p> {
         let sampler_gpu = self.encoder.sampler_ring.gpu_start;
         let list = self.encoder.list.as_ref().unwrap();
         unsafe {
             list.SetPipelineState(&pipeline.pso);
             list.SetComputeRootSignature(&pipeline.layout.root_signature);
-                if let Some((std_root, cmp_root)) = pipeline.layout.sampler_heap_roots {
+            if let Some((std_root, cmp_root)) = pipeline.layout.sampler_heap_roots {
                 list.SetComputeRootDescriptorTable(std_root, sampler_gpu);
                 list.SetComputeRootDescriptorTable(cmp_root, sampler_gpu);
             }
@@ -1166,16 +1261,20 @@ impl super::ComputeCommandEncoder<'_> {
             .layout
             .sampler_heap_roots
             .map(|(s, c)| (s, c, true));
-        super::ComputePipelineContext { encoder: self.encoder, layout: &pipeline.layout }
+        super::ComputePipelineContext {
+            encoder: self.encoder,
+            layout: &pipeline.layout,
+        }
     }
 }
 
 // ── RenderCommandEncoder ──────────────────────────────────────────────────────
 
 impl super::RenderCommandEncoder<'_> {
-    pub fn with<'p>(&'p mut self, pipeline: &'p super::RenderPipeline)
-        -> super::RenderPipelineContext<'p>
-    {
+    pub fn with<'p>(
+        &'p mut self,
+        pipeline: &'p super::RenderPipeline,
+    ) -> super::RenderPipelineContext<'p> {
         let sampler_gpu = self.encoder.sampler_ring.gpu_start;
         let list = self.encoder.list.as_ref().unwrap();
         unsafe {
@@ -1212,14 +1311,21 @@ impl crate::traits::RenderEncoder for super::RenderCommandEncoder<'_> {
     type BufferPiece = crate::BufferPiece;
 
     fn set_scissor_rect(&mut self, rect: &crate::ScissorRect) {
-        let r = RECT { left: rect.x, top: rect.y, right: rect.x + rect.w as i32, bottom: rect.y + rect.h as i32 };
+        let r = RECT {
+            left: rect.x,
+            top: rect.y,
+            right: rect.x + rect.w as i32,
+            bottom: rect.y + rect.h as i32,
+        };
         unsafe { self.encoder.current_list().RSSetScissorRects(&[r]) };
     }
 
     fn set_viewport(&mut self, viewport: &crate::Viewport) {
         let vp = D3D12_VIEWPORT {
-            TopLeftX: viewport.x, TopLeftY: viewport.y,
-            Width: viewport.w, Height: viewport.h,
+            TopLeftX: viewport.x,
+            TopLeftY: viewport.y,
+            Width: viewport.w,
+            Height: viewport.h,
             MinDepth: viewport.depth.start,
             MaxDepth: viewport.depth.end,
         };
@@ -1231,8 +1337,10 @@ impl crate::traits::RenderEncoder for super::RenderCommandEncoder<'_> {
     }
 
     fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
-        self.encoder
-            .require_buffer_state(&vertex_buf.buffer, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+        self.encoder.require_buffer_state(
+            &vertex_buf.buffer,
+            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER,
+        );
         // Deferred — applied with the pipeline's stride at `with()`.
         self.encoder.record_vertex(index, vertex_buf);
     }
@@ -1248,7 +1356,9 @@ fn bind_group<D: crate::ShaderData>(
     is_compute: bool,
 ) {
     let gd = &layout.groups[group as usize];
-    if gd.slots.is_empty() { return; }
+    if gd.slots.is_empty() {
+        return;
+    }
 
     // Allocate BEFORE fill() so any heap grow happens before descriptors are
     // written — fill() writes into `ring_cpu_base` and issues no ring allocs of
@@ -1257,7 +1367,11 @@ fn bind_group<D: crate::ShaderData>(
     let (ring_cpu_base, ring_gpu_base, cbv_rel) = if gd.cbv_srv_uav_count > 0 {
         encoder.cbv_alloc(gd.cbv_srv_uav_count)
     } else {
-        (D3D12_CPU_DESCRIPTOR_HANDLE { ptr: 0 }, D3D12_GPU_DESCRIPTOR_HANDLE { ptr: 0 }, 0)
+        (
+            D3D12_CPU_DESCRIPTOR_HANDLE { ptr: 0 },
+            D3D12_GPU_DESCRIPTOR_HANDLE { ptr: 0 },
+            0,
+        )
     };
     // Reserve a contiguous run in the sampler ring for this group's samplers.
     // `sampler_base_index` is the absolute heap index the index buffer references.
@@ -1290,15 +1404,21 @@ fn bind_group<D: crate::ShaderData>(
             .upload_ring
             .write_aligned(bytemuck::cast_slice(&indices), 16);
         let list = encoder.list.as_ref().unwrap();
-        if is_compute { unsafe { list.SetComputeRootShaderResourceView(idx, va) }; }
-        else          { unsafe { list.SetGraphicsRootShaderResourceView(idx, va) }; }
+        if is_compute {
+            unsafe { list.SetComputeRootShaderResourceView(idx, va) };
+        } else {
+            unsafe { list.SetGraphicsRootShaderResourceView(idx, va) };
+        }
     }
 
     if let Some(idx) = root_cbv {
         if ring_gpu_base.ptr != 0 {
             let list = encoder.list.as_ref().unwrap();
-            if is_compute { unsafe { list.SetComputeRootDescriptorTable(idx, ring_gpu_base) }; }
-            else          { unsafe { list.SetGraphicsRootDescriptorTable(idx, ring_gpu_base) }; }
+            if is_compute {
+                unsafe { list.SetComputeRootDescriptorTable(idx, ring_gpu_base) };
+            } else {
+                unsafe { list.SetGraphicsRootDescriptorTable(idx, ring_gpu_base) };
+            }
             // Remember this table so a mid-frame heap grow/spill can re-point it.
             encoder.record_cbv_table(idx, cbv_rel, gd.cbv_srv_uav_count, is_compute);
         }
@@ -1329,7 +1449,9 @@ impl crate::traits::ComputePipelineEncoder for super::ComputePipelineContext<'_>
 
     fn dispatch(&mut self, groups: [u32; 3]) {
         unsafe {
-            self.encoder.current_list().Dispatch(groups[0], groups[1], groups[2]);
+            self.encoder
+                .current_list()
+                .Dispatch(groups[0], groups[1], groups[2]);
         }
     }
 
@@ -1339,7 +1461,12 @@ impl crate::traits::ComputePipelineEncoder for super::ComputePipelineContext<'_>
         let sig = self.encoder.dispatch_sig.clone();
         unsafe {
             self.encoder.current_list().ExecuteIndirect(
-                &sig, 1, indirect_buf.buffer.resource(), indirect_buf.offset, None, 0,
+                &sig,
+                1,
+                indirect_buf.buffer.resource(),
+                indirect_buf.offset,
+                None,
+                0,
             );
         }
     }
@@ -1352,14 +1479,21 @@ impl crate::traits::RenderEncoder for super::RenderPipelineContext<'_> {
     type BufferPiece = crate::BufferPiece;
 
     fn set_scissor_rect(&mut self, rect: &crate::ScissorRect) {
-        let r = RECT { left: rect.x, top: rect.y, right: rect.x + rect.w as i32, bottom: rect.y + rect.h as i32 };
+        let r = RECT {
+            left: rect.x,
+            top: rect.y,
+            right: rect.x + rect.w as i32,
+            bottom: rect.y + rect.h as i32,
+        };
         unsafe { self.encoder.current_list().RSSetScissorRects(&[r]) };
     }
 
     fn set_viewport(&mut self, viewport: &crate::Viewport) {
         let vp = D3D12_VIEWPORT {
-            TopLeftX: viewport.x, TopLeftY: viewport.y,
-            Width: viewport.w, Height: viewport.h,
+            TopLeftX: viewport.x,
+            TopLeftY: viewport.y,
+            Width: viewport.w,
+            Height: viewport.h,
             MinDepth: viewport.depth.start,
             MaxDepth: viewport.depth.end,
         };
@@ -1373,11 +1507,17 @@ impl crate::traits::RenderEncoder for super::RenderPipelineContext<'_> {
     fn bind_vertex(&mut self, index: u32, vertex_buf: crate::BufferPiece) {
         // A vertex buffer produced by a compute pass (e.g. post-culling instances)
         // is in UNORDERED_ACCESS; bring it to the vertex-buffer read state.
-        self.encoder
-            .require_buffer_state(&vertex_buf.buffer, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+        self.encoder.require_buffer_state(
+            &vertex_buf.buffer,
+            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER,
+        );
         // Apply now with this pipeline's stride, and record it so a subsequent
         // `with()` (next pipeline in the pass) re-applies it.
-        let stride = self.vertex_strides.get(index as usize).copied().unwrap_or(0);
+        let stride = self
+            .vertex_strides
+            .get(index as usize)
+            .copied()
+            .unwrap_or(0);
         self.encoder.set_vertex_buffer(index, &vertex_buf, stride);
         self.encoder.record_vertex(index, vertex_buf);
     }
@@ -1387,9 +1527,20 @@ impl crate::traits::RenderEncoder for super::RenderPipelineContext<'_> {
 
 #[hidden_trait::expose]
 impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
-    fn draw(&mut self, first_vertex: u32, vertex_count: u32, first_instance: u32, instance_count: u32) {
+    fn draw(
+        &mut self,
+        first_vertex: u32,
+        vertex_count: u32,
+        first_instance: u32,
+        instance_count: u32,
+    ) {
         unsafe {
-            self.encoder.current_list().DrawInstanced(vertex_count, instance_count, first_vertex, first_instance);
+            self.encoder.current_list().DrawInstanced(
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            );
         }
     }
 
@@ -1423,7 +1574,12 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
         let sig = self.encoder.draw_sig.clone();
         unsafe {
             self.encoder.current_list().ExecuteIndirect(
-                &sig, draw_count, indirect_buf.buffer.resource(), indirect_buf.offset, None, 0,
+                &sig,
+                draw_count,
+                indirect_buf.buffer.resource(),
+                indirect_buf.offset,
+                None,
+                0,
             );
         }
     }
@@ -1449,7 +1605,12 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
             let list = self.encoder.current_list();
             list.IASetIndexBuffer(Some(&ibv));
             list.ExecuteIndirect(
-                &sig, draw_count, indirect_buf.buffer.resource(), indirect_buf.offset, None, 0,
+                &sig,
+                draw_count,
+                indirect_buf.buffer.resource(),
+                indirect_buf.offset,
+                None,
+                0,
             );
         }
     }
@@ -1479,9 +1640,12 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
             let list = self.encoder.current_list();
             list.IASetIndexBuffer(Some(&ibv));
             list.ExecuteIndirect(
-                &sig, max_draw_count,
-                indirect_buf.buffer.resource(), indirect_buf.offset,
-                Some(count_buf.buffer.resource()), count_buf.offset,
+                &sig,
+                max_draw_count,
+                indirect_buf.buffer.resource(),
+                indirect_buf.offset,
+                Some(count_buf.buffer.resource()),
+                count_buf.offset,
             );
         }
     }

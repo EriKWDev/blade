@@ -809,7 +809,7 @@ impl EglContext {
         );
 
         let toggles = super::Toggles {
-            scoping: desc.capture
+            scoping: desc.capture || desc.command_labels
                 && (gl.supports_debug() || {
                     log::warn!("Scoping is not supported");
                     false

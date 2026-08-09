@@ -224,7 +224,7 @@ impl super::CommandEncoder {
 
     pub fn barrier(&mut self) {}
 
-    pub fn barrier_modifies_indirect(&mut self) {}
+    pub fn barrier_compute_to_indirect_and_vertex(&mut self) {}
 
     pub fn render(
         &mut self,
@@ -304,7 +304,9 @@ impl super::CommandEncoder {
                             at_descriptor.setResolveTexture(Some(view.as_ref()));
                             at_descriptor.setDepthResolveFilter(match mode {
                                 crate::ResolveMode::Average => {
-                                    panic!("ResolveMode::Average not supported as depth resolve filter")
+                                    panic!(
+                                        "ResolveMode::Average not supported as depth resolve filter"
+                                    )
                                 }
 
                                 crate::ResolveMode::Sample0 => {
@@ -632,10 +634,12 @@ impl super::ComputeCommandEncoder<'_> {
     /// Ensures that storage buffer writes from preceding dispatches are
     /// visible to subsequent dispatches without ending the compute encoder.
     pub fn barrier(&mut self) {
-        // MTLBarrierScope.buffers = 1 << 0
-        // memoryBarrier(scope:) requires macOS 10.14+ / iOS 12.0+
+        /*
+            NOTE: Fluid and other compute chains carry dependencies through both storage buffers
+                  and storage textures. MTLBarrierScope uses bits zero and one for those scopes.
+        */
         unsafe {
-            let _: () = objc2::msg_send![&*self.raw, memoryBarrierWithScope: 1u64];
+            let _: () = objc2::msg_send![&*self.raw, memoryBarrierWithScope: 3u64];
         }
     }
 

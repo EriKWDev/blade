@@ -749,7 +749,7 @@ impl super::Context {
             },
             core: device_core,
             device_information: capabilities.device_information,
-            command_scope: if desc.capture {
+            command_scope: if desc.capture || desc.command_labels {
                 Some(super::CommandScopeDevice {})
             } else {
                 None
