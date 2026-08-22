@@ -997,6 +997,24 @@ impl Drop for super::ComputeCommandEncoder<'_> {
 }
 
 impl<'a> super::RenderCommandEncoder<'a> {
+    pub fn diagnostic_timestamp(&mut self, label: &str) {
+        if self.device.timing.is_none()
+            || self.cmd_buf.timed_pass_names.len() == crate::limits::PASS_COUNT
+        {
+            return;
+        }
+        let index = self.cmd_buf.timed_pass_names.len() as u32;
+        unsafe {
+            self.device.core.cmd_write_timestamp(
+                self.cmd_buf.raw,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                self.cmd_buf.query_pool,
+                index,
+            );
+        }
+        self.cmd_buf.timed_pass_names.push(label.to_string());
+    }
+
     pub fn with<'b, 'p>(
         &'b mut self,
         pipeline: &'p super::RenderPipeline,

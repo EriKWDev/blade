@@ -285,6 +285,10 @@ impl super::Context {
             zero_initialize_workgroup_memory: false,
             // force_loop_bounding: true,
             force_loop_bounding: false,
+            task_dispatch_limits: None,
+            mesh_shader_primitive_indices_clamp: true,
+            emit_int_div_checks: true,
+            ray_query_initialization_tracking: true,
         };
 
         let pipeline_options = msl::PipelineOptions {
@@ -292,6 +296,7 @@ impl super::Context {
             vertex_pulling_transform: false,
             vertex_buffer_mappings: Vec::new(),
             entry_point: None,
+            binding_array_length_map: Default::default(),
         };
         let (source, info) =
             msl::write_string(&module, &module_info, &naga_options, &pipeline_options).unwrap();

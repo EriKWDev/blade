@@ -732,6 +732,13 @@ impl crate::traits::RenderEncoder for super::RenderCommandEncoder<'_> {
 }
 
 impl super::RenderCommandEncoder<'_> {
+    /// Marks an intra-pass timing boundary where the backend supports one.
+    ///
+    /// Metal timings are currently sampled at render-encoder boundaries through the render-pass
+    /// descriptor. Keeping this as a no-op preserves those whole-pass timings without pretending
+    /// that an intra-encoder sample was recorded.
+    pub fn diagnostic_timestamp(&mut self, _label: &str) {}
+
     pub fn with<'p>(
         &'p mut self,
         pipeline: &'p super::RenderPipeline,
