@@ -12,6 +12,8 @@ mod resource;
 mod surface;
 
 const QUERY_POOL_SIZE: usize = crate::limits::PASS_COUNT + 1;
+const PIPELINE_STATISTICS_QUERY_COUNT: usize = 32;
+const PIPELINE_STATISTIC_COUNT: usize = 6;
 
 #[derive(Debug)]
 pub enum PlatformError {
@@ -23,6 +25,7 @@ struct Instance {
     core: ash::Instance,
     _debug_utils: ash::ext::debug_utils::Instance,
     get_physical_device_properties2: khr::get_physical_device_properties2::Instance,
+    fragment_shading_rate: khr::fragment_shading_rate::Instance,
     get_surface_capabilities2: Option<khr::get_surface_capabilities2::Instance>,
     surface: Option<khr::surface::Instance>,
 }
@@ -57,6 +60,7 @@ struct Device {
     dynamic_rendering: khr::dynamic_rendering::Device,
     ray_tracing: Option<RayTracingDevice>,
     buffer_device_address: bool,
+    shader_float16: bool,
     inline_uniform_blocks: bool,
     buffer_marker: Option<ash::amd::buffer_marker::Device>,
     shader_info: Option<ash::amd::shader_info::Device>,
@@ -71,6 +75,11 @@ struct Device {
     workarounds: Workarounds,
     supports_multidraw_indirect: bool,
     supports_draw_indirect_count: bool,
+    supports_multisampled_render_to_single_sampled: bool,
+    fragment_shading_rate: Option<ash::khr::fragment_shading_rate::Device>,
+    fragment_shading_rates: Vec<crate::FragmentShadingRateSupport>,
+    fragment_shading_rate_attachment_texel_size: Option<[u32; 2]>,
+    pipeline_statistics: bool,
     vendor: crate::GpuVendor,
 }
 
@@ -320,6 +329,9 @@ struct CommandBuffer {
     descriptor_pool: descriptor::DescriptorPool,
     query_pool: vk::QueryPool,
     timed_pass_names: Vec<String>,
+    pipeline_statistics_query_pool: vk::QueryPool,
+    pipeline_statistics_names: Vec<String>,
+    pipeline_statistics_query_active: bool,
     scratch: Option<ScratchBuffer>,
 }
 
@@ -361,6 +373,7 @@ pub struct RenderCommandEncoder<'a> {
     cmd_buf: &'a mut CommandBuffer,
     device: &'a Device,
     update_data: &'a mut Vec<u8>,
+    has_fragment_shading_rate_attachment: bool,
 }
 
 pub struct PipelineEncoder<'a, 'p> {
@@ -424,6 +437,26 @@ impl crate::traits::CommandDevice for Context {
                 } else {
                     vk::QueryPool::null()
                 };
+                let pipeline_statistics_query_pool = if self.device.pipeline_statistics {
+                    let statistics = vk::QueryPipelineStatisticFlags::INPUT_ASSEMBLY_VERTICES
+                        | vk::QueryPipelineStatisticFlags::INPUT_ASSEMBLY_PRIMITIVES
+                        | vk::QueryPipelineStatisticFlags::VERTEX_SHADER_INVOCATIONS
+                        | vk::QueryPipelineStatisticFlags::CLIPPING_INVOCATIONS
+                        | vk::QueryPipelineStatisticFlags::CLIPPING_PRIMITIVES
+                        | vk::QueryPipelineStatisticFlags::FRAGMENT_SHADER_INVOCATIONS;
+                    let query_pool_info = vk::QueryPoolCreateInfo::default()
+                        .query_type(vk::QueryType::PIPELINE_STATISTICS)
+                        .query_count(PIPELINE_STATISTICS_QUERY_COUNT as u32)
+                        .pipeline_statistics(statistics);
+                    unsafe {
+                        self.device
+                            .core
+                            .create_query_pool(&query_pool_info, None)
+                            .unwrap()
+                    }
+                } else {
+                    vk::QueryPool::null()
+                };
                 let scratch = if !self.device.inline_uniform_blocks {
                     let size = desc.extra.ubo_scratch_size;
                     let buf = self.create_buffer(crate::BufferDesc {
@@ -447,6 +480,9 @@ impl crate::traits::CommandDevice for Context {
                     descriptor_pool,
                     query_pool,
                     timed_pass_names: Vec::new(),
+                    pipeline_statistics_query_pool,
+                    pipeline_statistics_names: Vec::new(),
+                    pipeline_statistics_query_active: false,
                     scratch,
                 }
             })
@@ -497,6 +533,13 @@ impl crate::traits::CommandDevice for Context {
                         .destroy_query_pool(cmd_buf.query_pool, None);
                 }
             }
+            if self.device.pipeline_statistics {
+                unsafe {
+                    self.device
+                        .core
+                        .destroy_query_pool(cmd_buf.pipeline_statistics_query_pool, None);
+                }
+            }
             if let Some(ref scratch) = cmd_buf.scratch {
                 self.destroy_buffer(super::Buffer {
                     raw: scratch.raw,
@@ -516,11 +559,7 @@ impl crate::traits::CommandDevice for Context {
         };
     }
 
-    fn submit(
-        &self,
-        encoder: &mut CommandEncoder,
-        after: Option<&SyncPoint>,
-    ) -> SyncPoint {
+    fn submit(&self, encoder: &mut CommandEncoder, after: Option<&SyncPoint>) -> SyncPoint {
         profiling::function_scope!();
 
         let raw_cmd_buf = encoder.finish();
@@ -584,8 +623,7 @@ impl crate::traits::CommandDevice for Context {
             let wait_semaphores = [presentation.present_semaphore];
             let ret = if self.device.present_wait.is_some() && presentation.present_id != 0 {
                 let present_ids = [presentation.present_id];
-                let mut present_id_info =
-                    vk::PresentIdKHR::default().present_ids(&present_ids);
+                let mut present_id_info = vk::PresentIdKHR::default().present_ids(&present_ids);
                 let present_info = vk::PresentInfoKHR::default()
                     .swapchains(&swapchains)
                     .image_indices(&image_indices)
@@ -650,6 +688,7 @@ fn map_texture_format(format: crate::TextureFormat) -> vk::Format {
     use crate::TextureFormat as Tf;
     match format {
         Tf::R8Unorm => vk::Format::R8_UNORM,
+        Tf::R8Uint => vk::Format::R8_UINT,
         Tf::Rg8Unorm => vk::Format::R8G8_UNORM,
         Tf::Rg8Snorm => vk::Format::R8G8_SNORM,
         Tf::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,

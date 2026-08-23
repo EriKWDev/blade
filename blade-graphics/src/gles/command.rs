@@ -278,6 +278,52 @@ impl super::CommandEncoder {
         pass.invalidate_attachments = invalidate_attachments;
         pass
     }
+
+    pub fn render_with_fragment_shading_rate_attachment(
+        &mut self,
+        _label: &str,
+        _targets: crate::RenderTargetSet,
+        _attachment: crate::TextureView,
+        _texel_size: [u32; 2],
+    ) -> super::PassEncoder<super::RenderPipeline> {
+        unreachable!("fragment-shading-rate attachments are not supported by GLES")
+    }
+
+    pub fn render_multisampled_to_single_sampled_with_fragment_shading_rate_attachment(
+        &mut self,
+        _label: &str,
+        _targets: crate::RenderTargetSet,
+        _sample_count: u32,
+        _attachment: crate::TextureView,
+        _texel_size: [u32; 2],
+    ) -> super::PassEncoder<super::RenderPipeline> {
+        unreachable!("multisampled render-to-single-sampled is not supported by GLES")
+    }
+
+    pub fn render_multisampled_to_single_sampled(
+        &mut self,
+        _label: &str,
+        _targets: crate::RenderTargetSet,
+        _sample_count: u32,
+    ) -> super::PassEncoder<super::RenderPipeline> {
+        unreachable!("multisampled render-to-single-sampled is not supported by GLES")
+    }
+
+    pub fn init_fragment_shading_rate_attachment(&mut self, _texture: super::Texture) {
+        unreachable!("fragment-shading-rate attachments are not supported by GLES")
+    }
+}
+
+impl super::TransferCommandEncoder<'_> {
+    pub fn copy_buffer_to_fragment_shading_rate_attachment(
+        &mut self,
+        _src: crate::BufferPiece,
+        _bytes_per_row: u32,
+        _dst: crate::TexturePiece,
+        _size: crate::Extent,
+    ) {
+        unreachable!("fragment-shading-rate attachments are not supported by GLES")
+    }
 }
 
 #[hidden_trait::expose]
@@ -326,6 +372,12 @@ impl super::PassEncoder<'_, super::ComputePipeline> {
     }
 }
 
+impl super::PassEncoder<'_, super::RenderPipeline> {
+    pub fn set_fragment_shading_rate(&mut self, _rate: crate::FragmentShadingRate) -> bool {
+        false
+    }
+}
+
 #[hidden_trait::expose]
 impl crate::traits::RenderEncoder for super::PassEncoder<'_, super::RenderPipeline> {
     type BufferPiece = crate::BufferPiece;
@@ -363,6 +415,9 @@ impl crate::traits::RenderEncoder for super::PassEncoder<'_, super::RenderPipeli
 }
 
 impl super::PassEncoder<'_, super::RenderPipeline> {
+    pub fn begin_pipeline_statistics(&mut self, _label: &str) {}
+    pub fn end_pipeline_statistics(&mut self) {}
+
     pub fn with<'b>(
         &'b mut self,
         pipeline: &'b super::RenderPipeline,

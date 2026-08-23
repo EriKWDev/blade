@@ -56,7 +56,7 @@ impl super::TextureFormat {
             }
         }
         match *self {
-            Self::R8Unorm => uncompressed(1),
+            Self::R8Unorm | Self::R8Uint => uncompressed(1),
             Self::Rg8Unorm => uncompressed(2),
             Self::Rg8Snorm => uncompressed(2),
             Self::Rgba8Unorm => uncompressed(4),
@@ -121,6 +121,7 @@ impl super::TextureFormat {
     pub const fn is_srgb(&self) -> bool {
         match *self {
             crate::TextureFormat::R8Unorm
+            | crate::TextureFormat::R8Uint
             | crate::TextureFormat::Rg8Unorm
             | crate::TextureFormat::Rg8Snorm
             | crate::TextureFormat::Rgba8Unorm
@@ -175,7 +176,8 @@ impl super::TextureFormat {
 
     pub const fn texel_backing(&self) -> TexelBacking {
         match *self {
-            crate::TextureFormat::Rg8Snorm
+            crate::TextureFormat::R8Uint
+            | crate::TextureFormat::Rg8Snorm
             | crate::TextureFormat::Rgba8Snorm
             | crate::TextureFormat::R32Uint
             | crate::TextureFormat::Rg32Uint

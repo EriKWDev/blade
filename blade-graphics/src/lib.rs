@@ -48,10 +48,7 @@ pub const IDENTITY_TRANSFORM: Transform = mint::RowMatrix3x4 {
 };
 
 pub mod derive;
-#[cfg_attr(
-    all(feature = "dx12", target_os = "windows"),
-    path = "dx12/mod.rs"
-)]
+#[cfg_attr(all(feature = "dx12", target_os = "windows"), path = "dx12/mod.rs")]
 #[cfg_attr(
     all(not(vulkan), not(gles), any(target_os = "ios", target_os = "macos")),
     path = "metal/mod.rs"
@@ -142,10 +139,62 @@ pub enum GpuVendor {
     Unknown,
 }
 
+/// Fragment area shaded by one fragment shader invocation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FragmentShadingRate {
+    width: u8,
+    height: u8,
+}
+
+impl FragmentShadingRate {
+    pub const FULL: Self = Self::new(1, 1);
+    pub const HALF_HORIZONTAL: Self = Self::new(2, 1);
+    pub const HALF_VERTICAL: Self = Self::new(1, 2);
+    pub const QUARTER: Self = Self::new(2, 2);
+
+    pub const fn new(width: u8, height: u8) -> Self {
+        assert!(width.is_power_of_two() && height.is_power_of_two());
+        assert!(width <= 8 && height <= 8);
+        Self { width, height }
+    }
+
+    pub const fn fragment_size(self) -> [u8; 2] {
+        [self.width, self.height]
+    }
+
+    /// Blade's byte encoding for an `R8Uint` fragment-shading-rate attachment.
+    /// Backends advertising attachment support consume this encoding.
+    pub const fn attachment_texel_value(self) -> u8 {
+        ((self.width.trailing_zeros() << 2) | self.height.trailing_zeros()) as u8
+    }
+}
+
+impl Default for FragmentShadingRate {
+    fn default() -> Self {
+        Self::FULL
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FragmentShadingRateSupport {
+    pub rate: FragmentShadingRate,
+    /// Supported MSAA sample counts, with each power-of-two count represented by its value.
+    pub sample_count_mask: u32,
+}
+
+impl FragmentShadingRateSupport {
+    pub const fn supports_sample_count(self, sample_count: u32) -> bool {
+        sample_count.is_power_of_two() && self.sample_count_mask & sample_count != 0
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Capabilities {
     /// Which shader stages support ray queries
     pub ray_query: ShaderVisibility,
+
+    /// Native 16-bit floating-point arithmetic is available in shaders.
+    pub shader_float16: bool,
 
     /// Bit mask of supported MSAA sample counts.
     pub sample_count_mask: u32,
@@ -163,6 +212,30 @@ pub struct Capabilities {
     /// When true, `Context::wait_for_present` will block until the frame is actually displayed,
     /// enabling CPU-side vsync pacing independent of `vkAcquireNextImageKHR` blocking behaviour.
     pub present_wait: bool,
+
+    /// Whether a multisampled pipeline can render directly into single-sampled attachments.
+    /// Vulkan exposes this through VK_EXT_multisampled_render_to_single_sampled.
+    pub multisampled_render_to_single_sampled: bool,
+
+    /// Fragment sizes advertised by the driver and the MSAA sample counts valid for each size.
+    pub fragment_shading_rates: Vec<FragmentShadingRateSupport>,
+
+    /// Texel dimensions of a fragment-shading-rate attachment, when supported.
+    pub fragment_shading_rate_attachment_texel_size: Option<[u32; 2]>,
+}
+
+impl Capabilities {
+    pub fn supports_fragment_shading_rate(
+        &self,
+        rate: FragmentShadingRate,
+        sample_count: u32,
+    ) -> bool {
+        rate == FragmentShadingRate::FULL
+            || self
+                .fragment_shading_rates
+                .iter()
+                .any(|support| support.rate == rate && support.supports_sample_count(sample_count))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -341,6 +414,7 @@ impl From<Texture> for TexturePiece {
 pub enum TextureFormat {
     // color
     R8Unorm,
+    R8Uint,
     Rg8Unorm,
     Rg8Snorm,
     Rgba8Unorm,
@@ -467,6 +541,7 @@ bitflags::bitflags! {
         const RESOURCE = 1 << 2;
         const STORAGE = 1 << 3;
         const TRANSIENT = 1 << 4;
+        const FRAGMENT_SHADING_RATE = 1 << 5;
     }
 }
 

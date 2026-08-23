@@ -1,8 +1,6 @@
 use ash::vk;
 use naga::back::spv;
-use std::{ffi, mem, str};
-
-const DUMP_PREFIX: Option<&str> = None;
+use std::{ffi, mem};
 
 struct CompiledShader<'a> {
     vk_module: vk::ShaderModule,
@@ -10,6 +8,7 @@ struct CompiledShader<'a> {
     create_info: vk::PipelineShaderStageCreateInfo<'a>,
     attribute_mappings: Vec<crate::VertexAttributeMapping>,
     wg_size: [u32; 3],
+    diagnostic_spirv: Option<Vec<u32>>,
 }
 
 impl super::Context {
@@ -113,7 +112,7 @@ impl super::Context {
             naga_options_base
         };
 
-        let mut spv =
+        let spv =
             spv::write_vec(&module, &module_info, naga_options, Some(&pipeline_options)).unwrap();
 
         // let use_spirv_optimizer = false;
@@ -163,18 +162,20 @@ impl super::Context {
         //     }
         // }
 
-        if let Some(dump_prefix) = DUMP_PREFIX {
-            let mut file_name = String::new();
+        if let Some(dump_directory) = std::env::var_os("BLADE_VULKAN_DUMP_SPIRV") {
+            let dump_directory = std::path::Path::new(&dump_directory);
+            std::fs::create_dir_all(dump_directory).unwrap();
+            let mut path = std::path::PathBuf::new();
             for i in 1.. {
-                file_name = format!("{}{}_{:?}{}.spv", dump_prefix, sf.entry_point, ep.stage, i);
-                if !std::path::Path::new(&file_name).exists() {
+                path = dump_directory.join(format!("{}_{:?}{i}.spv", sf.entry_point, ep.stage,));
+                if !path.exists() {
                     break;
                 }
             }
             let spv_bytes =
                 unsafe { std::slice::from_raw_parts(spv.as_ptr() as *const u8, spv.len() * 4) };
-            println!("Dumping {}", file_name);
-            std::fs::write(file_name, spv_bytes).unwrap();
+            log::info!("Dumping SPIR-V to '{}'", path.display());
+            std::fs::write(path, spv_bytes).unwrap();
         }
 
         let vk_info = vk::ShaderModuleCreateInfo::default().code(&spv);
@@ -208,6 +209,7 @@ impl super::Context {
             create_info,
             attribute_mappings,
             wg_size: ep.workgroup_size,
+            diagnostic_spirv: std::env::var_os("BLADE_VULKAN_DUMP_PIPELINE_SPIRV").map(|_| spv),
         }
     }
 
@@ -565,7 +567,7 @@ impl crate::traits::ShaderDevice for super::Context {
             .collect::<Vec<_>>();
         let vertex_attributes = vs
             .attribute_mappings
-            .into_iter()
+            .iter()
             .enumerate()
             .map(|(index, mapping)| {
                 let (_, ref at) = desc.vertex_fetches[mapping.buffer_index].layout.attributes
@@ -611,9 +613,11 @@ impl crate::traits::ShaderDevice for super::Context {
             vk::DynamicState::SCISSOR,
             vk::DynamicState::BLEND_CONSTANTS,
             vk::DynamicState::STENCIL_REFERENCE,
+            vk::DynamicState::FRAGMENT_SHADING_RATE_KHR,
         ];
-        let vk_dynamic_state =
-            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        let dynamic_state_count = 4 + usize::from(self.device.fragment_shading_rate.is_some());
+        let vk_dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+            .dynamic_states(&dynamic_states[..dynamic_state_count]);
 
         let vk_viewport = vk::PipelineViewportStateCreateInfo::default()
             .flags(vk::PipelineViewportStateCreateFlags::empty())
@@ -698,7 +702,17 @@ impl crate::traits::ShaderDevice for super::Context {
             .depth_attachment_format(d_format)
             .stencil_attachment_format(s_format);
 
+        let pipeline_flags = if self
+            .device
+            .fragment_shading_rate_attachment_texel_size
+            .is_some()
+        {
+            vk::PipelineCreateFlags::RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_KHR
+        } else {
+            vk::PipelineCreateFlags::empty()
+        };
         let create_info = vk::GraphicsPipelineCreateInfo::default()
+            .flags(pipeline_flags)
             .layout(layout.raw)
             .stages(&stages)
             .vertex_input_state(&vk_vertex_input)
@@ -718,6 +732,57 @@ impl crate::traits::ShaderDevice for super::Context {
                 .unwrap()
         };
         let raw = raw_vec.pop().unwrap();
+
+        if let Some(directory) = std::env::var_os("BLADE_VULKAN_DUMP_PIPELINE_SPIRV") {
+            use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            let pipeline_name = desc
+                .name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>();
+            for (stage, shader) in [("vertex", Some(&vs)), ("fragment", fs.as_ref())] {
+                let Some(words) = shader.and_then(|shader| shader.diagnostic_spirv.as_ref()) else {
+                    continue;
+                };
+                let mut hasher = DefaultHasher::new();
+                words.hash(&mut hasher);
+                let path = directory.join(format!(
+                    "{pipeline_name}_{stage}_{:016x}.spv",
+                    hasher.finish(),
+                ));
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), words.len() * 4)
+                };
+                std::fs::write(path, bytes).unwrap();
+            }
+        }
+
+        if std::env::var_os("BLADE_VULKAN_SHADER_STATISTICS").is_some() {
+            if let Some(ref ext) = self.device.shader_info {
+                for (stage_name, stage) in [
+                    ("vertex", vk::ShaderStageFlags::VERTEX),
+                    ("fragment", vk::ShaderStageFlags::FRAGMENT),
+                ] {
+                    if stage == vk::ShaderStageFlags::FRAGMENT && desc.fragment.is_none() {
+                        continue;
+                    }
+                    if let Ok(statistics) = unsafe { ext.get_shader_info_statistics(raw, stage) } {
+                        let usage = statistics.resource_usage;
+                        eprintln!(
+                            "SHADER_STATS pipeline={:?} stage={stage_name} vgprs={} sgprs={} lds={} scratch={}",
+                            desc.name,
+                            usage.num_used_vgprs,
+                            usage.num_used_sgprs,
+                            usage.lds_usage_size_in_bytes,
+                            usage.scratch_mem_usage_in_bytes,
+                        );
+                    }
+                }
+            }
+        }
 
         unsafe { self.device.core.destroy_shader_module(vs.vk_module, None) };
         if let Some(fs) = fs {

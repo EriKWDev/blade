@@ -76,6 +76,7 @@ struct AdapterCapabilities {
     layered: bool,
     ray_tracing: Option<RayTracingCapabilities>,
     buffer_device_address: bool,
+    shader_float16: bool,
     inline_uniform_blocks: bool,
     buffer_marker: bool,
     shader_info: bool,
@@ -87,6 +88,11 @@ struct AdapterCapabilities {
     draw_indirect_first_instance: bool,
     fill_mode_non_solid: bool,
     draw_indirect_count: bool,
+    multisampled_render_to_single_sampled: bool,
+    fragment_shading_rate: bool,
+    fragment_shading_rates: Vec<crate::FragmentShadingRateSupport>,
+    fragment_shading_rate_attachment_texel_size: Option<[u32; 2]>,
+    pipeline_statistics_query: bool,
     present_wait: bool,
     vendor: crate::GpuVendor,
 }
@@ -115,6 +121,8 @@ unsafe fn inspect_adapter(
         vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
     let mut portability_subset_properties =
         vk::PhysicalDevicePortabilitySubsetPropertiesKHR::default();
+    let mut fragment_shading_rate_properties =
+        vk::PhysicalDeviceFragmentShadingRatePropertiesKHR::default();
 
     let mut driver_properties = vk::PhysicalDeviceDriverPropertiesKHR::default();
     let mut properties2_khr = vk::PhysicalDeviceProperties2KHR::default()
@@ -123,6 +131,7 @@ unsafe fn inspect_adapter(
         .push_next(&mut descriptor_indexing_properties)
         .push_next(&mut acceleration_structure_properties)
         .push_next(&mut portability_subset_properties)
+        .push_next(&mut fragment_shading_rate_properties)
         .push_next(&mut driver_properties);
     instance
         .get_physical_device_properties2
@@ -187,21 +196,29 @@ unsafe fn inspect_adapter(
         vk::PhysicalDeviceDescriptorIndexingFeaturesEXT::default();
     let mut buffer_device_address_features =
         vk::PhysicalDeviceBufferDeviceAddressFeaturesKHR::default();
+    let mut shader_float16_int8_features = vk::PhysicalDeviceShaderFloat16Int8Features::default();
     let mut acceleration_structure_features =
         vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
     let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
     let mut present_id_features = vk::PhysicalDevicePresentIdFeaturesKHR::default();
     let mut present_wait_features = vk::PhysicalDevicePresentWaitFeaturesKHR::default();
+    let mut multisampled_render_to_single_sampled_features =
+        vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT::default();
+    let mut fragment_shading_rate_features =
+        vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default();
     let mut features2_khr = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut inline_uniform_block_features)
         .push_next(&mut timeline_semaphore_features)
         .push_next(&mut dynamic_rendering_features)
         .push_next(&mut descriptor_indexing_features)
         .push_next(&mut buffer_device_address_features)
+        .push_next(&mut shader_float16_int8_features)
         .push_next(&mut acceleration_structure_features)
         .push_next(&mut ray_query_features)
         .push_next(&mut present_id_features)
-        .push_next(&mut present_wait_features);
+        .push_next(&mut present_wait_features)
+        .push_next(&mut multisampled_render_to_single_sampled_features)
+        .push_next(&mut fragment_shading_rate_features);
     instance
         .get_physical_device_properties2
         .get_physical_device_features2(phd, &mut features2_khr);
@@ -210,6 +227,7 @@ unsafe fn inspect_adapter(
     let draw_indirect_first_instance =
         features2_khr.features.draw_indirect_first_instance == vk::TRUE;
     let fill_mode_non_solid = features2_khr.features.fill_mode_non_solid == vk::TRUE;
+    let pipeline_statistics_query = features2_khr.features.pipeline_statistics_query == vk::TRUE;
 
     let has_inline_ub = supported_extensions.contains(&vk::EXT_INLINE_UNIFORM_BLOCK_NAME)
         && inline_uniform_block_properties.max_inline_uniform_block_size
@@ -328,6 +346,73 @@ unsafe fn inspect_adapter(
         log::info!("VK_KHR_present_wait is supported");
     }
 
+    let multisampled_render_to_single_sampled = supported_extensions
+        .contains(&vk::EXT_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_NAME)
+        && multisampled_render_to_single_sampled_features.multisampled_render_to_single_sampled
+            == vk::TRUE;
+    if multisampled_render_to_single_sampled {
+        log::info!("VK_EXT_multisampled_render_to_single_sampled is supported");
+    }
+
+    let fragment_shading_rate = supported_extensions.contains(&vk::KHR_FRAGMENT_SHADING_RATE_NAME)
+        && fragment_shading_rate_features.pipeline_fragment_shading_rate == vk::TRUE;
+    let fragment_shading_rates = if fragment_shading_rate {
+        let get_rates = instance
+            .fragment_shading_rate
+            .fp()
+            .get_physical_device_fragment_shading_rates_khr;
+        let mut count = 0;
+        if get_rates(phd, &mut count, std::ptr::null_mut()) != vk::Result::SUCCESS {
+            return None;
+        }
+        let mut rates = vec![vk::PhysicalDeviceFragmentShadingRateKHR::default(); count as usize];
+        if get_rates(phd, &mut count, rates.as_mut_ptr()) != vk::Result::SUCCESS {
+            return None;
+        }
+        rates.truncate(count as usize);
+        let mut supported: Vec<crate::FragmentShadingRateSupport> = rates
+            .into_iter()
+            .filter_map(|rate| {
+                let width = u8::try_from(rate.fragment_size.width).ok()?;
+                let height = u8::try_from(rate.fragment_size.height).ok()?;
+                (width.is_power_of_two() && height.is_power_of_two() && width <= 8 && height <= 8)
+                    .then_some(crate::FragmentShadingRateSupport {
+                        rate: crate::FragmentShadingRate::new(width, height),
+                        sample_count_mask: rate.sample_counts.as_raw(),
+                    })
+            })
+            .collect();
+        supported.sort_unstable_by_key(|it| {
+            let [width, height] = it.rate.fragment_size();
+            (u16::from(width) * u16::from(height), width, height)
+        });
+        let mut merged: Vec<crate::FragmentShadingRateSupport> =
+            Vec::with_capacity(supported.len());
+        for support in supported {
+            if let Some(previous) = merged.last_mut().filter(|it| it.rate == support.rate) {
+                previous.sample_count_mask |= support.sample_count_mask;
+            } else {
+                merged.push(support);
+            }
+        }
+        merged
+    } else {
+        Vec::new()
+    };
+    let fragment_shading_rate_attachment_texel_size = (fragment_shading_rate
+        && fragment_shading_rate_features.attachment_fragment_shading_rate == vk::TRUE)
+        .then_some([
+            fragment_shading_rate_properties
+                .min_fragment_shading_rate_attachment_texel_size
+                .width,
+            fragment_shading_rate_properties
+                .min_fragment_shading_rate_attachment_texel_size
+                .height,
+        ]);
+    if fragment_shading_rate {
+        log::info!("VK_KHR_fragment_shading_rate is supported");
+    }
+
     let device_information = crate::DeviceInformation {
         is_software_emulated: properties.device_type == vk::PhysicalDeviceType::CPU,
         device_name: ffi::CStr::from_ptr(properties.device_name.as_ptr())
@@ -349,6 +434,7 @@ unsafe fn inspect_adapter(
         layered: portability_subset_properties.min_vertex_input_binding_stride_alignment != 0,
         ray_tracing,
         buffer_device_address,
+        shader_float16: shader_float16_int8_features.shader_float16 == vk::TRUE,
         inline_uniform_blocks,
         buffer_marker,
         shader_info,
@@ -360,6 +446,11 @@ unsafe fn inspect_adapter(
         draw_indirect_first_instance,
         fill_mode_non_solid,
         draw_indirect_count,
+        multisampled_render_to_single_sampled,
+        fragment_shading_rate,
+        fragment_shading_rates,
+        fragment_shading_rate_attachment_texel_size,
+        pipeline_statistics_query,
         present_wait,
         vendor: map_vendor(properties.vendor_id),
     })
@@ -494,6 +585,10 @@ impl super::Context {
                 _debug_utils: ext::debug_utils::Instance::new(&entry, &core_instance),
                 get_physical_device_properties2:
                     khr::get_physical_device_properties2::Instance::new(&entry, &core_instance),
+                fragment_shading_rate: khr::fragment_shading_rate::Instance::new(
+                    &entry,
+                    &core_instance,
+                ),
                 get_surface_capabilities2: if desc.presentation {
                     Some(khr::get_surface_capabilities2::Instance::new(
                         &entry,
@@ -526,6 +621,8 @@ impl super::Context {
         if let Some(ref rt) = capabilities.ray_tracing {
             min_buffer_alignment = min_buffer_alignment.max(rt.min_scratch_buffer_alignment);
         }
+        let pipeline_statistics = capabilities.pipeline_statistics_query
+            && std::env::var_os("BLADE_VULKAN_PIPELINE_STATISTICS").is_some();
 
         let device_core = {
             let family_info = vk::DeviceQueueCreateInfo::default()
@@ -579,6 +676,12 @@ impl super::Context {
                 device_extensions.push(vk::KHR_PRESENT_ID_NAME);
                 device_extensions.push(vk::KHR_PRESENT_WAIT_NAME);
             }
+            if capabilities.multisampled_render_to_single_sampled {
+                device_extensions.push(vk::EXT_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_NAME);
+            }
+            if capabilities.fragment_shading_rate {
+                device_extensions.push(vk::KHR_FRAGMENT_SHADING_RATE_NAME);
+            }
 
             #[cfg(feature = "aftermath")]
             {
@@ -603,12 +706,29 @@ impl super::Context {
                 dynamic_rendering: vk::TRUE,
                 ..Default::default()
             };
+            let mut shader_float16_int8 = vk::PhysicalDeviceShaderFloat16Int8Features {
+                shader_float16: vk::TRUE,
+                ..Default::default()
+            };
             let mut khr_present_id = vk::PhysicalDevicePresentIdFeaturesKHR {
                 present_id: vk::TRUE,
                 ..Default::default()
             };
             let mut khr_present_wait = vk::PhysicalDevicePresentWaitFeaturesKHR {
                 present_wait: vk::TRUE,
+                ..Default::default()
+            };
+            let mut ext_multisampled_render_to_single_sampled =
+                vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT {
+                    multisampled_render_to_single_sampled: vk::TRUE,
+                    ..Default::default()
+                };
+            let mut khr_fragment_shading_rate = vk::PhysicalDeviceFragmentShadingRateFeaturesKHR {
+                pipeline_fragment_shading_rate: vk::TRUE,
+                attachment_fragment_shading_rate: capabilities
+                    .fragment_shading_rate_attachment_texel_size
+                    .is_some()
+                    .into(),
                 ..Default::default()
             };
 
@@ -622,6 +742,9 @@ impl super::Context {
             }
             if capabilities.fill_mode_non_solid {
                 features = features.fill_mode_non_solid(true);
+            }
+            if pipeline_statistics {
+                features = features.pipeline_statistics_query(true);
             }
 
             let mut device_create_info = vk::DeviceCreateInfo::default()
@@ -637,6 +760,16 @@ impl super::Context {
                 device_create_info = device_create_info
                     .push_next(&mut khr_present_id)
                     .push_next(&mut khr_present_wait);
+            }
+            if capabilities.multisampled_render_to_single_sampled {
+                device_create_info =
+                    device_create_info.push_next(&mut ext_multisampled_render_to_single_sampled);
+            }
+            if capabilities.fragment_shading_rate {
+                device_create_info = device_create_info.push_next(&mut khr_fragment_shading_rate);
+            }
+            if capabilities.shader_float16 {
+                device_create_info = device_create_info.push_next(&mut shader_float16_int8);
             }
 
             #[cfg(feature = "aftermath")]
@@ -689,6 +822,9 @@ impl super::Context {
                 .map_err(super::PlatformError::Init)?
         };
 
+        let fragment_shading_rate = capabilities
+            .fragment_shading_rate
+            .then(|| ash::khr::fragment_shading_rate::Device::new(&instance.core, &device_core));
         let device = super::Device {
             swapchain: if desc.presentation {
                 Some(khr::swapchain::Device::new(&instance.core, &device_core))
@@ -710,6 +846,7 @@ impl super::Context {
                 None
             },
             buffer_device_address: capabilities.buffer_device_address,
+            shader_float16: capabilities.shader_float16,
             inline_uniform_blocks: capabilities.inline_uniform_blocks,
             buffer_marker: if capabilities.buffer_marker && desc.validation {
                 Some(amd::buffer_marker::Device::new(
@@ -782,6 +919,13 @@ impl super::Context {
             },
             supports_multidraw_indirect: capabilities.multidraw_indirect,
             supports_draw_indirect_count: capabilities.draw_indirect_count,
+            supports_multisampled_render_to_single_sampled: capabilities
+                .multisampled_render_to_single_sampled,
+            fragment_shading_rate,
+            fragment_shading_rates: capabilities.fragment_shading_rates,
+            fragment_shading_rate_attachment_texel_size: capabilities
+                .fragment_shading_rate_attachment_texel_size,
+            pipeline_statistics,
             vendor: capabilities.vendor,
         };
 
@@ -929,10 +1073,18 @@ impl super::Context {
                 Some(_) => crate::ShaderVisibility::all(),
                 None => crate::ShaderVisibility::empty(),
             },
+            shader_float16: self.device.shader_float16,
             sample_count_mask: self.sample_count_flags.as_raw(),
             multidraw_indirect: self.device.supports_multidraw_indirect,
             draw_indexed_indirect_count: self.device.supports_draw_indirect_count,
             present_wait: self.device.present_wait.is_some(),
+            multisampled_render_to_single_sampled: self
+                .device
+                .supports_multisampled_render_to_single_sampled,
+            fragment_shading_rates: self.device.fragment_shading_rates.clone(),
+            fragment_shading_rate_attachment_texel_size: self
+                .device
+                .fragment_shading_rate_attachment_texel_size,
             vendor: self.device.vendor.clone(),
         }
     }

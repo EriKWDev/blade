@@ -626,6 +626,9 @@ pub(super) fn map_texture_usage(
     if usage.intersects(crate::TextureUsage::STORAGE) {
         flags |= vk::ImageUsageFlags::STORAGE;
     }
+    if usage.contains(crate::TextureUsage::FRAGMENT_SHADING_RATE) {
+        flags |= vk::ImageUsageFlags::FRAGMENT_SHADING_RATE_ATTACHMENT_KHR;
+    }
     flags
 }
 

@@ -203,11 +203,15 @@ impl Context {
     pub fn capabilities(&self) -> crate::Capabilities {
         crate::Capabilities {
             ray_query: crate::ShaderVisibility::empty(),
+            shader_float16: false,
             sample_count_mask: 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20, // 1,2,4,8,16,32
             multidraw_indirect: true,
             draw_indexed_indirect_count: true,
             vendor: self.vendor,
             present_wait: false,
+            multisampled_render_to_single_sampled: false,
+            fragment_shading_rates: Vec::new(),
+            fragment_shading_rate_attachment_texel_size: None,
         }
     }
 

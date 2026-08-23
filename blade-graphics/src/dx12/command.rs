@@ -753,6 +753,40 @@ impl super::CommandEncoder {
         }
     }
 
+    pub fn render_with_fragment_shading_rate_attachment(
+        &mut self,
+        _label: &str,
+        _targets: crate::RenderTargetSet,
+        _attachment: crate::TextureView,
+        _texel_size: [u32; 2],
+    ) -> super::RenderCommandEncoder<'_> {
+        unreachable!("fragment-shading-rate attachments are not supported by DX12")
+    }
+
+    pub fn render_multisampled_to_single_sampled_with_fragment_shading_rate_attachment(
+        &mut self,
+        _label: &str,
+        _targets: crate::RenderTargetSet,
+        _sample_count: u32,
+        _attachment: crate::TextureView,
+        _texel_size: [u32; 2],
+    ) -> super::RenderCommandEncoder<'_> {
+        unreachable!("multisampled render-to-single-sampled is not supported by DX12")
+    }
+
+    pub fn render_multisampled_to_single_sampled(
+        &mut self,
+        _label: &str,
+        _targets: crate::RenderTargetSet,
+        _sample_count: u32,
+    ) -> super::RenderCommandEncoder<'_> {
+        unreachable!("multisampled render-to-single-sampled is not supported by DX12")
+    }
+
+    pub fn init_fragment_shading_rate_attachment(&mut self, _texture: super::Texture) {
+        unreachable!("fragment-shading-rate attachments are not supported by DX12")
+    }
+
     /// Perform an MSAA resolve from `src` (the multisampled attachment) into `dst`.
     /// Emitted at render-pass end for each `FinishOp::ResolveTo`. Mirrors Vulkan's
     /// resolve-attachment, which blade expresses as a finish op.
@@ -809,6 +843,18 @@ impl super::CommandEncoder {
                 }
             }
         }
+    }
+}
+
+impl super::TransferCommandEncoder<'_> {
+    pub fn copy_buffer_to_fragment_shading_rate_attachment(
+        &mut self,
+        _src: crate::BufferPiece,
+        _bytes_per_row: u32,
+        _dst: crate::TexturePiece,
+        _size: crate::Extent,
+    ) {
+        unreachable!("fragment-shading-rate attachments are not supported by DX12")
     }
 }
 
@@ -1271,6 +1317,13 @@ impl super::ComputeCommandEncoder<'_> {
 // ── RenderCommandEncoder ──────────────────────────────────────────────────────
 
 impl super::RenderCommandEncoder<'_> {
+    pub fn set_fragment_shading_rate(&mut self, _rate: crate::FragmentShadingRate) -> bool {
+        false
+    }
+
+    pub fn begin_pipeline_statistics(&mut self, _label: &str) {}
+    pub fn end_pipeline_statistics(&mut self) {}
+
     pub fn with<'p>(
         &'p mut self,
         pipeline: &'p super::RenderPipeline,

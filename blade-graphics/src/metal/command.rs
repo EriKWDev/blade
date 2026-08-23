@@ -404,6 +404,40 @@ impl super::CommandEncoder {
             phantom: PhantomData,
         }
     }
+
+    pub fn render_with_fragment_shading_rate_attachment(
+        &mut self,
+        _label: &str,
+        _targets: crate::RenderTargetSet,
+        _attachment: crate::TextureView,
+        _texel_size: [u32; 2],
+    ) -> super::RenderCommandEncoder<'_> {
+        unreachable!("fragment-shading-rate attachments are not supported by Metal")
+    }
+
+    pub fn render_multisampled_to_single_sampled_with_fragment_shading_rate_attachment(
+        &mut self,
+        _label: &str,
+        _targets: crate::RenderTargetSet,
+        _sample_count: u32,
+        _attachment: crate::TextureView,
+        _texel_size: [u32; 2],
+    ) -> super::RenderCommandEncoder<'_> {
+        unreachable!("multisampled render-to-single-sampled is not supported by Metal")
+    }
+
+    pub fn render_multisampled_to_single_sampled(
+        &mut self,
+        _label: &str,
+        _targets: crate::RenderTargetSet,
+        _sample_count: u32,
+    ) -> super::RenderCommandEncoder<'_> {
+        unreachable!("multisampled render-to-single-sampled is not supported by Metal")
+    }
+
+    pub fn init_fragment_shading_rate_attachment(&mut self, _texture: super::Texture) {
+        unreachable!("fragment-shading-rate attachments are not supported by Metal")
+    }
 }
 
 #[hidden_trait::expose]
@@ -560,6 +594,18 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
 impl Drop for super::TransferCommandEncoder<'_> {
     fn drop(&mut self) {
         self.raw.endEncoding();
+    }
+}
+
+impl super::TransferCommandEncoder<'_> {
+    pub fn copy_buffer_to_fragment_shading_rate_attachment(
+        &mut self,
+        _src: crate::BufferPiece,
+        _bytes_per_row: u32,
+        _dst: crate::TexturePiece,
+        _size: crate::Extent,
+    ) {
+        unreachable!("fragment-shading-rate attachments are not supported by Metal")
     }
 }
 
@@ -732,6 +778,13 @@ impl crate::traits::RenderEncoder for super::RenderCommandEncoder<'_> {
 }
 
 impl super::RenderCommandEncoder<'_> {
+    pub fn set_fragment_shading_rate(&mut self, _rate: crate::FragmentShadingRate) -> bool {
+        false
+    }
+
+    pub fn begin_pipeline_statistics(&mut self, _label: &str) {}
+    pub fn end_pipeline_statistics(&mut self) {}
+
     /// Marks an intra-pass timing boundary where the backend supports one.
     ///
     /// Metal timings are currently sampled at render-encoder boundaries through the render-pass

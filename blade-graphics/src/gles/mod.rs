@@ -445,10 +445,14 @@ impl Context {
     pub fn capabilities(&self) -> crate::Capabilities {
         crate::Capabilities {
             ray_query: crate::ShaderVisibility::empty(),
+            shader_float16: false,
             sample_count_mask: 0x1 | 0x4, //TODO: accurate info
             multidraw_indirect: false,
             draw_indexed_indirect_count: false,
             present_wait: false,
+            multisampled_render_to_single_sampled: false,
+            fragment_shading_rates: Vec::new(),
+            fragment_shading_rate_attachment_texel_size: None,
             vendor: crate::GpuVendor::Unknown,
         }
     }
@@ -608,6 +612,7 @@ fn describe_texture_format(format: crate::TextureFormat) -> FormatInfo {
     use crate::TextureFormat as Tf;
     let (internal, external, data_type) = match format {
         Tf::R8Unorm => (glow::R8, glow::RED, glow::UNSIGNED_BYTE),
+        Tf::R8Uint => (glow::R8UI, glow::RED_INTEGER, glow::UNSIGNED_BYTE),
         Tf::Rg8Unorm => (glow::RG8, glow::RG, glow::UNSIGNED_BYTE),
         Tf::Rg8Snorm => (glow::RG8, glow::RG, glow::BYTE),
         Tf::Rgba8Unorm => (glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE),

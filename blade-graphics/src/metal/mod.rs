@@ -339,6 +339,7 @@ fn map_texture_format(format: crate::TextureFormat) -> metal::MTLPixelFormat {
     use metal::MTLPixelFormat as Mpf;
     match format {
         Tf::R8Unorm => Mpf::R8Unorm,
+        Tf::R8Uint => Mpf::R8Uint,
         Tf::Rg8Unorm => Mpf::RG8Unorm,
         Tf::Rg8Snorm => Mpf::RG8Snorm,
         Tf::Rgba8Unorm => Mpf::RGBA8Unorm,
@@ -383,6 +384,7 @@ fn map_pixel_format(format: metal::MTLPixelFormat) -> crate::TextureFormat {
     use metal::MTLPixelFormat as Mpf;
     match format {
         Mpf::R8Unorm => Tf::R8Unorm,
+        Mpf::R8Uint => Tf::R8Uint,
         Mpf::RG8Unorm => Tf::Rg8Unorm,
         Mpf::RG8Snorm => Tf::Rg8Snorm,
         Mpf::RGBA8Unorm => Tf::Rgba8Unorm,
@@ -589,6 +591,10 @@ impl Context {
                 crate::ShaderVisibility::empty()
             },
 
+            // Metal shading language supports native `half` arithmetic on every
+            // device family accepted by this backend.
+            shader_float16: true,
+
             sample_count_mask: (0u32..7)
                 .map(|v| 1 << v)
                 .filter(|&count| device.supportsTextureSampleCount(count as _))
@@ -597,6 +603,9 @@ impl Context {
             multidraw_indirect: true,
             draw_indexed_indirect_count: false,
             present_wait: false,
+            multisampled_render_to_single_sampled: false,
+            fragment_shading_rates: Vec::new(),
+            fragment_shading_rate_attachment_texel_size: None,
             vendor: crate::GpuVendor::Apple,
         }
     }

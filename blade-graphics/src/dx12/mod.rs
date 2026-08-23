@@ -1510,6 +1510,7 @@ pub(super) fn map_texture_format(format: crate::TextureFormat) -> DXGI_FORMAT {
     use crate::TextureFormat as Tf;
     match format {
         Tf::R8Unorm => DXGI_FORMAT_R8_UNORM,
+        Tf::R8Uint => DXGI_FORMAT_R8_UINT,
         Tf::Rg8Unorm => DXGI_FORMAT_R8G8_UNORM,
         Tf::Rg8Snorm => DXGI_FORMAT_R8G8_SNORM,
         Tf::Rgba8Unorm => DXGI_FORMAT_R8G8B8A8_UNORM,

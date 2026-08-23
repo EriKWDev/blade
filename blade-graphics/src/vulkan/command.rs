@@ -354,7 +354,7 @@ impl super::CommandEncoder {
             unsafe {
                 self.device.core.cmd_write_timestamp(
                     cmd_buf.raw,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                     cmd_buf.query_pool,
                     index,
                 );
@@ -400,7 +400,7 @@ impl super::CommandEncoder {
                 let index = cmd_buf.timed_pass_names.len() as u32;
                 self.device.core.cmd_write_timestamp(
                     cmd_buf.raw,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                     cmd_buf.query_pool,
                     index,
                 );
@@ -493,6 +493,55 @@ impl super::CommandEncoder {
         label: &str,
         targets: crate::RenderTargetSet,
     ) -> super::RenderCommandEncoder<'_> {
+        self.render_impl(label, targets, None, None)
+    }
+
+    pub fn render_with_fragment_shading_rate_attachment(
+        &mut self,
+        label: &str,
+        targets: crate::RenderTargetSet,
+        attachment: crate::TextureView,
+        texel_size: [u32; 2],
+    ) -> super::RenderCommandEncoder<'_> {
+        self.render_impl(label, targets, None, Some((attachment, texel_size)))
+    }
+
+    pub fn render_multisampled_to_single_sampled(
+        &mut self,
+        label: &str,
+        targets: crate::RenderTargetSet,
+        sample_count: u32,
+    ) -> super::RenderCommandEncoder<'_> {
+        assert!(self.device.supports_multisampled_render_to_single_sampled);
+        assert!(sample_count > 1 && sample_count.is_power_of_two());
+        self.render_impl(label, targets, Some(sample_count), None)
+    }
+
+    pub fn render_multisampled_to_single_sampled_with_fragment_shading_rate_attachment(
+        &mut self,
+        label: &str,
+        targets: crate::RenderTargetSet,
+        sample_count: u32,
+        attachment: crate::TextureView,
+        texel_size: [u32; 2],
+    ) -> super::RenderCommandEncoder<'_> {
+        assert!(self.device.supports_multisampled_render_to_single_sampled);
+        assert!(sample_count > 1 && sample_count.is_power_of_two());
+        self.render_impl(
+            label,
+            targets,
+            Some(sample_count),
+            Some((attachment, texel_size)),
+        )
+    }
+
+    fn render_impl(
+        &mut self,
+        label: &str,
+        targets: crate::RenderTargetSet,
+        sample_count: Option<u32>,
+        fragment_shading_rate_attachment: Option<(crate::TextureView, [u32; 2])>,
+    ) -> super::RenderCommandEncoder<'_> {
         self.begin_pass(label);
 
         let mut target_size = [0u16; 2];
@@ -508,6 +557,28 @@ impl super::CommandEncoder {
         let mut rendering_info = vk::RenderingInfoKHR::default()
             .layer_count(1)
             .color_attachments(&color_attachments);
+        let mut multisampled_render_to_single_sampled_info;
+        if let Some(sample_count) = sample_count {
+            multisampled_render_to_single_sampled_info =
+                vk::MultisampledRenderToSingleSampledInfoEXT::default()
+                    .multisampled_render_to_single_sampled_enable(true)
+                    .rasterization_samples(vk::SampleCountFlags::from_raw(sample_count));
+            rendering_info =
+                rendering_info.push_next(&mut multisampled_render_to_single_sampled_info);
+        }
+        let mut fragment_shading_rate_attachment_info;
+        if let Some((attachment, [width, height])) = fragment_shading_rate_attachment {
+            debug_assert_eq!(
+                self.device.fragment_shading_rate_attachment_texel_size,
+                Some([width, height])
+            );
+            fragment_shading_rate_attachment_info =
+                vk::RenderingFragmentShadingRateAttachmentInfoKHR::default()
+                    .image_view(attachment.raw)
+                    .image_layout(vk::ImageLayout::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR)
+                    .shading_rate_attachment_texel_size(vk::Extent2D { width, height });
+            rendering_info = rendering_info.push_next(&mut fragment_shading_rate_attachment_info);
+        }
 
         if let Some(rt) = targets.depth_stencil {
             target_size = rt.view.target_size;
@@ -552,12 +623,28 @@ impl super::CommandEncoder {
             self.device
                 .dynamic_rendering
                 .cmd_begin_rendering(cmd_buf.raw, &rendering_info);
+            if let Some(extension) = &self.device.fragment_shading_rate {
+                let fragment_size = vk::Extent2D {
+                    width: 1,
+                    height: 1,
+                };
+                let combiner_ops = [
+                    vk::FragmentShadingRateCombinerOpKHR::KEEP,
+                    vk::FragmentShadingRateCombinerOpKHR::KEEP,
+                ];
+                (extension.fp().cmd_set_fragment_shading_rate_khr)(
+                    cmd_buf.raw,
+                    &fragment_size,
+                    &combiner_ops,
+                );
+            }
         };
 
         super::RenderCommandEncoder {
             cmd_buf,
             device: &self.device,
             update_data: &mut self.update_data,
+            has_fragment_shading_rate_attachment: fragment_shading_rate_attachment.is_some(),
         }
     }
 
@@ -594,6 +681,37 @@ impl super::CommandEncoder {
                 None
             }
             Err(other) => panic!("GPU error {}", other),
+        }
+    }
+
+    /// Initialize an attachment that will be uploaded before every use.
+    pub fn init_fragment_shading_rate_attachment(&mut self, texture: super::Texture) {
+        self.init_texture(texture);
+        let barrier = vk::ImageMemoryBarrier {
+            old_layout: vk::ImageLayout::GENERAL,
+            new_layout: vk::ImageLayout::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR,
+            image: texture.raw,
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+            src_access_mask: vk::AccessFlags::MEMORY_WRITE,
+            dst_access_mask: vk::AccessFlags::FRAGMENT_SHADING_RATE_ATTACHMENT_READ_KHR,
+            ..Default::default()
+        };
+        unsafe {
+            self.device.core.cmd_pipeline_barrier(
+                self.buffers[0].raw,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::FRAGMENT_SHADING_RATE_ATTACHMENT_KHR,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
         }
     }
 }
@@ -657,6 +775,48 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
                     cmd_buf.query_pool,
                     0,
                     super::QUERY_POOL_SIZE as u32,
+                );
+            }
+        }
+        if self.device.pipeline_statistics {
+            assert!(!cmd_buf.pipeline_statistics_query_active);
+            if !cmd_buf.pipeline_statistics_names.is_empty() {
+                let query_count = cmd_buf.pipeline_statistics_names.len();
+                let mut values = vec![[0u64; super::PIPELINE_STATISTIC_COUNT + 1]; query_count];
+                unsafe {
+                    self.device
+                        .core
+                        .get_query_pool_results(
+                            cmd_buf.pipeline_statistics_query_pool,
+                            0,
+                            &mut values,
+                            vk::QueryResultFlags::TYPE_64
+                                | vk::QueryResultFlags::WITH_AVAILABILITY
+                                | vk::QueryResultFlags::PARTIAL,
+                        )
+                        .unwrap();
+                }
+                for (name, counters) in cmd_buf.pipeline_statistics_names.drain(..).zip(values) {
+                    if counters[super::PIPELINE_STATISTIC_COUNT] == 0 {
+                        continue;
+                    }
+                    eprintln!(
+                        "PIPELINE_STATS name={name:?} ia_vertices={} ia_primitives={} vs={} clip_invocations={} clip_primitives={} fs={}",
+                        counters[0],
+                        counters[1],
+                        counters[2],
+                        counters[3],
+                        counters[4],
+                        counters[5],
+                    );
+                }
+            }
+            unsafe {
+                self.device.core.cmd_reset_query_pool(
+                    cmd_buf.raw,
+                    cmd_buf.pipeline_statistics_query_pool,
+                    0,
+                    super::PIPELINE_STATISTICS_QUERY_COUNT as u32,
                 );
             }
         }
@@ -848,6 +1008,71 @@ impl Drop for super::TransferCommandEncoder<'_> {
     }
 }
 
+impl super::TransferCommandEncoder<'_> {
+    /// Upload a complete shading-rate image and make it visible to subsequent rendering.
+    pub fn copy_buffer_to_fragment_shading_rate_attachment(
+        &mut self,
+        src: crate::BufferPiece,
+        bytes_per_row: u32,
+        dst: crate::TexturePiece,
+        size: crate::Extent,
+    ) {
+        let subresource_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: dst.mip_level,
+            level_count: 1,
+            base_array_layer: dst.array_layer,
+            layer_count: 1,
+        };
+        let to_transfer = vk::ImageMemoryBarrier {
+            old_layout: vk::ImageLayout::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR,
+            new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            image: dst.texture.raw,
+            subresource_range,
+            src_access_mask: vk::AccessFlags::FRAGMENT_SHADING_RATE_ATTACHMENT_READ_KHR,
+            dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+            ..Default::default()
+        };
+        unsafe {
+            self.device.core.cmd_pipeline_barrier(
+                self.raw,
+                vk::PipelineStageFlags::FRAGMENT_SHADING_RATE_ATTACHMENT_KHR,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_transfer],
+            );
+            let copy = make_buffer_image_copy(&src, bytes_per_row, &dst, &size);
+            self.device.core.cmd_copy_buffer_to_image(
+                self.raw,
+                src.buffer.raw,
+                dst.texture.raw,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[copy],
+            );
+            let to_attachment = vk::ImageMemoryBarrier {
+                old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                new_layout: vk::ImageLayout::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR,
+                image: dst.texture.raw,
+                subresource_range,
+                src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                dst_access_mask: vk::AccessFlags::FRAGMENT_SHADING_RATE_ATTACHMENT_READ_KHR,
+                ..Default::default()
+            };
+            self.device.core.cmd_pipeline_barrier(
+                self.raw,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADING_RATE_ATTACHMENT_KHR,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_attachment],
+            );
+        }
+    }
+}
+
 #[hidden_trait::expose]
 impl crate::traits::AccelerationStructureEncoder
     for super::AccelerationStructureCommandEncoder<'_>
@@ -997,6 +1222,73 @@ impl Drop for super::ComputeCommandEncoder<'_> {
 }
 
 impl<'a> super::RenderCommandEncoder<'a> {
+    /// Selects the fragment size for subsequent draws. Returns false when unsupported.
+    pub fn set_fragment_shading_rate(&mut self, rate: crate::FragmentShadingRate) -> bool {
+        let Some(extension) = &self.device.fragment_shading_rate else {
+            return false;
+        };
+        let [width, height] = rate.fragment_size();
+        let fragment_size = vk::Extent2D {
+            width: width.into(),
+            height: height.into(),
+        };
+        let combiner_ops = [
+            vk::FragmentShadingRateCombinerOpKHR::KEEP,
+            if self.has_fragment_shading_rate_attachment && rate != crate::FragmentShadingRate::FULL
+            {
+                vk::FragmentShadingRateCombinerOpKHR::REPLACE
+            } else {
+                vk::FragmentShadingRateCombinerOpKHR::KEEP
+            },
+        ];
+        unsafe {
+            (extension.fp().cmd_set_fragment_shading_rate_khr)(
+                self.cmd_buf.raw,
+                &fragment_size,
+                &combiner_ops,
+            );
+        }
+        true
+    }
+
+    pub fn begin_pipeline_statistics(&mut self, label: &str) {
+        if !self.device.pipeline_statistics
+            || self.cmd_buf.pipeline_statistics_query_active
+            || self.cmd_buf.pipeline_statistics_names.len()
+                == super::PIPELINE_STATISTICS_QUERY_COUNT
+        {
+            return;
+        }
+        let query = self.cmd_buf.pipeline_statistics_names.len() as u32;
+        unsafe {
+            self.device.core.cmd_begin_query(
+                self.cmd_buf.raw,
+                self.cmd_buf.pipeline_statistics_query_pool,
+                query,
+                vk::QueryControlFlags::empty(),
+            );
+        }
+        self.cmd_buf
+            .pipeline_statistics_names
+            .push(label.to_string());
+        self.cmd_buf.pipeline_statistics_query_active = true;
+    }
+
+    pub fn end_pipeline_statistics(&mut self) {
+        if !self.device.pipeline_statistics || !self.cmd_buf.pipeline_statistics_query_active {
+            return;
+        }
+        let query = (self.cmd_buf.pipeline_statistics_names.len() - 1) as u32;
+        unsafe {
+            self.device.core.cmd_end_query(
+                self.cmd_buf.raw,
+                self.cmd_buf.pipeline_statistics_query_pool,
+                query,
+            );
+        }
+        self.cmd_buf.pipeline_statistics_query_active = false;
+    }
+
     pub fn diagnostic_timestamp(&mut self, label: &str) {
         if self.device.timing.is_none()
             || self.cmd_buf.timed_pass_names.len() == crate::limits::PASS_COUNT
@@ -1007,7 +1299,7 @@ impl<'a> super::RenderCommandEncoder<'a> {
         unsafe {
             self.device.core.cmd_write_timestamp(
                 self.cmd_buf.raw,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 self.cmd_buf.query_pool,
                 index,
             );
