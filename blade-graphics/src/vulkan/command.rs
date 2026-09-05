@@ -124,6 +124,14 @@ impl crate::ShaderBindable for super::Sampler {
         );
     }
 }
+fn descriptor_range(piece: &crate::BufferPiece) -> u64 {
+    if piece.size == 0 {
+        vk::WHOLE_SIZE
+    } else {
+        piece.size
+    }
+}
+
 impl crate::ShaderBindable for crate::BufferPiece {
     fn bind_to(&self, ctx: &mut super::PipelineContext, index: u32) {
         ctx.write(
@@ -131,7 +139,7 @@ impl crate::ShaderBindable for crate::BufferPiece {
             vk::DescriptorBufferInfo {
                 buffer: self.buffer.raw,
                 offset: self.offset,
-                range: vk::WHOLE_SIZE,
+                range: descriptor_range(self),
             },
         );
     }
@@ -143,7 +151,7 @@ impl<'a, const N: crate::ResourceIndex> crate::ShaderBindable for &'a crate::Buf
             self.data.iter().map(|piece| vk::DescriptorBufferInfo {
                 buffer: piece.buffer.raw,
                 offset: piece.offset,
-                range: vk::WHOLE_SIZE,
+                range: descriptor_range(piece),
             }),
         );
     }

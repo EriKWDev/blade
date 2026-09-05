@@ -172,16 +172,40 @@ impl super::Context {
                 .get_physical_device_surface_capabilities(self.physical_device, surface.raw)
                 .unwrap()
         };
-        if config.size.width < capabilities.min_image_extent.width
-            || config.size.width > capabilities.max_image_extent.width
-            || config.size.height < capabilities.min_image_extent.height
-            || config.size.height > capabilities.max_image_extent.height
+        /*
+            NOTE: `imageExtent` must lie within [minImageExtent, maxImageExtent]
+                  (VUID-VkSwapchainCreateInfoKHR-pNext-07781). A surface can pin those to a size
+                  the caller does not know about - full-screen exclusive reports the monitor
+                  extent regardless of the window's client size - so clamp rather than trusting
+                  the request. `currentExtent` of u32::MAX means the surface takes whatever we ask.
+        */
+        let mut config = config;
+        let clamped = if capabilities.current_extent.width == u32::MAX
+            && capabilities.current_extent.height == u32::MAX
         {
+            vk::Extent2D {
+                width: config.size.width.clamp(
+                    capabilities.min_image_extent.width,
+                    capabilities.max_image_extent.width,
+                ),
+                height: config.size.height.clamp(
+                    capabilities.min_image_extent.height,
+                    capabilities.max_image_extent.height,
+                ),
+            }
+        } else {
+            capabilities.current_extent
+        };
+        if clamped.width != config.size.width || clamped.height != config.size.height {
             log::warn!(
-                "Requested size {}x{} is outside of surface capabilities",
+                "Requested surface size {}x{} is outside of surface capabilities, using {}x{}",
                 config.size.width,
-                config.size.height
+                config.size.height,
+                clamped.width,
+                clamped.height
             );
+            config.size.width = clamped.width;
+            config.size.height = clamped.height;
         }
 
         let (alpha, composite_alpha) = if config.transparent {

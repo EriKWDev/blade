@@ -318,11 +318,18 @@ pub struct BufferDesc<'a> {
 pub struct BufferPiece {
     pub buffer: Buffer,
     pub offset: u64,
+    /// Extent of the binding in bytes; 0 means the rest of the buffer. Sub-allocators should
+    /// set it so pieces of one buffer don't overlap and trip synchronization validation.
+    pub size: u64,
 }
 
 impl From<Buffer> for BufferPiece {
     fn from(buffer: Buffer) -> Self {
-        Self { buffer, offset: 0 }
+        Self {
+            buffer,
+            offset: 0,
+            size: 0,
+        }
     }
 }
 
@@ -332,6 +339,11 @@ impl BufferPiece {
         assert!(!base.is_null());
         unsafe { base.offset(self.offset as isize) }
     }
+
+    /// Restrict this piece to `size` bytes.
+    pub fn with_size(self, size: u64) -> Self {
+        Self { size, ..self }
+    }
 }
 
 impl Buffer {
@@ -339,6 +351,15 @@ impl Buffer {
         BufferPiece {
             buffer: self,
             offset,
+            size: 0,
+        }
+    }
+
+    pub fn at_size(self, offset: u64, size: u64) -> BufferPiece {
+        BufferPiece {
+            buffer: self,
+            offset,
+            size,
         }
     }
 }

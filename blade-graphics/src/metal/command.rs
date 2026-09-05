@@ -785,11 +785,7 @@ impl super::RenderCommandEncoder<'_> {
     pub fn begin_pipeline_statistics(&mut self, _label: &str) {}
     pub fn end_pipeline_statistics(&mut self) {}
 
-    /// Marks an intra-pass timing boundary where the backend supports one.
-    ///
-    /// Metal timings are currently sampled at render-encoder boundaries through the render-pass
-    /// descriptor. Keeping this as a no-op preserves those whole-pass timings without pretending
-    /// that an intra-encoder sample was recorded.
+    /// No-op: Metal timings are sampled at render-encoder boundaries instead.
     pub fn diagnostic_timestamp(&mut self, _label: &str) {}
 
     pub fn with<'p>(

@@ -58,11 +58,16 @@ impl crate::ShaderBindable for super::Sampler {
 impl crate::ShaderBindable for crate::BufferPiece {
     fn bind_to(&self, ctx: &mut super::PipelineContext, index: u32) {
         for &slot in ctx.targets[index as usize].iter() {
+            let avail = self.buffer.size - self.offset;
             ctx.commands.push(super::Command::BindBuffer {
                 target: glow::SHADER_STORAGE_BUFFER,
                 slot,
                 buffer: (*self).into(),
-                size: (self.buffer.size - self.offset) as u32,
+                size: if self.size == 0 {
+                    avail as u32
+                } else {
+                    self.size.min(avail) as u32
+                },
             });
         }
     }
@@ -418,10 +423,7 @@ impl super::PassEncoder<'_, super::RenderPipeline> {
     pub fn begin_pipeline_statistics(&mut self, _label: &str) {}
     pub fn end_pipeline_statistics(&mut self) {}
 
-    /// Marks an intra-pass timing boundary where the backend supports one.
-    ///
-    /// GLES has no timestamp query support here (`timings()` always returns an empty slice),
-    /// so this is a no-op rather than pretending a sample was recorded.
+    /// No-op: GLES has no timestamp queries here, so `timings()` stays empty.
     pub fn diagnostic_timestamp(&mut self, _label: &str) {}
 
     pub fn with<'b>(
