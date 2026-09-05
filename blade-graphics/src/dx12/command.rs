@@ -84,21 +84,12 @@ impl crate::ShaderBindable for super::Sampler {
     fn bind_to(&self, ctx: &mut super::PipelineContext, index: u32) {
         let slot = &ctx.group_descriptors.slots[index as usize];
         debug_assert_eq!(slot.kind, super::BindingKind::Sampler);
-        // Copy the sampler into ring slot (base + register). The shader reads
-        // nagaSamplerHeap[indexbuf[register]] where indexbuf[register] = base + register.
-        let src = super::raw_cpu_handle(self.cpu_handle);
-        let dst = D3D12_CPU_DESCRIPTOR_HANDLE {
-            ptr: ctx.sampler_cpu_base.ptr
-                + (slot.register * ctx.encoder.sampler_ring.increment) as usize,
-        };
-        unsafe {
-            ctx.encoder.device.CopyDescriptorsSimple(
-                1,
-                dst,
-                src,
-                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-            )
-        };
+        // Record the sampler rather than copying it now: `bind_group` resolves
+        // the whole group at once against the frame's dedup table, so a sampler
+        // used by a thousand draws occupies one ring slot and is copied once.
+        // The shader reads nagaSamplerHeap[indexbuf[register]], and indexbuf is
+        // built from these registers.
+        ctx.encoder.sampler_binds.push((slot.register, self.cpu_handle));
     }
 }
 
@@ -113,11 +104,29 @@ impl crate::ShaderBindable for crate::BufferPiece {
         // BufferPiece can point mid-buffer (belt sub-allocations). Create the view
         // inline with FirstElement = offset/4 so the shader reads from the right
         // place — otherwise sub-allocated bindings (e.g. egui vertices) read garbage.
+        //
+        // A whole-buffer piece is exactly what the pre-made descriptor already
+        // describes, so copy it instead: `CopyDescriptorsSimple` is a descriptor
+        // memcpy, while `Create*View` re-validates and re-encodes the view on
+        // every bind. Whole-buffer binds dominate (uniform/storage globals), so
+        // this takes the device call out of the common per-draw path.
         let raw_first = (self.offset / 4) as u32;
         let raw_num = (self.buffer.size.saturating_sub(self.offset) / 4) as u32;
+        let whole_buffer = self.offset == 0;
         match slot.kind {
             super::BindingKind::Srv => {
                 ctx.encoder.require_buffer_state(&self.buffer, READ_STATE);
+                if whole_buffer && self.buffer.srv_handle != 0 {
+                    unsafe {
+                        ctx.encoder.device.CopyDescriptorsSimple(
+                            1,
+                            dst,
+                            super::raw_cpu_handle(self.buffer.srv_handle),
+                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                        )
+                    };
+                    return;
+                }
                 unsafe {
                     ctx.encoder.device.CreateShaderResourceView(
                         self.buffer.resource(),
@@ -141,6 +150,17 @@ impl crate::ShaderBindable for crate::BufferPiece {
             super::BindingKind::Uav => {
                 ctx.encoder
                     .require_buffer_state(&self.buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                if whole_buffer && self.buffer.uav_handle != 0 {
+                    unsafe {
+                        ctx.encoder.device.CopyDescriptorsSimple(
+                            1,
+                            dst,
+                            super::raw_cpu_handle(self.buffer.uav_handle),
+                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                        )
+                    };
+                    return;
+                }
                 unsafe {
                     ctx.encoder.device.CreateUnorderedAccessView(
                         self.buffer.resource(),
@@ -260,17 +280,24 @@ impl super::CommandEncoder {
         total: u32,
         subs: impl Iterator<Item = u32>,
         needed: D3D12_RESOURCE_STATES,
+        skip_active_rt: bool,
     ) {
         if vtbl.is_null() {
             return; // null placeholder view
         }
         let mut barriers: Vec<D3D12_RESOURCE_BARRIER> = Vec::new();
         {
+            // Disjoint field borrows: the state map is written while the
+            // open pass's attachment list is only read.
+            let active_render_targets = &self.active_render_targets;
             let entry = self
                 .texture_states
                 .entry(vtbl as usize)
                 .or_insert_with(|| vec![D3D12_RESOURCE_STATE_COMMON; total.max(1) as usize]);
             for s in subs {
+                if skip_active_rt && active_render_targets.contains(&(vtbl, s)) {
+                    continue;
+                }
                 let cur = entry[s as usize];
                 if cur.0 != needed.0 {
                     barriers.push(transition_barrier(vtbl, cur, needed, s));
@@ -290,8 +317,7 @@ impl super::CommandEncoder {
         needed: D3D12_RESOURCE_STATES,
     ) {
         let total = view.total_subresources();
-        let subs = view.subresources();
-        self.require_subresources(view.resource_ptr, total, subs.into_iter(), needed);
+        self.require_subresources(view.resource_ptr, total, view.subresources(), needed, false);
     }
 
     /// Like `require_view_state`, but leaves any subresource that is a live
@@ -307,13 +333,7 @@ impl super::CommandEncoder {
         needed: D3D12_RESOURCE_STATES,
     ) {
         let total = view.total_subresources();
-        let resource = view.resource_ptr;
-        let subs: Vec<u32> = view
-            .subresources()
-            .into_iter()
-            .filter(|&s| !self.active_render_targets.contains(&(resource, s)))
-            .collect();
-        self.require_subresources(resource, total, subs.into_iter(), needed);
+        self.require_subresources(view.resource_ptr, total, view.subresources(), needed, true);
     }
 
     /// Transition the single (plane-0) subresource a texture *piece* (copy)
@@ -327,8 +347,8 @@ impl super::CommandEncoder {
         let tex = &piece.texture;
         let sub = piece.mip_level + piece.array_layer * tex.mip_levels;
         let total = tex.mip_levels * tex.array_layers * super::plane_count(tex.format);
-        let vtbl = unsafe { tex.resource().as_raw() as super::ResourcePtr };
-        self.require_subresources(vtbl, total, std::iter::once(sub), needed);
+        let vtbl = tex.resource().as_raw() as super::ResourcePtr;
+        self.require_subresources(vtbl, total, std::iter::once(sub), needed, false);
     }
 
     /// Transition a buffer (whole resource). Host-visible buffers are tracked the
@@ -348,7 +368,7 @@ impl super::CommandEncoder {
         if buffer.resource_ptr.is_null() {
             return;
         }
-        let vtbl = unsafe { buffer.resource().as_raw() as super::ResourcePtr };
+        let vtbl = buffer.resource().as_raw() as super::ResourcePtr;
         let key = vtbl as usize;
         let cur = self
             .buffer_states
@@ -488,6 +508,31 @@ impl super::CommandEncoder {
         }
     }
 
+    /// Ring slot holding `cpu_handle`, copying the sampler into the GPU-visible
+    /// heap the first time this frame that it is asked for. See `sampler_slots`.
+    pub(super) fn sampler_slot(&mut self, cpu_handle: u64) -> u32 {
+        if let Some(&index) = self.sampler_slots.get(&cpu_handle) {
+            return index;
+        }
+        assert!(
+            !self.sampler_ring.would_overflow(1),
+            "DX12: more than {} distinct samplers used in one frame; a shader-visible              sampler heap cannot exceed the hardware limit",
+            self.sampler_ring.max_capacity
+        );
+        let index = self.sampler_ring.offset;
+        let (dst, _gpu) = self.sampler_ring.alloc(1);
+        unsafe {
+            self.device.CopyDescriptorsSimple(
+                1,
+                dst,
+                super::raw_cpu_handle(cpu_handle),
+                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+            )
+        };
+        self.sampler_slots.insert(cpu_handle, index);
+        index
+    }
+
     /// Record that `root` now points at the CBV/SRV/UAV table of `count`
     /// descriptors at relative offset `rel`, so a later grow/spill can re-point
     /// (and, for spill, copy) it. Replaces any prior entry for the same root.
@@ -620,6 +665,46 @@ impl super::CommandEncoder {
         }
     }
 
+    /// Whether variable-rate shading is usable at all on this device+runtime.
+    pub(super) fn supports_shading_rate(&self) -> bool {
+        self.list5.is_some()
+            && self.shading_rate_tier.0 >= D3D12_VARIABLE_SHADING_RATE_TIER_1.0
+    }
+
+    /// Set the per-draw shading rate. `use_image` selects whether the
+    /// screen-space shading-rate image overrides it: the second combiner folds
+    /// the image into the result, so PASSTHROUGH keeps the per-draw rate and
+    /// OVERRIDE hands control to the image. This mirrors Vulkan's KEEP/REPLACE
+    /// combiner pair, which blade's callers are written against.
+    pub(super) fn set_shading_rate(&mut self, rate: crate::FragmentShadingRate, use_image: bool) {
+        let Some(list5) = self.list5.as_ref() else {
+            return;
+        };
+        let combiners = [
+            D3D12_SHADING_RATE_COMBINER_PASSTHROUGH,
+            if use_image {
+                D3D12_SHADING_RATE_COMBINER_OVERRIDE
+            } else {
+                D3D12_SHADING_RATE_COMBINER_PASSTHROUGH
+            },
+        ];
+        unsafe { list5.RSSetShadingRate(map_shading_rate(rate), Some(combiners.as_ptr())) };
+    }
+
+    /// Bind (or, with `None`, unbind) the screen-space shading-rate image.
+    pub(super) fn set_shading_rate_image(&mut self, view: Option<&super::TextureView>) {
+        let Some(list5) = self.list5.as_ref() else {
+            return;
+        };
+        match view {
+            Some(view) => {
+                let resource = borrowed_resource(view.resource_ptr);
+                unsafe { list5.RSSetShadingRateImage(resource.as_ref().unwrap()) };
+            }
+            None => unsafe { list5.RSSetShadingRateImage(None) },
+        }
+    }
+
     pub fn set_auto_barriers(&mut self, auto_barriers: bool) {
         self.auto_barriers = auto_barriers;
     }
@@ -635,7 +720,7 @@ impl super::CommandEncoder {
     ) -> super::AccelerationStructureCommandEncoder<'_> {
         self.begin_pass(label);
         super::AccelerationStructureCommandEncoder {
-            list: self.list.as_ref().unwrap(),
+            _list: self.list.as_ref().unwrap(),
         }
     }
 
@@ -748,19 +833,39 @@ impl super::CommandEncoder {
 
         super::RenderCommandEncoder {
             encoder: self,
-            target_size,
             resolves,
+            has_shading_rate_image: false,
         }
     }
 
+    /// Begin a render pass whose shading rate can be driven by a screen-space
+    /// shading-rate image (VRS tier 2). The image starts *inactive*: the pass
+    /// binds it but leaves the combiner on passthrough, and a draw opts in via
+    /// `set_fragment_shading_rate` — the same contract as the Vulkan backend.
     pub fn render_with_fragment_shading_rate_attachment(
         &mut self,
-        _label: &str,
-        _targets: crate::RenderTargetSet,
-        _attachment: crate::TextureView,
-        _texel_size: [u32; 2],
+        label: &str,
+        targets: crate::RenderTargetSet,
+        attachment: crate::TextureView,
+        texel_size: [u32; 2],
     ) -> super::RenderCommandEncoder<'_> {
-        unreachable!("fragment-shading-rate attachments are not supported by DX12")
+        // The attachment is read as a rate source for the whole pass; transition
+        // it before the pass binds its render targets.
+        self.require_view_state(&attachment, D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE);
+        let supported = self.supports_shading_rate()
+            && self.shading_rate_tier.0 >= D3D12_VARIABLE_SHADING_RATE_TIER_2.0;
+        debug_assert!(
+            !supported || texel_size[0] == texel_size[1],
+            "DX12 shading-rate image tiles are square"
+        );
+        let mut pass = self.render(label, targets);
+        if supported {
+            pass.encoder.set_shading_rate_image(Some(&attachment));
+            pass.encoder
+                .set_shading_rate(crate::FragmentShadingRate::FULL, false);
+            pass.has_shading_rate_image = true;
+        }
+        pass
     }
 
     pub fn render_multisampled_to_single_sampled_with_fragment_shading_rate_attachment(
@@ -783,8 +888,18 @@ impl super::CommandEncoder {
         unreachable!("multisampled render-to-single-sampled is not supported by DX12")
     }
 
-    pub fn init_fragment_shading_rate_attachment(&mut self, _texture: super::Texture) {
-        unreachable!("fragment-shading-rate attachments are not supported by DX12")
+    /// Put a shading-rate image into the state it is read in, so the per-frame
+    /// upload path only has to bounce it through COPY_DEST and back.
+    pub fn init_fragment_shading_rate_attachment(&mut self, texture: super::Texture) {
+        let total = texture.mip_levels * texture.array_layers * super::plane_count(texture.format);
+        let vtbl = texture.resource().as_raw() as super::ResourcePtr;
+        self.require_subresources(
+            vtbl,
+            total,
+            0..total,
+            D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE,
+            false,
+        );
     }
 
     /// Perform an MSAA resolve from `src` (the multisampled attachment) into `dst`.
@@ -801,10 +916,8 @@ impl super::CommandEncoder {
         let format = super::map_texture_format(dst.format);
         let src_res = borrowed_resource(src.resource_ptr);
         let dst_res = borrowed_resource(dst.resource_ptr);
-        let src_subs = src.subresources();
-        let dst_subs = dst.subresources();
         let list = self.list.as_ref().unwrap();
-        for (&s, &d) in src_subs.iter().zip(dst_subs.iter()) {
+        for (s, d) in src.subresources().zip(dst.subresources()) {
             match mode {
                 crate::ResolveMode::Average => unsafe {
                     list.ResolveSubresource(
@@ -847,14 +960,19 @@ impl super::CommandEncoder {
 }
 
 impl super::TransferCommandEncoder<'_> {
+    /// Upload a complete shading-rate image. Unlike Vulkan — where the layout
+    /// transitions around the copy have to be spelled out — the encoder's state
+    /// tracker already moves the texture to COPY_DEST here and back to
+    /// SHADING_RATE_SOURCE when the next pass binds it, so this is exactly a
+    /// buffer-to-texture copy.
     pub fn copy_buffer_to_fragment_shading_rate_attachment(
         &mut self,
-        _src: crate::BufferPiece,
-        _bytes_per_row: u32,
-        _dst: crate::TexturePiece,
-        _size: crate::Extent,
+        src: crate::BufferPiece,
+        bytes_per_row: u32,
+        dst: crate::TexturePiece,
+        size: crate::Extent,
     ) {
-        unreachable!("fragment-shading-rate attachments are not supported by DX12")
+        self.copy_buffer_to_texture(src, bytes_per_row, dst, size);
     }
 }
 
@@ -908,10 +1026,22 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         // frame's already-recorded draws) is now safe to drop.
         let completed = self.frame_index.saturating_sub(buffer_count);
         self.retired_cbv_heaps.retain(|(f, _)| *f > completed);
+        // Same deadline for the clear descriptors recorded by `fill_buffer`.
+        let clear_pool = &mut self.clear_uav_pool;
+        self.clear_uav_in_flight.retain(|&(frame, handle)| {
+            let live = frame > completed;
+            if !live {
+                clear_pool.free(handle);
+            }
+            live
+        });
         // Root-table bindings do not survive across command lists; replay state
         // starts empty each frame (re-populated by with()/bind()).
         self.active_cbv_tables.clear();
         self.bound_sampler_roots = None;
+        // The sampler ring has just rewound to this frame's segment, so the
+        // slots resolved for the previous frame no longer describe it.
+        self.sampler_slots.clear();
         // All resources decay to COMMON at the ExecuteCommandLists boundary, so a
         // fresh command list starts with every resource implicitly in COMMON.
         self.buffer_states.clear();
@@ -938,19 +1068,19 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
         // The back buffer is a single-subresource texture (1 mip, 1 layer).
         // require_subresources is a no-op if it's already COMMON, so it never
         // emits an illegal before==after barrier.
-        let frame_vtbl = unsafe { frame.resource.as_raw() as super::ResourcePtr };
+        let frame_vtbl = frame.resource.as_raw() as super::ResourcePtr;
         self.require_subresources(
             frame_vtbl,
             1,
             std::iter::once(0),
             D3D12_RESOURCE_STATE_COMMON,
+            false,
         );
 
         self.present = Some(super::Presentation {
             swapchain: frame.swapchain,
-            buffer_index: frame.buffer_index,
-            present_id: frame.present_id,
-            display_sync: frame.display_sync,
+            sync_interval: frame.sync_interval,
+            allow_tearing: frame.allow_tearing,
         });
     }
 
@@ -973,38 +1103,60 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
     type BufferPiece = crate::BufferPiece;
     type TexturePiece = crate::TexturePiece;
 
-    fn fill_buffer(&mut self, dst: crate::BufferPiece, _size: u64, value: u8) {
-        // DX12 ClearUnorderedAccessViewUint fills in DWORD chunks with a repeated-byte
-        // pattern. Note: it clears the whole UAV (the buffer's full-range raw UAV), so
-        // `_size`/offset sub-ranges are not honored — exact for whole-buffer fills.
+    fn fill_buffer(&mut self, dst: crate::BufferPiece, size: u64, value: u8) {
+        // `ClearUnorderedAccessViewUint` clears exactly what its UAV describes, so
+        // the range has to come from the view — the buffer's pre-made whole-range
+        // UAV would clear the entire resource. That distinction matters: belts
+        // hand out sub-allocations of one big buffer, so clearing the whole thing
+        // silently zeroes every other live allocation sharing the chunk.
+        //
+        // A raw UAV addresses 32-bit elements, so the range is taken to DWORD
+        // granularity; blade's belt allocations are at least 4-byte aligned.
         let value_u32 = (value as u32) * 0x01010101;
+        let available = dst.buffer.size.saturating_sub(dst.offset);
+        let size = size.min(available);
+        if size < 4 {
+            return;
+        }
+        debug_assert_eq!(dst.offset % 4, 0, "DX12 raw UAV clears are DWORD-addressed");
 
         // The buffer must be in UNORDERED_ACCESS to be cleared through a UAV.
         self.encoder
             .require_buffer_state(&dst.buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: DXGI_FORMAT_R32_TYPELESS,
+            ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_UAV {
+                    FirstElement: dst.offset / 4,
+                    NumElements: (size / 4) as u32,
+                    StructureByteStride: 0,
+                    CounterOffsetInBytes: 0,
+                    Flags: D3D12_BUFFER_UAV_FLAG_RAW,
+                },
+            },
+        };
+
+        // The clear needs the same view twice: once in the bound shader-visible
+        // heap (which may grow here, hence `cbv_alloc`) and once in a CPU-only
+        // heap.
+        let (ring_cpu, ring_gpu, _rel) = self.encoder.cbv_alloc(1);
         let enc = &mut *self.encoder;
-
-        let (ring_cpu, ring_gpu) = enc.cbv_srv_uav_ring.alloc(1);
-        let uav_cpu = super::raw_cpu_handle(dst.buffer.uav_handle);
-
+        let scratch_cpu = enc.clear_uav_pool.alloc(&enc.device);
+        enc.clear_uav_in_flight.push((enc.frame_index, scratch_cpu));
         unsafe {
-            enc.device.CopyDescriptorsSimple(
-                1,
-                ring_cpu,
-                uav_cpu,
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            );
-
-            // ClearUnorderedAccessViewUint fills the entire resource; we'd need
-            // a per-range UAV to fill an offset+size range precisely.
-            // For offset=0 / full-buffer fills this is exact.  For other cases
-            // it fills the entire buffer (conservatively safe).
+            let resource = dst.buffer.resource();
+            enc.device
+                .CreateUnorderedAccessView(resource, None, Some(&uav_desc), scratch_cpu);
+            enc.device
+                .CreateUnorderedAccessView(resource, None, Some(&uav_desc), ring_cpu);
             enc.current_list().ClearUnorderedAccessViewUint(
                 ring_gpu,
-                uav_cpu,
-                dst.buffer.resource(),
-                &[value_u32, value_u32, value_u32, value_u32],
-                &[], // no scissor rects → clear whole resource
+                scratch_cpu,
+                resource,
+                &[value_u32; 4],
+                &[], // no scissor rects → clear the view's whole range
             );
         }
     }
@@ -1108,7 +1260,7 @@ impl crate::traits::TransferEncoder for super::TransferCommandEncoder<'_> {
         let (footprint_res, footprint_offset) = if direct {
             self.encoder
                 .require_buffer_state(&src.buffer, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            (unsafe { src.buffer.resource().as_raw() }, src.offset)
+            (src.buffer.resource().as_raw(), src.offset)
         } else {
             assert!(
                 !src.buffer.mapped_ptr.is_null(),
@@ -1317,8 +1469,15 @@ impl super::ComputeCommandEncoder<'_> {
 // ── RenderCommandEncoder ──────────────────────────────────────────────────────
 
 impl super::RenderCommandEncoder<'_> {
-    pub fn set_fragment_shading_rate(&mut self, _rate: crate::FragmentShadingRate) -> bool {
-        false
+    pub fn set_fragment_shading_rate(&mut self, rate: crate::FragmentShadingRate) -> bool {
+        if !self.encoder.supports_shading_rate() {
+            return false;
+        }
+        // With an attachment bound, a non-full request means "let the image
+        // decide"; a full request means "go back to shading every pixel".
+        let use_image = self.has_shading_rate_image && rate != crate::FragmentShadingRate::FULL;
+        self.encoder.set_shading_rate(rate, use_image);
+        true
     }
 
     pub fn begin_pipeline_statistics(&mut self, _label: &str) {}
@@ -1432,33 +1591,29 @@ fn bind_group<D: crate::ShaderData>(
             0,
         )
     };
-    // Reserve a contiguous run in the sampler ring for this group's samplers.
-    // `sampler_base_index` is the absolute heap index the index buffer references.
-    let (sampler_cpu_base, sampler_base_index) = if gd.sampler_count > 0 {
-        let base_index = encoder.sampler_ring.offset;
-        let (cpu, _gpu) = encoder.sampler_ring.alloc(gd.sampler_count);
-        (cpu, base_index)
-    } else {
-        (D3D12_CPU_DESCRIPTOR_HANDLE { ptr: 0 }, 0)
-    };
-
     let root_cbv = gd.cbv_srv_uav_root_index;
     let root_sampler_index = gd.sampler_index_root_index;
 
     // `fill` consumes the PipelineContext (matching ShaderData::fill's by-value
-    // signature) and copies each sampler into ring slot (base + register).
+    // signature); samplers it touches land in `encoder.sampler_binds`.
+    encoder.sampler_binds.clear();
     data.fill(super::PipelineContext {
         encoder: &mut *encoder,
         group_descriptors: gd,
         ring_cpu_base,
-        sampler_cpu_base,
     });
 
-    // Build and bind this group's sampler-index buffer: [base, base+1, ...].
+    // Build and bind this group's sampler-index buffer: one ring slot per
+    // shader register, resolved through the frame's dedup table.
     if let Some(idx) = root_sampler_index {
-        let indices: Vec<u32> = (0..gd.sampler_count)
-            .map(|r| sampler_base_index + r)
-            .collect();
+        let binds = std::mem::take(&mut encoder.sampler_binds);
+        let mut indices = std::mem::take(&mut encoder.sampler_indices);
+        indices.clear();
+        indices.resize(gd.sampler_count as usize, 0);
+        for &(register, cpu_handle) in &binds {
+            let slot = encoder.sampler_slot(cpu_handle);
+            indices[register as usize] = slot;
+        }
         let va = encoder
             .upload_ring
             .write_aligned(bytemuck::cast_slice(&indices), 16);
@@ -1468,6 +1623,8 @@ fn bind_group<D: crate::ShaderData>(
         } else {
             unsafe { list.SetGraphicsRootShaderResourceView(idx, va) };
         }
+        encoder.sampler_binds = binds;
+        encoder.sampler_indices = indices;
     }
 
     if let Some(idx) = root_cbv {
@@ -1714,6 +1871,13 @@ impl crate::traits::RenderPipelineEncoder for super::RenderPipelineContext<'_> {
 
 fn subresource_index(mip: u32, array_layer: u32, mip_count: u32) -> u32 {
     mip + array_layer * mip_count
+}
+
+/// blade's shading-rate encoding — `(log2(width) << 2) | log2(height)` — is
+/// deliberately identical to `D3D12_SHADING_RATE`, so this is a cast, and an
+/// uploaded shading-rate image needs no per-texel translation either.
+fn map_shading_rate(rate: crate::FragmentShadingRate) -> D3D12_SHADING_RATE {
+    D3D12_SHADING_RATE(rate.attachment_texel_value() as i32)
 }
 
 fn map_texture_color(color: crate::TextureColor) -> [f32; 4] {

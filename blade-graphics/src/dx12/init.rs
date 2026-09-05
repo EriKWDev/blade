@@ -4,12 +4,99 @@ use windows::Win32::{
         Graphics::{
             Direct3D::D3D_FEATURE_LEVEL_12_0,
             Direct3D12::*,
-            Dxgi::*,
+            Dxgi::{Common::*, *},
         },
         System::Threading::CreateEventW,
     };
 
-use super::{Context, DescriptorHeap, LinearAllocator, Queue};
+use super::{Context, DescriptorPool, Queue};
+
+/// Typed wrapper over `CheckFeatureSupport`, which is otherwise a raw
+/// pointer/size pair repeated at every call site. Returns false (leaving `data`
+/// at its default) when the runtime does not know the feature — i.e. an older
+/// Windows build — so callers just read the zeroed struct.
+unsafe fn check_feature<T>(device: &ID3D12Device, feature: D3D12_FEATURE, data: &mut T) -> bool {
+    device
+        .CheckFeatureSupport(
+            feature,
+            data as *mut T as *mut std::ffi::c_void,
+            std::mem::size_of::<T>() as u32,
+        )
+        .is_ok()
+}
+
+/// MSAA sample counts the device actually supports, as a bit mask of the counts
+/// themselves (bit value 4 == 4x). D3D12 answers this per format, so intersect a
+/// representative color and depth format: blade's capability is device-wide, and
+/// a count usable for color but not depth cannot be used for a normal pass.
+unsafe fn query_sample_count_mask(device: &ID3D12Device) -> u32 {
+    let mut mask = 0u32;
+    for count in [1u32, 2, 4, 8, 16, 32] {
+        let supported = [DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_D32_FLOAT]
+            .into_iter()
+            .all(|format| {
+                let mut levels = D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS {
+                    Format: format,
+                    SampleCount: count,
+                    ..Default::default()
+                };
+                check_feature(
+                    device,
+                    D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+                    &mut levels,
+                ) && levels.NumQualityLevels > 0
+            });
+        if supported {
+            mask |= count;
+        }
+    }
+    // Single-sampled is always available; never report an empty mask.
+    mask | 1
+}
+
+/// Variable-rate shading support, translated into blade's capability shape.
+///
+/// Tier 1 is per-draw only (`RSSetShadingRate`); tier 2 adds the screen-space
+/// shading-rate image, which is what `fragment_shading_rate_attachment_texel_size`
+/// advertises. blade's attachment byte encoding — `(log2(w) << 2) | log2(h)` —
+/// is exactly `D3D12_SHADING_RATE`, so an uploaded attachment needs no
+/// translation.
+unsafe fn query_shading_rates(
+    device: &ID3D12Device,
+    sample_count_mask: u32,
+) -> (
+    D3D12_VARIABLE_SHADING_RATE_TIER,
+    Vec<crate::FragmentShadingRateSupport>,
+    Option<[u32; 2]>,
+) {
+    let mut options6 = D3D12_FEATURE_DATA_D3D12_OPTIONS6::default();
+    if !check_feature(device, D3D12_FEATURE_D3D12_OPTIONS6, &mut options6) {
+        return (D3D12_VARIABLE_SHADING_RATE_TIER_NOT_SUPPORTED, Vec::new(), None);
+    }
+    let tier = options6.VariableShadingRateTier;
+    if tier.0 < D3D12_VARIABLE_SHADING_RATE_TIER_1.0 {
+        return (tier, Vec::new(), None);
+    }
+    // The base set every VRS-capable device supports, plus the coarser sizes
+    // gated behind AdditionalShadingRatesSupported.
+    let mut sizes: Vec<[u8; 2]> = vec![[1, 1], [1, 2], [2, 1], [2, 2]];
+    if options6.AdditionalShadingRatesSupported.as_bool() {
+        sizes.extend_from_slice(&[[2, 4], [4, 2], [4, 4]]);
+    }
+    let rates = sizes
+        .into_iter()
+        .map(|[w, h]| crate::FragmentShadingRateSupport {
+            rate: crate::FragmentShadingRate::new(w, h),
+            sample_count_mask,
+        })
+        .collect();
+    // The shading-rate image is tier 2 and its tile is square.
+    let texel_size = (tier.0 >= D3D12_VARIABLE_SHADING_RATE_TIER_2.0).then(|| {
+        let tile = options6.ShadingRateImageTileSize.max(1);
+        [tile, tile]
+    });
+    (tier, rates, texel_size)
+}
 
 impl Context {
     pub unsafe fn init(desc: super::super::ContextDesc) -> Result<Self, super::super::NotSupportedError> {
@@ -101,14 +188,7 @@ impl Context {
         // Resource-binding tier 3 lifts that cap, so use a larger heap there.
         let cbv_srv_uav_heap_size = {
             let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
-            let tier = if device
-                .CheckFeatureSupport(
-                    D3D12_FEATURE_D3D12_OPTIONS,
-                    &mut options as *mut _ as *mut std::ffi::c_void,
-                    std::mem::size_of::<D3D12_FEATURE_DATA_D3D12_OPTIONS>() as u32,
-                )
-                .is_ok()
-            {
+            let tier = if check_feature(&device, D3D12_FEATURE_D3D12_OPTIONS, &mut options) {
                 options.ResourceBindingTier
             } else {
                 D3D12_RESOURCE_BINDING_TIER_1
@@ -119,8 +199,31 @@ impl Context {
             if tier.0 >= D3D12_RESOURCE_BINDING_TIER_3.0 {
                 2_000_000
             } else {
-                super::ENCODER_HEAP_SIZE
+                super::ENCODER_HEAP_TIER12_MAX
             }
+        };
+
+        // Everything below was previously hard-coded; ask the device instead.
+        let mut options4 = D3D12_FEATURE_DATA_D3D12_OPTIONS4::default();
+        let shader_float16 = check_feature(&device, D3D12_FEATURE_D3D12_OPTIONS4, &mut options4)
+            && options4.Native16BitShaderOpsSupported.as_bool();
+        let sample_count_mask = query_sample_count_mask(&device);
+        let (shading_rate_tier, fragment_shading_rates, fragment_shading_rate_attachment_texel_size) =
+            query_shading_rates(&device, sample_count_mask);
+
+        let capabilities = crate::Capabilities {
+            // Ray queries need DXR + the acceleration-structure backend, which
+            // this backend does not implement yet.
+            ray_query: crate::ShaderVisibility::empty(),
+            shader_float16,
+            sample_count_mask,
+            multidraw_indirect: true,
+            draw_indexed_indirect_count: true,
+            vendor,
+            present_wait: false,
+            multisampled_render_to_single_sampled: false,
+            fragment_shading_rates,
+            fragment_shading_rate_attachment_texel_size,
         };
 
         let queue_desc = D3D12_COMMAND_QUEUE_DESC {
@@ -138,19 +241,17 @@ impl Context {
         let fence_event: HANDLE = CreateEventW(None, false, false, None)
             .map_err(|e| super::super::NotSupportedError::Platform(e))?;
 
-        let rtv_heap = DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, super::RTV_HEAP_SIZE, false);
-        let dsv_heap = DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, super::DSV_HEAP_SIZE, false);
-        let staging_heap = DescriptorHeap::new(
-            &device,
+        // CPU-visible descriptor pools: pages are allocated lazily and freed
+        // handles are recycled, so there is no fixed view/target budget.
+        let rtv_pool = DescriptorPool::new(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, super::RTV_PAGE_SIZE);
+        let dsv_pool = DescriptorPool::new(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, super::DSV_PAGE_SIZE);
+        let staging_pool = DescriptorPool::new(
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            super::STAGING_HEAP_SIZE,
-            false,
+            super::STAGING_PAGE_SIZE,
         );
-        let staging_sampler_heap = DescriptorHeap::new(
-            &device,
+        let staging_sampler_pool = DescriptorPool::new(
             D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-            super::STAGING_SAMPLER_SIZE,
-            false,
+            super::STAGING_SAMPLER_PAGE_SIZE,
         );
 
         let draw_sig = create_command_sig(&device, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, 16);
@@ -176,14 +277,10 @@ impl Context {
                 fence_event,
                 last_progress: 0,
             }),
-            rtv_heap,
-            dsv_heap,
-            staging_heap,
-            staging_sampler_heap,
-            rtv_alloc: std::sync::Mutex::new(LinearAllocator { offset: 0 }),
-            dsv_alloc: std::sync::Mutex::new(LinearAllocator { offset: 0 }),
-            staging_alloc: std::sync::Mutex::new(LinearAllocator { offset: 0 }),
-            staging_sampler_alloc: std::sync::Mutex::new(LinearAllocator { offset: 0 }),
+            rtv_pool: std::sync::Mutex::new(rtv_pool),
+            dsv_pool: std::sync::Mutex::new(dsv_pool),
+            staging_pool: std::sync::Mutex::new(staging_pool),
+            staging_sampler_pool: std::sync::Mutex::new(staging_sampler_pool),
             draw_sig,
             draw_indexed_sig,
             dispatch_sig,
@@ -194,25 +291,15 @@ impl Context {
                 driver_name: "D3D12".to_string(),
                 driver_info,
             },
-            vendor,
             factory,
             cbv_srv_uav_heap_size,
+            capabilities,
+            shading_rate_tier,
         })
     }
 
     pub fn capabilities(&self) -> crate::Capabilities {
-        crate::Capabilities {
-            ray_query: crate::ShaderVisibility::empty(),
-            shader_float16: false,
-            sample_count_mask: 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20, // 1,2,4,8,16,32
-            multidraw_indirect: true,
-            draw_indexed_indirect_count: true,
-            vendor: self.vendor,
-            present_wait: false,
-            multisampled_render_to_single_sampled: false,
-            fragment_shading_rates: Vec::new(),
-            fragment_shading_rate_attachment_texel_size: None,
-        }
+        self.capabilities.clone()
     }
 
     pub fn device_information(&self) -> &crate::DeviceInformation {
@@ -244,41 +331,66 @@ fn create_command_sig(
     sig.unwrap()
 }
 
-unsafe fn pick_adapter(
-    factory: &IDXGIFactory4,
-    preferred_device_id: u32,
-) -> Result<(IDXGIAdapter1, DXGI_ADAPTER_DESC1), super::super::NotSupportedError> {
-    let mut best: Option<(IDXGIAdapter1, DXGI_ADAPTER_DESC1)> = None;
-
+/// Enumerate D3D12-capable hardware adapters, best first.
+///
+/// `EnumAdapters1` order is unspecified with respect to performance — on a
+/// laptop it commonly yields the integrated GPU before the discrete one, so
+/// taking its first entry picked the weaker GPU. `IDXGIFactory6` exposes an
+/// explicit preference order; use it where available and fall back to the plain
+/// enumeration (plus a largest-VRAM tie-break) on older runtimes.
+unsafe fn enumerate_adapters(factory: &IDXGIFactory4) -> Vec<(IDXGIAdapter1, DXGI_ADAPTER_DESC1)> {
+    let mut out: Vec<(IDXGIAdapter1, DXGI_ADAPTER_DESC1)> = Vec::new();
+    let by_preference = factory.cast::<IDXGIFactory6>().ok();
     for i in 0.. {
-        let adapter: IDXGIAdapter1 = match factory.EnumAdapters1(i) {
-            Ok(a) => a,
-            Err(_) => break,
+        let adapter: IDXGIAdapter1 = match &by_preference {
+            Some(f) => {
+                match f.EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE) {
+                    Ok(a) => a,
+                    Err(_) => break,
+                }
+            }
+            None => match factory.EnumAdapters1(i) {
+                Ok(a) => a,
+                Err(_) => break,
+            },
         };
-        let desc: DXGI_ADAPTER_DESC1 = match adapter.GetDesc1() {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
+        let Ok(desc) = adapter.GetDesc1() else { continue };
         if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
             continue;
         }
-
         let mut test: Option<ID3D12Device> = None;
         if D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut test).is_err() {
             continue;
         }
-
-        if preferred_device_id != 0 && desc.DeviceId == preferred_device_id {
-            return Ok((adapter, desc));
-        }
-
-        if best.is_none() {
-            best = Some((adapter, desc));
-        }
+        out.push((adapter, desc));
     }
+    if by_preference.is_none() {
+        // No preference order available: approximate it by dedicated video memory.
+        out.sort_by_key(|(_, desc)| std::cmp::Reverse(desc.DedicatedVideoMemory));
+    }
+    out
+}
 
-    best.ok_or(super::super::NotSupportedError::NoSupportedDeviceFound)
+unsafe fn pick_adapter(
+    factory: &IDXGIFactory4,
+    preferred_device_id: u32,
+) -> Result<(IDXGIAdapter1, DXGI_ADAPTER_DESC1), super::super::NotSupportedError> {
+    let mut adapters = enumerate_adapters(factory);
+    if preferred_device_id != 0 {
+        if let Some(i) = adapters
+            .iter()
+            .position(|(_, desc)| desc.DeviceId == preferred_device_id)
+        {
+            return Ok(adapters.swap_remove(i));
+        }
+        log::warn!(
+            "DX12: requested device id {preferred_device_id:#x} not found; using the              highest-performance adapter instead"
+        );
+    }
+    if adapters.is_empty() {
+        return Err(super::super::NotSupportedError::NoSupportedDeviceFound);
+    }
+    Ok(adapters.swap_remove(0))
 }
 
 fn is_software_adapter(desc: &DXGI_ADAPTER_DESC1) -> bool {

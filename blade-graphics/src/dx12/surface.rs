@@ -33,16 +33,27 @@ impl super::Context {
             alpha: crate::AlphaMode::Ignored,
             target_size: [0; 2],
             next_present_id: 1,
+            sync_interval: 1,
+            allow_tearing: false,
             frame_latency_waitable: None,
         })
     }
 
     pub fn destroy_surface(&self, surface: &mut super::Surface) {
         self.flush_gpu();
+        self.release_surface_frames(surface);
+        surface.swapchain = None;
+    }
+
+    /// Drop the back-buffer references and return their RTVs to the pool. Every
+    /// `reconfigure_surface` (i.e. every window resize) makes a fresh set, so
+    /// without this each resize permanently consumed `BufferCount` RTVs.
+    fn release_surface_frames(&self, surface: &mut super::Surface) {
+        let mut rtv_pool = self.rtv_pool.lock().unwrap();
         for frame in surface.frames.drain(..) {
+            rtv_pool.free(frame.rtv);
             drop(frame.resource);
         }
-        surface.swapchain = None;
     }
 
     pub fn reconfigure_surface(
@@ -73,11 +84,20 @@ impl super::Context {
         // ALLOW_TEARING may only be set if the adapter actually supports it;
         // setting it otherwise makes CreateSwapChain fail with DXGI_ERROR_INVALID_CALL
         // (which is what broke exclusive-fullscreen creation on this adapter).
-        let tearing_flag = match config.display_sync {
-            crate::DisplaySync::Tear if self.tearing_supported() => {
-                DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
-            }
-            _ => DXGI_SWAP_CHAIN_FLAG(0),
+        let allow_tearing = matches!(config.display_sync, crate::DisplaySync::Tear)
+            && self.tearing_supported();
+        let tearing_flag = if allow_tearing {
+            DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
+        } else {
+            DXGI_SWAP_CHAIN_FLAG(0)
+        };
+        // How `Present` is called each frame. `Block` waits for a vblank per
+        // present; `Recent`/`Tear` present immediately, the latter tearing when
+        // the adapter allows it. Falling back to interval 0 without the tearing
+        // flag is exactly the documented `Recent` fallback.
+        let sync_interval: u32 = match config.display_sync {
+            crate::DisplaySync::Block => 1,
+            crate::DisplaySync::Recent | crate::DisplaySync::Tear => 0,
         };
         // FRAME_LATENCY_WAITABLE_OBJECT: acquire_frame waits on this so the GPU
         // does not render into a back buffer the compositor is still presenting.
@@ -90,10 +110,8 @@ impl super::Context {
         // Without it, FLIP_DISCARD shows occasional whole-frame flicker.
         let swap_flags = tearing_flag.0 | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0;
 
-        // Drop old swapchain frames before resizing
-        for frame in surface.frames.drain(..) {
-            drop(frame.resource);
-        }
+        // Drop old swapchain frames (returning their RTVs) before resizing.
+        self.release_surface_frames(surface);
 
         let queue = self.queue.lock().unwrap();
 
@@ -137,32 +155,44 @@ impl super::Context {
                 }
             };
             let sc3 = sc1.cast::<IDXGISwapChain3>().unwrap();
-            // Max frame latency = 1. This is a DISPLAY-LATENCY/pacing knob (how
-            // many presents the CPU may queue ahead of the DISPLAY), which is
-            // distinct from BufferCount (how many back buffers exist — still
-            // `num_frames`). At 1, acquire_frame's wait on the waitable releases
-            // only when the prior present is consumed at vblank, so the CPU is
-            // locked to a regular display cadence (one new frame per vblank) at
-            // minimum latency. Raising it lets the CPU run further ahead of the
-            // display, which hands frame pacing to the caller's (jittery,
-            // GPU-render-time) fences and produces stutter for a vsync'd app that
-            // pipelines one frame. Frames-in-flight at the buffer level is
-            // BufferCount and is unaffected by this; deeper CPU-ahead pipelining
-            // would be an explicit caller choice, not derived from buffer count.
-            unsafe {
-                let _ = sc3.SetMaximumFrameLatency(1);
-            }
             surface.frame_latency_waitable =
                 Some(unsafe { sc3.GetFrameLatencyWaitableObject() });
             surface.swapchain = Some(sc3);
         }
         drop(queue);
 
+        // Maximum frame latency is a DISPLAY-LATENCY/pacing knob (how many
+        // presents the CPU may queue ahead of the DISPLAY), distinct from
+        // BufferCount (how many back buffers exist — still `num_frames`).
+        //
+        // For `Block`, 1 is what we want: acquire_frame's wait on the waitable
+        // releases only when the prior present is consumed at vblank, so the CPU
+        // is locked to a regular display cadence at minimum latency. Raising it
+        // there lets the CPU run ahead of the display, handing pacing to the
+        // caller's (jittery, GPU-render-time) fences and producing stutter.
+        //
+        // For the uncapped modes the opposite holds: a latency of 1 would make
+        // the waitable itself throttle the app to one frame per vblank, which is
+        // precisely what `Recent`/`Tear` asked not to happen. Let the CPU stay
+        // `num_frames - 1` presents ahead so the back buffers are what limits it.
+        let max_latency = if sync_interval == 0 {
+            num_frames.saturating_sub(1).max(1)
+        } else {
+            1
+        };
+        if let Some(ref sc) = surface.swapchain {
+            unsafe {
+                let _ = sc.SetMaximumFrameLatency(max_latency);
+            }
+        }
+
         surface.format = format;
         surface.dxgi_format = dxgi_format;
         surface.alpha = alpha;
         surface.target_size = [config.size.width as u16, config.size.height as u16];
         surface.next_present_id = 1;
+        surface.sync_interval = sync_interval;
+        surface.allow_tearing = allow_tearing;
 
         let sc = surface.swapchain.as_ref().unwrap();
         let buffer_count: u32 = {
@@ -186,11 +216,7 @@ impl super::Context {
                     rtv,
                 );
             }
-            surface.frames.push(super::SurfaceFrame {
-                resource,
-                rtv,
-                fence_value: 0,
-            });
+            surface.frames.push(super::SurfaceFrame { resource, rtv });
         }
     }
 
@@ -251,18 +277,16 @@ impl super::Surface {
         let index = unsafe { sc.GetCurrentBackBufferIndex() };
         let frame = &self.frames[index as usize];
 
-        let present_id = self.next_present_id;
         self.next_present_id += 1;
 
         super::Frame {
             resource: frame.resource.clone(),
             swapchain: sc.clone(),
             rtv: frame.rtv,
-            buffer_index: index,
-            present_id,
             format: self.format,
             target_size: self.target_size,
-            display_sync: true, // default; reconfigure_surface can override
+            sync_interval: self.sync_interval,
+            allow_tearing: self.allow_tearing,
         }
     }
 

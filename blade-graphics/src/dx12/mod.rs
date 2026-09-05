@@ -19,14 +19,21 @@ mod surface;
 
 // ── Descriptor heap sizes ─────────────────────────────────────────────────────
 
-pub(super) const RTV_HEAP_SIZE: u32 = 512;
-pub(super) const DSV_HEAP_SIZE: u32 = 128;
-pub(super) const STAGING_HEAP_SIZE: u32 = 65536;
-pub(super) const STAGING_SAMPLER_SIZE: u32 = 2048;
+// CPU-only descriptor pools grow by whole pages on demand (see `DescriptorPool`),
+// so these are allocation granularities, not capacities. Sized so the common case
+// needs one page per type.
+pub(super) const RTV_PAGE_SIZE: u32 = 512;
+pub(super) const DSV_PAGE_SIZE: u32 = 256;
+pub(super) const STAGING_PAGE_SIZE: u32 = 65536;
+pub(super) const STAGING_SAMPLER_PAGE_SIZE: u32 = 2048;
+/// Per-encoder pool backing `fill_buffer`'s CPU-side clear descriptors; a frame
+/// issues only a handful of buffer clears, so one page covers many frames of
+/// deferral.
+pub(super) const CLEAR_UAV_PAGE_SIZE: u32 = 256;
 // Per-encoder GPU-visible CBV/SRV/UAV ring. Each `bind()` consumes descriptors,
 // so a frame with N draws needs ~N entries. 1,000,000 is the D3D12 tier-1 max
 // for a shader-visible CBV/SRV/UAV heap. Reset each `start()`.
-pub(super) const ENCODER_HEAP_SIZE: u32 = 1_000_000;
+pub(super) const ENCODER_HEAP_TIER12_MAX: u32 = 1_000_000;
 // Every encoder's CBV/SRV/UAV heap STARTS at this size and grows on demand up to
 // its tier max (see DescriptorRing::grow). Small start = transient transfer/copy
 // encoders (which bind ~nothing) stay tiny instead of each reserving a huge heap;
@@ -53,67 +60,90 @@ pub type PlatformError = windows::core::Error;
 
 // ── Descriptor heap helper ────────────────────────────────────────────────────
 
+/// One CPU-only page of a `DescriptorPool`. `_raw` is never read — it is held
+/// solely to keep the heap (and therefore every handle carved out of it) alive.
 pub(super) struct DescriptorHeap {
-    pub raw: ID3D12DescriptorHeap,
-    pub cpu_start: D3D12_CPU_DESCRIPTOR_HANDLE,
-    pub gpu_start: D3D12_GPU_DESCRIPTOR_HANDLE,
-    pub increment: u32,
-    pub capacity: u32,
+    _raw: ID3D12DescriptorHeap,
+    cpu_start: D3D12_CPU_DESCRIPTOR_HANDLE,
+    increment: u32,
 }
 
 unsafe impl Send for DescriptorHeap {}
 unsafe impl Sync for DescriptorHeap {}
 
 impl DescriptorHeap {
-    pub fn new(
-        device: &ID3D12Device,
-        ty: D3D12_DESCRIPTOR_HEAP_TYPE,
-        capacity: u32,
-        gpu_visible: bool,
-    ) -> Self {
-        let flags = if gpu_visible {
-            D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
-        } else {
-            D3D12_DESCRIPTOR_HEAP_FLAG_NONE
-        };
+    fn new(device: &ID3D12Device, ty: D3D12_DESCRIPTOR_HEAP_TYPE, capacity: u32) -> Self {
         let desc = D3D12_DESCRIPTOR_HEAP_DESC {
             Type: ty,
             NumDescriptors: capacity,
-            Flags: flags,
+            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
             NodeMask: 0,
         };
         let raw: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&desc).unwrap() };
         let cpu_start = unsafe { raw.GetCPUDescriptorHandleForHeapStart() };
-        let gpu_start = if gpu_visible {
-            unsafe { raw.GetGPUDescriptorHandleForHeapStart() }
-        } else {
-            D3D12_GPU_DESCRIPTOR_HANDLE { ptr: 0 }
-        };
         let increment = unsafe { device.GetDescriptorHandleIncrementSize(ty) };
-        Self { raw, cpu_start, gpu_start, increment, capacity }
+        Self { _raw: raw, cpu_start, increment }
     }
 
-    pub fn cpu_handle(&self, index: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+    pub(super) fn cpu_handle(&self, index: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
         D3D12_CPU_DESCRIPTOR_HANDLE {
             ptr: self.cpu_start.ptr + (index * self.increment) as usize,
         }
     }
+}
 
-    pub fn gpu_handle(&self, index: u32) -> D3D12_GPU_DESCRIPTOR_HANDLE {
-        D3D12_GPU_DESCRIPTOR_HANDLE {
-            ptr: self.gpu_start.ptr + (index * self.increment) as u64,
+/// CPU-only (non-shader-visible) descriptor allocator: a growable list of
+/// fixed-size pages plus a free list of returned handles.
+///
+/// Two properties matter here. It **recycles**: `destroy_texture_view` /
+/// `destroy_buffer` / `destroy_sampler` return their handles, so a session that
+/// churns views — window resizes rebuilding the render targets, streamed
+/// textures, the frame-pacer's deferred destruction belt — reuses descriptors
+/// instead of leaking one per create. And it **grows**: running out adds a page
+/// rather than tripping a capacity assert, so no fixed limit is baked into the
+/// backend. A page's descriptors never move (CPU heaps are never reallocated),
+/// so a handed-out `D3D12_CPU_DESCRIPTOR_HANDLE` stays valid for the pool's life
+/// and can be stored directly in `Buffer`/`TextureView`/`Sampler`.
+pub(super) struct DescriptorPool {
+    ty: D3D12_DESCRIPTOR_HEAP_TYPE,
+    page_size: u32,
+    pages: Vec<DescriptorHeap>,
+    /// Bump cursor within the last page.
+    next: u32,
+    free: Vec<D3D12_CPU_DESCRIPTOR_HANDLE>,
+}
+
+unsafe impl Send for DescriptorPool {}
+
+impl DescriptorPool {
+    fn new(ty: D3D12_DESCRIPTOR_HEAP_TYPE, page_size: u32) -> Self {
+        Self {
+            ty,
+            page_size,
+            pages: Vec::new(),
+            next: 0,
+            free: Vec::new(),
         }
     }
-}
 
-pub(super) struct LinearAllocator {
-    pub offset: u32,
-}
-impl LinearAllocator {
-    pub fn alloc(&mut self, count: u32) -> u32 {
-        let idx = self.offset;
-        self.offset += count;
-        idx
+    fn alloc(&mut self, device: &ID3D12Device) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        if let Some(handle) = self.free.pop() {
+            return handle;
+        }
+        if self.pages.is_empty() || self.next == self.page_size {
+            self.pages
+                .push(DescriptorHeap::new(device, self.ty, self.page_size));
+            self.next = 0;
+        }
+        let handle = self.pages.last().unwrap().cpu_handle(self.next);
+        self.next += 1;
+        handle
+    }
+
+    fn free(&mut self, handle: D3D12_CPU_DESCRIPTOR_HANDLE) {
+        if handle.ptr != 0 {
+            self.free.push(handle);
+        }
     }
 }
 
@@ -134,20 +164,15 @@ unsafe impl Sync for Queue {}
 pub struct Context {
     pub(super) device: ID3D12Device,
     pub(super) queue: Mutex<Queue>,
-    pub(super) rtv_heap: DescriptorHeap,
-    pub(super) dsv_heap: DescriptorHeap,
-    pub(super) staging_heap: DescriptorHeap,
-    pub(super) staging_sampler_heap: DescriptorHeap,
-    pub(super) rtv_alloc: Mutex<LinearAllocator>,
-    pub(super) dsv_alloc: Mutex<LinearAllocator>,
-    pub(super) staging_alloc: Mutex<LinearAllocator>,
-    pub(super) staging_sampler_alloc: Mutex<LinearAllocator>,
+    pub(super) rtv_pool: Mutex<DescriptorPool>,
+    pub(super) dsv_pool: Mutex<DescriptorPool>,
+    pub(super) staging_pool: Mutex<DescriptorPool>,
+    pub(super) staging_sampler_pool: Mutex<DescriptorPool>,
     pub(super) draw_sig: ID3D12CommandSignature,
     pub(super) draw_indexed_sig: ID3D12CommandSignature,
     pub(super) dispatch_sig: ID3D12CommandSignature,
     pub(super) validation_mode: bool,
     pub(super) device_information: crate::DeviceInformation,
-    pub(super) vendor: crate::GpuVendor,
     pub(super) factory: IDXGIFactory4,
     /// Per-encoder shader-visible CBV/SRV/UAV heap capacity. The heap is split
     /// into `buffer_count` per-frame segments, so this must be large enough that
@@ -155,6 +180,11 @@ pub struct Context {
     /// cap a shader-visible heap at 1,000,000; tier 3 (most discrete GPUs) has no
     /// such cap, so we use a larger heap there to keep per-frame headroom.
     pub(super) cbv_srv_uav_heap_size: u32,
+    /// Queried once at init rather than assumed; see `Context::init`.
+    pub(super) capabilities: crate::Capabilities,
+    /// Variable-rate-shading tier: 1 = per-draw rate only, 2 = also the
+    /// screen-space shading-rate image.
+    pub(super) shading_rate_tier: D3D12_VARIABLE_SHADING_RATE_TIER,
 }
 
 unsafe impl Send for Context {}
@@ -171,6 +201,12 @@ pub struct Surface {
     pub(super) alpha: crate::AlphaMode,
     pub(super) target_size: [u16; 2],
     pub(super) next_present_id: u64,
+    /// Presentation mode requested by the last `reconfigure_surface`, decomposed
+    /// into what `Present` actually takes.
+    pub(super) sync_interval: u32,
+    /// Whether the swapchain carries `ALLOW_TEARING` — the present flag is only
+    /// legal when it does, and only at sync interval 0.
+    pub(super) allow_tearing: bool,
     /// Swapchain frame-latency waitable. `acquire_frame` waits on it so the GPU
     /// does not render into a back buffer still being presented. Required for
     /// correctness: a blade SyncPoint is a GPU-render-completion fence, which is
@@ -185,7 +221,6 @@ unsafe impl Sync for Surface {}
 pub(super) struct SurfaceFrame {
     pub resource: ID3D12Resource,
     pub rtv: D3D12_CPU_DESCRIPTOR_HANDLE,
-    pub fence_value: u64,
 }
 
 // ── Frame ─────────────────────────────────────────────────────────────────────
@@ -195,11 +230,10 @@ pub struct Frame {
     pub(super) resource: ID3D12Resource,
     pub(super) swapchain: IDXGISwapChain3,
     pub(super) rtv: D3D12_CPU_DESCRIPTOR_HANDLE,
-    pub(super) buffer_index: u32,
-    pub(super) present_id: u64,
     pub(super) format: crate::TextureFormat,
     pub(super) target_size: [u16; 2],
-    pub(super) display_sync: bool,
+    pub(super) sync_interval: u32,
+    pub(super) allow_tearing: bool,
 }
 
 unsafe impl Send for Frame {}
@@ -223,7 +257,7 @@ impl Frame {
 
     pub fn texture_view(&self) -> TextureView {
         // Store the raw COM vtable pointer (without AddRef — borrowed from the frame).
-        let resource_ptr = unsafe { self.resource.as_raw() as *mut std::ffi::c_void };
+        let resource_ptr = self.resource.as_raw() as *mut std::ffi::c_void;
         TextureView {
             resource_ptr,
             srv_handle: 0,
@@ -238,6 +272,7 @@ impl Frame {
             array_count: 1,
             mip_levels: 1,
             array_layers: 1,
+            owns_descriptors: false,
         }
     }
 }
@@ -681,6 +716,11 @@ pub struct TextureView {
     pub(super) array_count: u32,
     pub(super) mip_levels: u32,
     pub(super) array_layers: u32,
+    /// False for the borrowed view of a swapchain back buffer, whose RTV belongs
+    /// to the surface. Now that descriptors are recycled, freeing one of those
+    /// would hand a live swapchain RTV out to the next view created — mirrors
+    /// `Texture::memory_handle == !0`.
+    pub(super) owns_descriptors: bool,
 }
 
 unsafe impl Send for TextureView {}
@@ -702,6 +742,7 @@ impl Default for TextureView {
             array_count: 1,
             mip_levels: 1,
             array_layers: 1,
+            owns_descriptors: true,
         }
     }
 }
@@ -716,19 +757,18 @@ impl TextureView {
     }
     /// Subresource indices this view covers, across all planes
     /// (index = plane*mip_levels*array_layers + layer*mip_levels + mip).
-    pub(super) fn subresources(&self) -> Vec<u32> {
+    ///
+    /// An iterator, not a `Vec`: this runs on every texture bind and every
+    /// attachment of every pass, and the counts involved are almost always 1.
+    pub(super) fn subresources(&self) -> impl Iterator<Item = u32> + '_ {
         let ml = self.mip_levels;
         let al = self.array_layers;
         let planes = plane_count(self.format);
-        let mut out = Vec::with_capacity((self.mip_count * self.array_count * planes) as usize);
-        for p in 0..planes {
-            for a in self.base_array..self.base_array + self.array_count {
-                for m in self.base_mip..self.base_mip + self.mip_count {
-                    out.push(p * ml * al + a * ml + m);
-                }
-            }
-        }
-        out
+        (0..planes).flat_map(move |p| {
+            (self.base_array..self.base_array + self.array_count).flat_map(move |a| {
+                (self.base_mip..self.base_mip + self.mip_count).map(move |m| p * ml * al + a * ml + m)
+            })
+        })
     }
 }
 
@@ -1163,15 +1203,21 @@ impl UploadRing {
 
 pub(super) struct Presentation {
     pub swapchain: IDXGISwapChain3,
-    pub buffer_index: u32,
-    pub present_id: u64,
-    pub display_sync: bool,
+    pub sync_interval: u32,
+    pub allow_tearing: bool,
 }
 
 // ── Command encoder ────────────────────────────────────────────────────────────
 
 pub struct CommandEncoder {
     pub(super) list: Option<ID3D12GraphicsCommandList>,
+    /// The same list cast once to the interface carrying the variable-rate-shading
+    /// entry points. `None` on runtimes without it (in which case VRS is reported
+    /// unsupported and every VRS call is inert).
+    pub(super) list5: Option<ID3D12GraphicsCommandList5>,
+    /// Device VRS tier, copied from the context so the encoder can answer
+    /// `set_fragment_shading_rate` without reaching back into it.
+    pub(super) shading_rate_tier: D3D12_VARIABLE_SHADING_RATE_TIER,
     /// Stable id used to name the list `blade-enc-{id}` and key its per-pass
     /// label table for DRED hang attribution.
     pub(super) id: u32,
@@ -1182,10 +1228,6 @@ pub struct CommandEncoder {
     pub(super) upload_ring: UploadRing,
     pub(super) present: Option<Presentation>,
     pub(super) timings: crate::Timings,
-    pub(super) staging_heap: ID3D12DescriptorHeap,
-    pub(super) staging_sampler_heap: ID3D12DescriptorHeap,
-    pub(super) staging_increment: u32,
-    pub(super) staging_sampler_increment: u32,
     pub(super) draw_sig: ID3D12CommandSignature,
     pub(super) draw_indexed_sig: ID3D12CommandSignature,
     pub(super) dispatch_sig: ID3D12CommandSignature,
@@ -1246,6 +1288,28 @@ pub struct CommandEncoder {
     /// The pipeline's sampler-heap root table indices (std, cmp, is_compute),
     /// set by `with()`; re-issued after a grow's `SetDescriptorHeaps`.
     pub(super) bound_sampler_roots: Option<(u32, u32, bool)>,
+    /// Samplers this frame already placed in the GPU-visible sampler ring, keyed
+    /// by their CPU descriptor handle. A shader-visible sampler heap is capped at
+    /// 2048 descriptors by hardware and cannot grow or spill the way the
+    /// CBV/SRV/UAV ring does, so allocating a fresh run per `bind()` put a hard
+    /// ceiling of ~2048/buffer_count sampler binds on a frame. Scenes reuse a
+    /// handful of distinct samplers across thousands of binds, so resolving each
+    /// one to a slot once per frame removes the ceiling and most of the
+    /// descriptor copies with it. Cleared in `start()`, in lockstep with the
+    /// ring's per-frame segment.
+    /// CPU-only descriptors for `fill_buffer`: `ClearUnorderedAccessViewUint`
+    /// wants the UAV in a non-shader-visible heap as well as in the bound one.
+    /// A single reused slot would be a gamble on when the runtime reads it, so
+    /// each clear takes its own and returns it once the submission that recorded
+    /// it is known complete — the same deferral `retired_cbv_heaps` uses.
+    pub(super) clear_uav_pool: DescriptorPool,
+    pub(super) clear_uav_in_flight: Vec<(u64, D3D12_CPU_DESCRIPTOR_HANDLE)>,
+    pub(super) sampler_slots: std::collections::HashMap<u64, u32>,
+    /// Scratch reused across `bind()` calls: samplers collected by `fill`, then
+    /// the ring indices handed to the shader. Kept on the encoder purely to stop
+    /// each bind from allocating two vectors.
+    pub(super) sampler_binds: Vec<(u32, u64)>,
+    pub(super) sampler_indices: Vec<u32>,
 }
 
 unsafe impl Send for CommandEncoder {}
@@ -1255,7 +1319,9 @@ pub struct TransferCommandEncoder<'a> {
 }
 
 pub struct AccelerationStructureCommandEncoder<'a> {
-    pub(super) list: &'a ID3D12GraphicsCommandList,
+    /// Unused until DXR lands here; kept so the encoder has the same shape as
+    /// the other backends' and borrows the list for the pass's lifetime.
+    pub(super) _list: &'a ID3D12GraphicsCommandList,
 }
 
 pub struct ComputeCommandEncoder<'a> {
@@ -1271,12 +1337,20 @@ pub(super) struct PendingResolve {
 
 pub struct RenderCommandEncoder<'a> {
     pub(super) encoder: &'a mut CommandEncoder,
-    pub(super) target_size: [u16; 2],
     pub(super) resolves: Vec<PendingResolve>,
+    /// Whether this pass bound a screen-space shading-rate image. Both the image
+    /// and the rate are command-list state, not pass state, so they have to be
+    /// unset when the pass ends or they leak into every later pass.
+    pub(super) has_shading_rate_image: bool,
 }
 
 impl Drop for RenderCommandEncoder<'_> {
     fn drop(&mut self) {
+        if self.has_shading_rate_image {
+            self.encoder.set_shading_rate_image(None);
+            self.encoder
+                .set_shading_rate(crate::FragmentShadingRate::FULL, false);
+        }
         let resolves = std::mem::take(&mut self.resolves);
         if resolves.is_empty() {
             return;
@@ -1313,9 +1387,6 @@ pub struct PipelineContext<'a> {
     pub(super) group_descriptors: &'a GroupDescriptors,
     /// Base of this group's CBV/SRV/UAV descriptors in the GPU-visible ring.
     pub(super) ring_cpu_base: D3D12_CPU_DESCRIPTOR_HANDLE,
-    /// Base of this group's samplers in the GPU-visible sampler ring (CPU handle).
-    /// Each `Sampler::bind_to` copies into `sampler_cpu_base + register`.
-    pub(super) sampler_cpu_base: D3D12_CPU_DESCRIPTOR_HANDLE,
 }
 
 // ── Trait: CommandDevice ──────────────────────────────────────────────────────
@@ -1368,7 +1439,9 @@ impl crate::traits::CommandDevice for Context {
         let upload_ring = UploadRing::new(&self.device, UPLOAD_RING_SIZE, segments as u64);
 
         CommandEncoder {
+            list5: list.cast::<ID3D12GraphicsCommandList5>().ok(),
             list: Some(list),
+            shading_rate_tier: self.shading_rate_tier,
             id,
             allocators,
             device: self.device.clone(),
@@ -1377,10 +1450,6 @@ impl crate::traits::CommandDevice for Context {
             upload_ring,
             present: None,
             timings: Vec::new(),
-            staging_heap: self.staging_heap.raw.clone(),
-            staging_sampler_heap: self.staging_sampler_heap.raw.clone(),
-            staging_increment: self.staging_heap.increment,
-            staging_sampler_increment: self.staging_sampler_heap.increment,
             draw_sig: self.draw_sig.clone(),
             draw_indexed_sig: self.draw_indexed_sig.clone(),
             dispatch_sig: self.dispatch_sig.clone(),
@@ -1398,6 +1467,14 @@ impl crate::traits::CommandDevice for Context {
             retired_cbv_heaps: Vec::new(),
             active_cbv_tables: Vec::new(),
             bound_sampler_roots: None,
+            clear_uav_pool: DescriptorPool::new(
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                CLEAR_UAV_PAGE_SIZE,
+            ),
+            clear_uav_in_flight: Vec::new(),
+            sampler_slots: std::collections::HashMap::new(),
+            sampler_binds: Vec::new(),
+            sampler_indices: Vec::new(),
         }
     }
 
@@ -1462,8 +1539,14 @@ impl crate::traits::CommandDevice for Context {
         }
 
         if let Some(pres) = encoder.present.take() {
-            let sync_interval: u32 = if pres.display_sync { 1 } else { 0 };
-            let _ = unsafe { pres.swapchain.Present(sync_interval, DXGI_PRESENT(0)) };
+            // ALLOW_TEARING is only accepted at sync interval 0 on a swapchain
+            // created with the matching flag; anywhere else it fails the present.
+            let flags = if pres.allow_tearing && pres.sync_interval == 0 {
+                DXGI_PRESENT_ALLOW_TEARING
+            } else {
+                DXGI_PRESENT(0)
+            };
+            let _ = unsafe { pres.swapchain.Present(pres.sync_interval, flags) };
             // Present swallows benign errors (occluded/resize), but a removed
             // device must not pass silently — it is the usual place a prior
             // frame's GPU fault first becomes visible on the CPU.

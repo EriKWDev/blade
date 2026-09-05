@@ -6,27 +6,31 @@ use windows::{
 
 impl super::Context {
     pub(super) fn alloc_rtv(&self) -> D3D12_CPU_DESCRIPTOR_HANDLE {
-        let idx = self.rtv_alloc.lock().unwrap().alloc(1);
-        assert!(idx < super::RTV_HEAP_SIZE, "RTV heap exhausted");
-        self.rtv_heap.cpu_handle(idx)
+        self.rtv_pool.lock().unwrap().alloc(&self.device)
+    }
+
+    pub(super) fn free_rtv_dsv(&self, handle: u64, is_depth: bool) {
+        let pool = if is_depth { &self.dsv_pool } else { &self.rtv_pool };
+        pool.lock().unwrap().free(super::raw_cpu_handle(handle));
     }
 
     pub(super) fn alloc_dsv(&self) -> D3D12_CPU_DESCRIPTOR_HANDLE {
-        let idx = self.dsv_alloc.lock().unwrap().alloc(1);
-        assert!(idx < super::DSV_HEAP_SIZE, "DSV heap exhausted");
-        self.dsv_heap.cpu_handle(idx)
+        self.dsv_pool.lock().unwrap().alloc(&self.device)
     }
 
-    pub(super) fn alloc_staging(&self, count: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
-        let idx = self.staging_alloc.lock().unwrap().alloc(count);
-        assert!(idx + count <= super::STAGING_HEAP_SIZE, "staging heap exhausted");
-        self.staging_heap.cpu_handle(idx)
+    pub(super) fn alloc_staging(&self) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        self.staging_pool.lock().unwrap().alloc(&self.device)
+    }
+
+    pub(super) fn free_staging(&self, handle: u64) {
+        self.staging_pool
+            .lock()
+            .unwrap()
+            .free(super::raw_cpu_handle(handle));
     }
 
     pub(super) fn alloc_staging_sampler(&self) -> D3D12_CPU_DESCRIPTOR_HANDLE {
-        let idx = self.staging_sampler_alloc.lock().unwrap().alloc(1);
-        assert!(idx < super::STAGING_SAMPLER_SIZE, "staging sampler heap exhausted");
-        self.staging_sampler_heap.cpu_handle(idx)
+        self.staging_sampler_pool.lock().unwrap().alloc(&self.device)
     }
 }
 
@@ -96,7 +100,7 @@ impl crate::traits::ResourceDevice for super::Context {
         };
 
         // SRV needs no special resource flag, so it is always available.
-        let srv_handle = self.alloc_staging(1);
+        let srv_handle = self.alloc_staging();
         unsafe {
             self.device.CreateShaderResourceView(
                 &resource,
@@ -117,7 +121,7 @@ impl crate::traits::ResourceDevice for super::Context {
             );
         }
 
-        let uav_handle = self.alloc_staging(1);
+        let uav_handle = self.alloc_staging();
         unsafe {
             self.device.CreateUnorderedAccessView(
                 &resource,
@@ -159,6 +163,11 @@ impl crate::traits::ResourceDevice for super::Context {
         if !buffer.resource_ptr.is_null() {
             unsafe { drop(Box::from_raw(buffer.resource_ptr as *mut ID3D12Resource)) };
         }
+        // Recycle the buffer's whole-range SRV/UAV; without this every
+        // create/destroy cycle (belt chunks, streamed geometry) leaks two
+        // descriptors until the pool has to add a page for no reason.
+        self.free_staging(buffer.srv_handle);
+        self.free_staging(buffer.uav_handle);
     }
 
     fn create_texture(&self, desc: super::super::TextureDesc) -> super::Texture {
@@ -249,7 +258,7 @@ impl crate::traits::ResourceDevice for super::Context {
         let resource = texture.resource();
 
         // Store the COM vtable pointer for barrier use — borrowed from the Box.
-        let resource_ptr = unsafe { resource.as_raw() as *mut std::ffi::c_void };
+        let resource_ptr = resource.as_raw() as *mut std::ffi::c_void;
 
         // D3D12 forbids creating a view kind the resource wasn't created for
         // (e.g. an RTV on a non-ALLOW_RENDER_TARGET resource), which can remove
@@ -266,7 +275,7 @@ impl crate::traits::ResourceDevice for super::Context {
 
         let samples = texture.sample_count;
         let srv_handle = if can_srv {
-            let h = self.alloc_staging(1);
+            let h = self.alloc_staging();
             let srv_desc = make_srv_desc(srv_format, desc.dimension, desc.subresources, samples);
             unsafe { self.device.CreateShaderResourceView(resource, Some(&srv_desc), h) };
             h.ptr as u64
@@ -275,7 +284,7 @@ impl crate::traits::ResourceDevice for super::Context {
         };
 
         let uav_handle = if can_uav {
-            let h = self.alloc_staging(1);
+            let h = self.alloc_staging();
             let uav_desc = make_uav_desc(format, desc.dimension, desc.subresources);
             unsafe { self.device.CreateUnorderedAccessView(resource, None, Some(&uav_desc), h) };
             h.ptr as u64
@@ -330,11 +339,26 @@ impl crate::traits::ResourceDevice for super::Context {
             array_count,
             mip_levels: texture.mip_levels,
             array_layers: texture.array_layers,
+            owns_descriptors: true,
         }
     }
 
-    fn destroy_texture_view(&self, _view: super::TextureView) {
-        // TextureView borrows the resource; destruction is a no-op.
+    fn destroy_texture_view(&self, view: super::TextureView) {
+        if !view.owns_descriptors {
+            return;
+        }
+        // The view borrows the resource (nothing to release there), but its
+        // descriptors are owned and must go back to their pools — a resize that
+        // rebuilds every render target would otherwise leak an RTV/DSV per
+        // attachment per resize.
+        self.free_staging(view.srv_handle);
+        self.free_staging(view.uav_handle);
+        if view.rtv_dsv_handle != 0 {
+            let is_depth = view
+                .aspects
+                .intersects(crate::TexelAspects::DEPTH | crate::TexelAspects::STENCIL);
+            self.free_rtv_dsv(view.rtv_dsv_handle, is_depth);
+        }
     }
 
     fn create_sampler(&self, desc: super::super::SamplerDesc) -> super::Sampler {
@@ -344,12 +368,19 @@ impl crate::traits::ResourceDevice for super::Context {
         unsafe {
             self.device.CreateSampler(
                 &D3D12_SAMPLER_DESC {
-                    Filter: map_filter(desc.mag_filter, desc.min_filter, desc.mipmap_filter, desc.compare),
+                    Filter: map_filter(
+                        desc.mag_filter,
+                        desc.min_filter,
+                        desc.mipmap_filter,
+                        desc.compare,
+                        desc.anisotropy_clamp,
+                    ),
                     AddressU: map_address_mode(au),
                     AddressV: map_address_mode(av),
                     AddressW: map_address_mode(aw),
                     MipLODBias: 0.0,
-                    MaxAnisotropy: desc.anisotropy_clamp.max(1),
+                    // D3D12 rejects values above 16 (D3D12_REQ_MAXANISOTROPY).
+                    MaxAnisotropy: desc.anisotropy_clamp.clamp(1, 16),
                     ComparisonFunc: desc.compare.map_or(
                         D3D12_COMPARISON_FUNC_ALWAYS, super::map_comparison),
                     BorderColor: map_border_color(desc.border_color),
@@ -362,7 +393,12 @@ impl crate::traits::ResourceDevice for super::Context {
         super::Sampler { cpu_handle: handle.ptr as u64 }
     }
 
-    fn destroy_sampler(&self, _sampler: super::Sampler) {}
+    fn destroy_sampler(&self, sampler: super::Sampler) {
+        self.staging_sampler_pool
+            .lock()
+            .unwrap()
+            .free(super::raw_cpu_handle(sampler.cpu_handle));
+    }
 
     fn create_acceleration_structure(
         &self,
@@ -599,22 +635,43 @@ fn map_address_mode(m: crate::AddressMode) -> D3D12_TEXTURE_ADDRESS_MODE {
     }
 }
 
+/// D3D12 encodes comparison filters as the plain filter with this bit set, so
+/// the base filter and the comparison variant never need separate tables.
+const D3D12_FILTER_COMPARISON_BIT: i32 = 0x80;
+
 fn map_filter(
     mag: crate::FilterMode,
     min: crate::FilterMode,
     mip: crate::FilterMode,
     compare: Option<crate::CompareFunction>,
+    anisotropy_clamp: u32,
 ) -> D3D12_FILTER {
-    match (min, mag, mip, compare.is_some()) {
-        (crate::FilterMode::Nearest, crate::FilterMode::Nearest, crate::FilterMode::Nearest, false) => D3D12_FILTER_MIN_MAG_MIP_POINT,
-        (crate::FilterMode::Nearest, crate::FilterMode::Nearest, crate::FilterMode::Linear,  false) => D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR,
-        (crate::FilterMode::Nearest, crate::FilterMode::Linear,  crate::FilterMode::Nearest, false) => D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT,
-        (crate::FilterMode::Nearest, crate::FilterMode::Linear,  crate::FilterMode::Linear,  false) => D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR,
-        (crate::FilterMode::Linear,  crate::FilterMode::Nearest, crate::FilterMode::Nearest, false) => D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT,
-        (crate::FilterMode::Linear,  crate::FilterMode::Nearest, crate::FilterMode::Linear,  false) => D3D12_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR,
-        (crate::FilterMode::Linear,  crate::FilterMode::Linear,  crate::FilterMode::Nearest, false) => D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
-        (crate::FilterMode::Linear,  crate::FilterMode::Linear,  crate::FilterMode::Linear,  false) => D3D12_FILTER_MIN_MAG_MIP_LINEAR,
-        (_, _, _, true) => D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR,
+    use crate::FilterMode as Fm;
+    // Anisotropy is a filter *mode* in D3D12, not just the MaxAnisotropy field:
+    // setting MaxAnisotropy on a linear filter does nothing at all. Requesting
+    // anisotropy while asking for point filtering is contradictory, so honor it
+    // only when the sampler is otherwise fully linear — matching Vulkan, where
+    // anisotropyEnable requires linear min/mag.
+    let base = if anisotropy_clamp > 1
+        && matches!((min, mag, mip), (Fm::Linear, Fm::Linear, Fm::Linear))
+    {
+        D3D12_FILTER_ANISOTROPIC
+    } else {
+        match (min, mag, mip) {
+            (Fm::Nearest, Fm::Nearest, Fm::Nearest) => D3D12_FILTER_MIN_MAG_MIP_POINT,
+            (Fm::Nearest, Fm::Nearest, Fm::Linear) => D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR,
+            (Fm::Nearest, Fm::Linear, Fm::Nearest) => D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT,
+            (Fm::Nearest, Fm::Linear, Fm::Linear) => D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR,
+            (Fm::Linear, Fm::Nearest, Fm::Nearest) => D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT,
+            (Fm::Linear, Fm::Nearest, Fm::Linear) => D3D12_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR,
+            (Fm::Linear, Fm::Linear, Fm::Nearest) => D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
+            (Fm::Linear, Fm::Linear, Fm::Linear) => D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        }
+    };
+    if compare.is_some() {
+        D3D12_FILTER(base.0 | D3D12_FILTER_COMPARISON_BIT)
+    } else {
+        base
     }
 }
 
