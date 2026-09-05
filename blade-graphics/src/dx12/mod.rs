@@ -2,12 +2,12 @@ use std::{ptr, sync::Mutex};
 use windows::{
     core::Interface,
     Win32::{
-        Foundation::{HANDLE, WAIT_EVENT},
+        Foundation::HANDLE,
         Graphics::{
             Direct3D12::*,
             Dxgi::{Common::*, *},
         },
-        System::Threading::{WaitForSingleObjectEx, INFINITE},
+        System::Threading::{CreateEventW, WaitForSingleObjectEx, INFINITE},
     },
 };
 
@@ -1565,7 +1565,6 @@ impl crate::traits::CommandDevice for Context {
     }
 
     fn wait_for(&self, sp: &SyncPoint, timeout_ms: u32) -> bool {
-        let queue = self.queue.lock().unwrap();
         // Check removal BEFORE trusting the fence: a removed device resets every
         // fence to UINT64_MAX, which trivially satisfies `>= sp.progress` and would
         // make wait_for report success. Callers (belts, transient encoders, the
@@ -1574,18 +1573,59 @@ impl crate::traits::CommandDevice for Context {
         // burying the original fault. Surfacing it here (with DRED) pins the panic
         // to the first wait after the fault, naming the frame that hung.
         panic_if_device_removed(&self.device, "wait_for");
-        if unsafe { queue.fence.GetCompletedValue() } >= sp.progress {
+        // Take the fence out from under the lock. Holding the queue mutex across a
+        // blocking wait stops every other thread from submitting for its duration.
+        let fence = {
+            let queue = self.queue.lock().unwrap();
+            queue.fence.clone()
+        };
+        if unsafe { fence.GetCompletedValue() } >= sp.progress {
             return true;
         }
-        unsafe {
-            queue.fence.SetEventOnCompletion(sp.progress, queue.fence_event).unwrap();
+        if timeout_ms == 0 {
+            // A pure poll — and it must NOT arm the fence. `SetEventOnCompletion`
+            // leaves a standing request to signal the event when the fence reaches
+            // that value, so arming it and then immediately timing out leaves the
+            // event to be signaled later with nobody waiting. On the shared,
+            // auto-reset queue event that stale signal was then collected by the
+            // *next* blocking wait, which returned success for a value the GPU had
+            // not reached: belts recycled chunks still being read and transient
+            // encoders were destroyed mid-execution ("... was deleted prior to
+            // executing the command list"). Belts poll this way every frame.
+            return false;
         }
-        let timeout = if timeout_ms == !0 { INFINITE } else { timeout_ms };
-        let ok = unsafe { WaitForSingleObjectEx(queue.fence_event, timeout, false) == WAIT_EVENT(0u32) };
+        // Register on an event owned by this call, so nothing can steal the signal
+        // and no registration outlives the wait. INFINITE is the only path that
+        // arms the fence at all: the wait cannot return before the fence reaches
+        // the value, so the request is always consumed before the handle closes.
+        // A finite timeout could return first, which is why it polls instead.
+        if timeout_ms != !0 {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+            while std::time::Instant::now() < deadline {
+                if unsafe { fence.GetCompletedValue() } >= sp.progress {
+                    return true;
+                }
+                // Sleep rather than spin: a bounded wait is rare here, and
+                // burning a core for its duration would cost more than it saves.
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            let completed = unsafe { fence.GetCompletedValue() };
+            return completed >= sp.progress;
+        }
+        let event = match unsafe { CreateEventW(None, false, false, None) } {
+            Ok(event) => event,
+            Err(e) => panic!("DX12 CreateEventW failed in wait_for: {e}"),
+        };
+        unsafe {
+            fence.SetEventOnCompletion(sp.progress, event).unwrap();
+            WaitForSingleObjectEx(event, INFINITE, false);
+            let _ = windows::Win32::Foundation::CloseHandle(event);
+        }
         // The wait can also return because the device was lost while we blocked
         // (the event is signaled on removal); re-check so we fault here, not later.
         panic_if_device_removed(&self.device, "wait_for");
-        ok
+        let completed = unsafe { fence.GetCompletedValue() };
+        completed >= sp.progress
     }
 }
 
