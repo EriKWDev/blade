@@ -418,6 +418,12 @@ impl super::PassEncoder<'_, super::RenderPipeline> {
     pub fn begin_pipeline_statistics(&mut self, _label: &str) {}
     pub fn end_pipeline_statistics(&mut self) {}
 
+    /// Marks an intra-pass timing boundary where the backend supports one.
+    ///
+    /// GLES has no timestamp query support here (`timings()` always returns an empty slice),
+    /// so this is a no-op rather than pretending a sample was recorded.
+    pub fn diagnostic_timestamp(&mut self, _label: &str) {}
+
     pub fn with<'b>(
         &'b mut self,
         pipeline: &'b super::RenderPipeline,
