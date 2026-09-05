@@ -48,6 +48,14 @@ impl crate::ShaderBindable for super::TextureView {
                 // attachment (kept in its RT/DEPTH state).
                 ctx.encoder
                     .require_view_state_skip_active_rt(self, READ_STATE);
+                // A view of a texture created without `RESOURCE` usage has no SRV
+                // (D3D12 forbids creating one it wasn't made for). Copying from the
+                // resulting null handle faults inside the D3D12 runtime with no
+                // debug-layer message at all, so say what actually went wrong.
+                assert_ne!(
+                    self.srv_handle, 0,
+                    "DX12: sampled binding of a texture view that has no SRV — its                      texture was created without TextureUsage::RESOURCE"
+                );
                 super::raw_cpu_handle(self.srv_handle)
             }
             super::BindingKind::Uav => {
@@ -55,6 +63,10 @@ impl crate::ShaderBindable for super::TextureView {
                 // this explicit transition is mandatory for storage textures.
                 ctx.encoder
                     .require_view_state_skip_active_rt(self, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                assert_ne!(
+                    self.uav_handle, 0,
+                    "DX12: storage binding of a texture view that has no UAV — its                      texture was created without TextureUsage::STORAGE (or its format                      is depth/stencil, which cannot have one)"
+                );
                 super::raw_cpu_handle(self.uav_handle)
             }
             other => panic!("unexpected binding kind {:?} for TextureView", other),
@@ -752,6 +764,13 @@ impl super::CommandEncoder {
             for sub in rt.view.subresources() {
                 self.active_render_targets.push((rt.view.resource_ptr, sub));
             }
+            // Same story as the sampled case: no RTV exists unless the texture was
+            // created with `TARGET`, and handing OMSetRenderTargets a null handle
+            // faults in the runtime rather than reporting anything.
+            assert_ne!(
+                rt.view.rtv_dsv_handle, 0,
+                "DX12: color attachment view has no RTV — its texture was created                  without TextureUsage::TARGET"
+            );
             rtv_handles.push(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
             if let crate::FinishOp::ResolveTo { view, mode, .. } = rt.finish_op {
                 resolves.push(super::PendingResolve {
@@ -767,6 +786,10 @@ impl super::CommandEncoder {
             for sub in rt.view.subresources() {
                 self.active_render_targets.push((rt.view.resource_ptr, sub));
             }
+            assert_ne!(
+                rt.view.rtv_dsv_handle, 0,
+                "DX12: depth-stencil attachment view has no DSV — its texture was                  created without TextureUsage::TARGET"
+            );
             dsv_handle = Some(super::raw_cpu_handle(rt.view.rtv_dsv_handle));
             if let crate::FinishOp::ResolveTo { view, mode, .. } = rt.depth_finish_op {
                 resolves.push(super::PendingResolve {

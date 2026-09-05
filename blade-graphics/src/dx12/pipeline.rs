@@ -544,6 +544,18 @@ fn compile_shader_function(
         _ => panic!("unsupported shader stage"),
     };
 
+    // DXC is a native library: if it faults on some generated construct the
+    // process dies with no Rust backtrace and no partial output, so the only way
+    // to find the offending shader is to name it before handing it over. Set
+    // BLADE_DX12_DUMP_HLSL to a directory to also write what was handed over.
+    log::debug!("compiling {target_str} entry point '{}'", sf.entry_point);
+    if let Some(dir) = std::env::var_os("BLADE_DX12_DUMP_HLSL") {
+        let path = std::path::Path::new(&dir)
+            .join(format!("{}-{target_str}.hlsl", sf.entry_point));
+        if let Err(e) = std::fs::write(&path, &hlsl_source) {
+            log::warn!("failed to dump HLSL to {}: {e}", path.display());
+        }
+    }
     let bytecode = compile_hlsl(&hlsl_source, sf.entry_point, target_str, debug);
     (bytecode, wg_size, attribute_mappings)
 }
