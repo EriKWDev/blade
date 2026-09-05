@@ -452,22 +452,30 @@ impl super::CommandEncoder {
         // set any single draw needs at once is small (a few groups) and <= cap;
         // only the frame total exceeds it.
         let carry: u32 = self.active_cbv_tables.iter().map(|&(_, _, c, _)| c).sum();
+        let needed = carry + count;
         assert!(
-            carry + count <= self.cbv_srv_uav_ring.max_capacity,
-            "single draw needs more descriptors than one heap holds"
+            needed <= self.cbv_srv_uav_ring.max_capacity,
+            "single draw needs {needed} descriptors, more than the {} one heap holds",
+            self.cbv_srv_uav_ring.max_capacity
         );
         // Copy each active group from the current heap to the new spill heap,
         // compacted from offset 0, and rewrite its relative offset.
+        let ring = &self.cbv_srv_uav_ring;
         let srcs: Vec<(usize, D3D12_CPU_DESCRIPTOR_HANDLE, u32)> = self
             .active_cbv_tables
             .iter()
             .enumerate()
-            .map(|(i, &(_, rel, c, _))| (i, self.cbv_srv_uav_ring.cpu_handle_rel(rel), c))
+            .map(|(i, &(_, rel, c, _))| {
+                ring.check_in_heap("spill source", ring.base + rel, c);
+                (i, ring.cpu_handle_rel(rel), c)
+            })
             .collect();
         self.cbv_srv_uav_ring
-            .spill(&device, carry, self.frame_index);
+            .spill(&device, carry, needed, self.frame_index);
         let mut dst_off = 0u32;
         for (i, src, c) in srcs {
+            self.cbv_srv_uav_ring
+                .check_in_heap("spill destination", dst_off, c);
             let dst = self.cbv_srv_uav_ring.cpu_handle_rel(dst_off);
             unsafe {
                 self.device.CopyDescriptorsSimple(

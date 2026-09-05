@@ -895,6 +895,7 @@ struct HeapBlock {
     heap: ID3D12DescriptorHeap,
     cpu: D3D12_CPU_DESCRIPTOR_HANDLE,
     gpu: D3D12_GPU_DESCRIPTOR_HANDLE,
+    capacity: u32,
 }
 
 impl HeapBlock {
@@ -903,7 +904,7 @@ impl HeapBlock {
             .unwrap_or_else(|e| panic!("CreateDescriptorHeap({cap}) failed: {e}"));
         let cpu = unsafe { heap.GetCPUDescriptorHandleForHeapStart() };
         let gpu = unsafe { heap.GetGPUDescriptorHandleForHeapStart() };
-        Self { heap, cpu, gpu }
+        Self { heap, cpu, gpu, capacity: cap }
     }
 }
 
@@ -923,6 +924,9 @@ pub(super) struct DescriptorRing {
     pub offset: u32,
     base: u32,
     limit: u32,
+    /// Descriptor count of the heap `cpu_start`/`gpu_start` point into — the
+    /// bound for range-checking a handle carved out of it.
+    active_capacity: u32,
     on_spill: bool,
     // Permanent, segmented, growable main heap.
     main: HeapBlock,
@@ -931,6 +935,9 @@ pub(super) struct DescriptorRing {
     /// this type: 1,000,000 CBV/SRV/UAV on tier 1/2, 2048 samplers).
     pub max_capacity: u32,
     ty: D3D12_DESCRIPTOR_HEAP_TYPE,
+    /// Smallest heap a spill will allocate, so repeated spills converge on a
+    /// reusable size instead of churning through ever-different capacities.
+    grow_start: u32,
     segment_count: u32,
     segment: u32,
     // Cap-sized spill heaps in use by the in-progress frame.
@@ -961,11 +968,13 @@ impl DescriptorRing {
             offset: 0,
             base: 0,
             limit: cap / segment_count,
+            active_capacity: cap,
             on_spill: false,
             main,
             main_capacity: cap,
             max_capacity,
             ty,
+            grow_start: cap.max(1),
             segment_count,
             segment: 0,
             spill_in_use: Vec::new(),
@@ -991,6 +1000,7 @@ impl DescriptorRing {
         self.heap = self.main.heap.clone();
         self.cpu_start = self.main.cpu;
         self.gpu_start = self.main.gpu;
+        self.active_capacity = self.main_capacity;
         self.base = segment * seg_cap;
         self.limit = self.base + seg_cap;
         self.offset = self.base;
@@ -1031,16 +1041,33 @@ impl DescriptorRing {
         let new = HeapBlock::new(device, self.ty, new_cap);
         if used > 0 {
             let new_seg_base = self.segment * new_seg_cap;
+            // Both sides must stay inside their heap; running off the end is not
+            // reported by the debug layer, it faults inside the driver.
+            assert!(
+                self.base as u64 + used as u64 <= self.main_capacity as u64,
+                "dx12 descriptor ring: grow source {}..{} runs past the old heap ({})",
+                self.base,
+                self.base as u64 + used as u64,
+                self.main_capacity
+            );
+            assert!(
+                new_seg_base as u64 + used as u64 <= new_cap as u64,
+                "dx12 descriptor ring: grow destination {}..{} runs past the new heap ({new_cap});                  segment={} new_seg_cap={new_seg_cap}",
+                new_seg_base,
+                new_seg_base as u64 + used as u64,
+                self.segment
+            );
             let dst = D3D12_CPU_DESCRIPTOR_HANDLE {
-                ptr: new.cpu.ptr + (new_seg_base * self.increment) as usize,
+                ptr: new.cpu.ptr + (new_seg_base as usize * self.increment as usize),
             };
             let src = D3D12_CPU_DESCRIPTOR_HANDLE {
-                ptr: self.main.cpu.ptr + (self.base * self.increment) as usize,
+                ptr: self.main.cpu.ptr + (self.base as usize * self.increment as usize),
             };
             unsafe { device.CopyDescriptorsSimple(used, dst, src, self.ty) };
         }
         let old = std::mem::replace(&mut self.main, new);
         self.main_capacity = new_cap;
+        self.active_capacity = new_cap;
         let new_seg_base = self.segment * new_seg_cap;
         self.heap = self.main.heap.clone();
         self.cpu_start = self.main.cpu;
@@ -1056,20 +1083,30 @@ impl DescriptorRing {
     /// caller has copied `carry` carried-over descriptors to its front). The
     /// previous active heap stays alive (main is permanent; a previous spill heap
     /// is still in `spill_in_use`), so already-recorded draws keep reading it.
-    fn spill(&mut self, device: &ID3D12Device, carry: u32, frame_index: u64) {
+    fn spill(&mut self, device: &ID3D12Device, carry: u32, needed: u32, frame_index: u64) {
+        // Size the heap to what this spill actually needs. Allocating every spill
+        // heap at `max_capacity` meant ~32 MB of descriptors per spill, several
+        // times a frame — enough for the driver to fault inside
+        // CopyDescriptorsSimple. Round up so a frame that spills repeatedly
+        // settles on a reusable size rather than a new one each time.
+        let want = needed
+            .max(self.grow_start)
+            .next_power_of_two()
+            .min(self.max_capacity);
         let reuse = self
             .spill_pool
             .iter()
-            .position(|(free_after, _)| *free_after <= frame_index);
+            .position(|(free_after, block)| *free_after <= frame_index && block.capacity >= want);
         let block = match reuse {
             Some(i) => self.spill_pool.swap_remove(i).1,
-            None => HeapBlock::new(device, self.ty, self.max_capacity),
+            None => HeapBlock::new(device, self.ty, want),
         };
+        self.limit = block.capacity;
+        self.active_capacity = block.capacity;
         self.heap = block.heap.clone();
         self.cpu_start = block.cpu;
         self.gpu_start = block.gpu;
         self.base = 0;
-        self.limit = self.max_capacity;
         self.offset = carry;
         self.on_spill = true;
         self.spill_in_use.push(block);
@@ -1078,24 +1115,49 @@ impl DescriptorRing {
     /// CPU handle of the current active heap at relative offset `rel`.
     fn cpu_handle_rel(&self, rel: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
         D3D12_CPU_DESCRIPTOR_HANDLE {
-            ptr: self.cpu_start.ptr + ((self.base + rel) * self.increment) as usize,
+            ptr: self.cpu_start.ptr + ((self.base + rel) as usize * self.increment as usize),
         }
+    }
+
+    /// Panic unless `[first, first + count)` descriptors, counted from the start
+    /// of the active heap, actually lie inside it. Handing D3D12 a range that
+    /// runs off the end of a descriptor heap is not reported by the debug layer:
+    /// the copy simply faults inside the driver, with a stack that says nothing
+    /// about which range was wrong. `what` names the side being checked.
+    fn check_in_heap(&self, what: &str, first: u32, count: u32) {
+        assert!(
+            self.cpu_start.ptr != 0,
+            "dx12 descriptor ring: {what} refers to a heap with a null CPU start"
+        );
+        let end = first as u64 + count as u64;
+        assert!(
+            end <= self.active_capacity as u64,
+            "dx12 descriptor ring: {what} range {first}..{end} runs past the active heap              ({} descriptors). ring: base={} offset={} limit={} on_spill={} main_capacity={}              max_capacity={}",
+            self.active_capacity,
+            self.base,
+            self.offset,
+            self.limit,
+            self.on_spill,
+            self.main_capacity,
+            self.max_capacity
+        );
     }
 
     /// GPU handle of the current active heap at relative offset `rel`.
     fn gpu_handle_rel(&self, rel: u32) -> D3D12_GPU_DESCRIPTOR_HANDLE {
         D3D12_GPU_DESCRIPTOR_HANDLE {
-            ptr: self.gpu_start.ptr + ((self.base + rel) * self.increment) as u64,
+            ptr: self.gpu_start.ptr + (self.base + rel) as u64 * self.increment as u64,
         }
     }
 
     pub fn alloc(&mut self, count: u32) -> (D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE) {
         assert!(self.offset + count <= self.limit, "descriptor ring segment overflow");
+        self.check_in_heap("alloc", self.offset, count);
         let cpu = D3D12_CPU_DESCRIPTOR_HANDLE {
-            ptr: self.cpu_start.ptr + (self.offset * self.increment) as usize,
+            ptr: self.cpu_start.ptr + (self.offset as usize * self.increment as usize),
         };
         let gpu = D3D12_GPU_DESCRIPTOR_HANDLE {
-            ptr: self.gpu_start.ptr + (self.offset * self.increment) as u64,
+            ptr: self.gpu_start.ptr + self.offset as u64 * self.increment as u64,
         };
         self.offset += count;
         (cpu, gpu)
