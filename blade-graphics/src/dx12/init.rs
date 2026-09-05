@@ -11,13 +11,8 @@ use windows::Win32::{
 
 use super::{Context, DescriptorPool, Queue};
 
-/// Silence debug-layer messages that say nothing about correctness and would
-/// otherwise bury the ones that do.
-///
-/// blade has no per-texture optimized clear value to give — a pass clears to
-/// whatever the frame asks for (the sky color, say) — so every clear reports
-/// that it took the slower path. At tens of clears per frame that is thousands
-/// of identical lines a second, which is what makes a validation log unreadable.
+/// Mute the mismatched-clear-value spam: blade has no per-texture optimized
+/// clear value, so every clear reports the slow path, thousands of lines a second.
 unsafe fn mute_noisy_debug_messages(device: &ID3D12Device) {
     let Ok(info_queue) = device.cast::<ID3D12InfoQueue>() else {
         return;
@@ -37,10 +32,8 @@ unsafe fn mute_noisy_debug_messages(device: &ID3D12Device) {
     let _ = info_queue.PushStorageFilter(&mut filter);
 }
 
-/// Typed wrapper over `CheckFeatureSupport`, which is otherwise a raw
-/// pointer/size pair repeated at every call site. Returns false (leaving `data`
-/// at its default) when the runtime does not know the feature — i.e. an older
-/// Windows build — so callers just read the zeroed struct.
+/// Typed `CheckFeatureSupport`. False (with `data` untouched) if the runtime
+/// does not know the feature.
 unsafe fn check_feature<T>(device: &ID3D12Device, feature: D3D12_FEATURE, data: &mut T) -> bool {
     device
         .CheckFeatureSupport(
@@ -51,10 +44,8 @@ unsafe fn check_feature<T>(device: &ID3D12Device, feature: D3D12_FEATURE, data: 
         .is_ok()
 }
 
-/// MSAA sample counts the device actually supports, as a bit mask of the counts
-/// themselves (bit value 4 == 4x). D3D12 answers this per format, so intersect a
-/// representative color and depth format: blade's capability is device-wide, and
-/// a count usable for color but not depth cannot be used for a normal pass.
+/// Supported MSAA counts as a mask of the counts themselves (bit 4 == 4x).
+/// D3D12 answers per format, so intersect a color and a depth format.
 unsafe fn query_sample_count_mask(device: &ID3D12Device) -> u32 {
     let mut mask = 0u32;
     for count in [1u32, 2, 4, 8, 16, 32] {
@@ -80,13 +71,8 @@ unsafe fn query_sample_count_mask(device: &ID3D12Device) -> u32 {
     mask | 1
 }
 
-/// Variable-rate shading support, translated into blade's capability shape.
-///
-/// Tier 1 is per-draw only (`RSSetShadingRate`); tier 2 adds the screen-space
-/// shading-rate image, which is what `fragment_shading_rate_attachment_texel_size`
-/// advertises. blade's attachment byte encoding — `(log2(w) << 2) | log2(h)` —
-/// is exactly `D3D12_SHADING_RATE`, so an uploaded attachment needs no
-/// translation.
+/// VRS support in blade's shape. Tier 1 is per-draw only; tier 2 adds the
+/// shading-rate image. blade's texel encoding is already `D3D12_SHADING_RATE`.
 unsafe fn query_shading_rates(
     device: &ID3D12Device,
     sample_count_mask: u32,
@@ -361,13 +347,9 @@ fn create_command_sig(
     sig.unwrap()
 }
 
-/// Enumerate D3D12-capable hardware adapters, best first.
-///
-/// `EnumAdapters1` order is unspecified with respect to performance — on a
-/// laptop it commonly yields the integrated GPU before the discrete one, so
-/// taking its first entry picked the weaker GPU. `IDXGIFactory6` exposes an
-/// explicit preference order; use it where available and fall back to the plain
-/// enumeration (plus a largest-VRAM tie-break) on older runtimes.
+/// D3D12-capable hardware adapters, best first. `EnumAdapters1` order is not
+/// performance-ordered (it often yields the iGPU first), so prefer
+/// `IDXGIFactory6`, falling back to a largest-VRAM sort.
 unsafe fn enumerate_adapters(factory: &IDXGIFactory4) -> Vec<(IDXGIAdapter1, DXGI_ADAPTER_DESC1)> {
     let mut out: Vec<(IDXGIAdapter1, DXGI_ADAPTER_DESC1)> = Vec::new();
     let by_preference = factory.cast::<IDXGIFactory6>().ok();

@@ -19,17 +19,11 @@ mod surface;
 
 // ── Descriptor heap sizes ─────────────────────────────────────────────────────
 
-// CPU-only descriptor pools grow by whole pages on demand (see `DescriptorPool`),
-// so these are allocation granularities, not capacities. Sized so the common case
-// needs one page per type.
+// Page sizes, not capacities: `DescriptorPool` adds pages on demand.
 pub(super) const RTV_PAGE_SIZE: u32 = 512;
 pub(super) const DSV_PAGE_SIZE: u32 = 256;
 pub(super) const STAGING_PAGE_SIZE: u32 = 65536;
 pub(super) const STAGING_SAMPLER_PAGE_SIZE: u32 = 2048;
-/// Per-encoder pool backing `fill_buffer`'s CPU-side clear descriptors; a frame
-/// issues only a handful of buffer clears, so one page covers many frames of
-/// deferral.
-pub(super) const CLEAR_UAV_PAGE_SIZE: u32 = 256;
 // Per-encoder GPU-visible CBV/SRV/UAV ring. Each `bind()` consumes descriptors,
 // so a frame with N draws needs ~N entries. 1,000,000 is the D3D12 tier-1 max
 // for a shader-visible CBV/SRV/UAV heap. Reset each `start()`.
@@ -60,8 +54,7 @@ pub type PlatformError = windows::core::Error;
 
 // ── Descriptor heap helper ────────────────────────────────────────────────────
 
-/// One CPU-only page of a `DescriptorPool`. `_raw` is never read — it is held
-/// solely to keep the heap (and therefore every handle carved out of it) alive.
+/// One page of a `DescriptorPool`; `_raw` just keeps the heap alive.
 pub(super) struct DescriptorHeap {
     _raw: ID3D12DescriptorHeap,
     cpu_start: D3D12_CPU_DESCRIPTOR_HANDLE,
@@ -92,18 +85,9 @@ impl DescriptorHeap {
     }
 }
 
-/// CPU-only (non-shader-visible) descriptor allocator: a growable list of
-/// fixed-size pages plus a free list of returned handles.
-///
-/// Two properties matter here. It **recycles**: `destroy_texture_view` /
-/// `destroy_buffer` / `destroy_sampler` return their handles, so a session that
-/// churns views — window resizes rebuilding the render targets, streamed
-/// textures, the frame-pacer's deferred destruction belt — reuses descriptors
-/// instead of leaking one per create. And it **grows**: running out adds a page
-/// rather than tripping a capacity assert, so no fixed limit is baked into the
-/// backend. A page's descriptors never move (CPU heaps are never reallocated),
-/// so a handed-out `D3D12_CPU_DESCRIPTOR_HANDLE` stays valid for the pool's life
-/// and can be stored directly in `Buffer`/`TextureView`/`Sampler`.
+/// CPU-only descriptor allocator: growable pages plus a free list, so destroyed
+/// views return their descriptors and running out adds a page instead of
+/// asserting. Handles stay valid for the pool's life.
 pub(super) struct DescriptorPool {
     ty: D3D12_DESCRIPTOR_HEAP_TYPE,
     page_size: u32,
@@ -906,6 +890,20 @@ impl HeapBlock {
         let gpu = unsafe { heap.GetGPUDescriptorHandleForHeapStart() };
         Self { heap, cpu, gpu, capacity: cap }
     }
+
+    /// Non-shader-visible twin, used as the readable side of the ring.
+    fn new_cpu(device: &ID3D12Device, ty: D3D12_DESCRIPTOR_HEAP_TYPE, cap: u32) -> Self {
+        let desc = D3D12_DESCRIPTOR_HEAP_DESC {
+            Type: ty,
+            NumDescriptors: cap,
+            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+            NodeMask: 0,
+        };
+        let heap: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&desc) }
+            .unwrap_or_else(|e| panic!("CreateDescriptorHeap(cpu {cap}) failed: {e}"));
+        let cpu = unsafe { heap.GetCPUDescriptorHandleForHeapStart() };
+        Self { heap, cpu, gpu: D3D12_GPU_DESCRIPTOR_HANDLE { ptr: 0 }, capacity: cap }
+    }
 }
 
 /// Per-frame GPU-visible descriptor allocator. The `base..limit` window is the
@@ -940,6 +938,10 @@ pub(super) struct DescriptorRing {
     grow_start: u32,
     segment_count: u32,
     segment: u32,
+    /// CPU-readable mirror of the active heap. Descriptors are written here and
+    /// copied to the visible heap; D3D12 forbids `CopyDescriptors` from reading a
+    /// shader-visible heap, so a grow/spill must copy out of this instead.
+    shadow: Option<HeapBlock>,
     // Cap-sized spill heaps in use by the in-progress frame.
     spill_in_use: Vec<HeapBlock>,
     // Spill heaps from past frames, reusable once `free_after` <= frame_index.
@@ -955,10 +957,12 @@ impl DescriptorRing {
         capacity: u32,
         max_capacity: u32,
         segment_count: u32,
+        shadowed: bool,
     ) -> Self {
         let max_capacity = max_capacity.max(segment_count);
         let cap = capacity.max(segment_count).min(max_capacity);
         let main = HeapBlock::new(device, ty, cap);
+        let shadow = shadowed.then(|| HeapBlock::new_cpu(device, ty, cap));
         let increment = unsafe { device.GetDescriptorHandleIncrementSize(ty) };
         Self {
             heap: main.heap.clone(),
@@ -977,9 +981,30 @@ impl DescriptorRing {
             grow_start: cap.max(1),
             segment_count,
             segment: 0,
+            shadow,
             spill_in_use: Vec::new(),
             spill_pool: Vec::new(),
         }
+    }
+
+    /// Where `bind()` writes descriptors: the shadow when there is one.
+    fn write_cpu_rel(&self, rel: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        match self.shadow {
+            Some(ref shadow) => D3D12_CPU_DESCRIPTOR_HANDLE {
+                ptr: shadow.cpu.ptr + ((self.base + rel) as usize * self.increment as usize),
+            },
+            None => self.cpu_handle_rel(rel),
+        }
+    }
+
+    /// Publish `count` descriptors at `rel` from the shadow into the visible heap.
+    fn publish(&self, device: &ID3D12Device, rel: u32, count: u32) {
+        if self.shadow.is_none() || count == 0 {
+            return;
+        }
+        let dst = self.cpu_handle_rel(rel);
+        let src = self.write_cpu_rel(rel);
+        unsafe { device.CopyDescriptorsSimple(count, dst, src, self.ty) };
     }
 
     fn main_segment_capacity(&self) -> u32 {
@@ -1057,13 +1082,35 @@ impl DescriptorRing {
                 new_seg_base as u64 + used as u64,
                 self.segment
             );
-            let dst = D3D12_CPU_DESCRIPTOR_HANDLE {
-                ptr: new.cpu.ptr + (new_seg_base as usize * self.increment as usize),
-            };
-            let src = D3D12_CPU_DESCRIPTOR_HANDLE {
-                ptr: self.main.cpu.ptr + (self.base as usize * self.increment as usize),
-            };
-            unsafe { device.CopyDescriptorsSimple(used, dst, src, self.ty) };
+            let inc = self.increment as usize;
+            match self.shadow {
+                // Read from the shadow: the visible heap is not a legal copy source.
+                Some(ref shadow) => {
+                    let new_shadow = HeapBlock::new_cpu(device, self.ty, new_cap);
+                    let src = D3D12_CPU_DESCRIPTOR_HANDLE {
+                        ptr: shadow.cpu.ptr + self.base as usize * inc,
+                    };
+                    for base in [new_shadow.cpu, new.cpu] {
+                        let dst = D3D12_CPU_DESCRIPTOR_HANDLE {
+                            ptr: base.ptr + new_seg_base as usize * inc,
+                        };
+                        unsafe { device.CopyDescriptorsSimple(used, dst, src, self.ty) };
+                    }
+                    self.shadow = Some(new_shadow);
+                }
+                None => {
+                    let dst = D3D12_CPU_DESCRIPTOR_HANDLE {
+                        ptr: new.cpu.ptr + new_seg_base as usize * inc,
+                    };
+                    let src = D3D12_CPU_DESCRIPTOR_HANDLE {
+                        ptr: self.main.cpu.ptr + self.base as usize * inc,
+                    };
+                    unsafe { device.CopyDescriptorsSimple(used, dst, src, self.ty) };
+                }
+            }
+        }
+        if used == 0 && self.shadow.is_some() {
+            self.shadow = Some(HeapBlock::new_cpu(device, self.ty, new_cap));
         }
         let old = std::mem::replace(&mut self.main, new);
         self.main_capacity = new_cap;
@@ -1083,6 +1130,43 @@ impl DescriptorRing {
     /// caller has copied `carry` carried-over descriptors to its front). The
     /// previous active heap stays alive (main is permanent; a previous spill heap
     /// is still in `spill_in_use`), so already-recorded draws keep reading it.
+    /// Move `tables` (relative offset, count) into a fresh heap, compacted from 0,
+    /// and return their new offsets. The old shadow stays alive for the duration,
+    /// since it is the only legal source to copy descriptors out of.
+    fn spill_tables(
+        &mut self,
+        device: &ID3D12Device,
+        tables: &[(u32, u32)],
+        count: u32,
+        frame_index: u64,
+    ) -> Vec<u32> {
+        let carry: u32 = tables.iter().map(|&(_, c)| c).sum();
+        let srcs: Vec<D3D12_CPU_DESCRIPTOR_HANDLE> = tables
+            .iter()
+            .map(|&(rel, _)| self.write_cpu_rel(rel))
+            .collect();
+        self.spill(device, carry, carry + count, frame_index);
+        let inc = self.increment as usize;
+        let mut offsets = Vec::with_capacity(tables.len());
+        let mut off = 0u32;
+        for (i, &(_, c)) in tables.iter().enumerate() {
+            self.check_in_heap("spill destination", off, c);
+            let dsts = [
+                self.shadow.as_ref().map(|s| s.cpu),
+                Some(self.cpu_start),
+            ];
+            for base in dsts.into_iter().flatten() {
+                let dst = D3D12_CPU_DESCRIPTOR_HANDLE {
+                    ptr: base.ptr + off as usize * inc,
+                };
+                unsafe { device.CopyDescriptorsSimple(c, dst, srcs[i], self.ty) };
+            }
+            offsets.push(off);
+            off += c;
+        }
+        offsets
+    }
+
     fn spill(&mut self, device: &ID3D12Device, carry: u32, needed: u32, frame_index: u64) {
         // Size the heap to what this spill actually needs. Allocating every spill
         // heap at `max_capacity` meant ~32 MB of descriptors per spill, several
@@ -1101,6 +1185,9 @@ impl DescriptorRing {
             Some(i) => self.spill_pool.swap_remove(i).1,
             None => HeapBlock::new(device, self.ty, want),
         };
+        if self.shadow.is_some() {
+            self.shadow = Some(HeapBlock::new_cpu(device, self.ty, block.capacity));
+        }
         self.limit = block.capacity;
         self.active_capacity = block.capacity;
         self.heap = block.heap.clone();
@@ -1119,11 +1206,8 @@ impl DescriptorRing {
         }
     }
 
-    /// Panic unless `[first, first + count)` descriptors, counted from the start
-    /// of the active heap, actually lie inside it. Handing D3D12 a range that
-    /// runs off the end of a descriptor heap is not reported by the debug layer:
-    /// the copy simply faults inside the driver, with a stack that says nothing
-    /// about which range was wrong. `what` names the side being checked.
+    /// Panic if `[first, first + count)` leaves the active heap; D3D12 does not
+    /// diagnose it, the copy just faults in the driver.
     fn check_in_heap(&self, what: &str, first: u32, count: u32) {
         assert!(
             self.cpu_start.ptr != 0,
@@ -1359,13 +1443,6 @@ pub struct CommandEncoder {
     /// one to a slot once per frame removes the ceiling and most of the
     /// descriptor copies with it. Cleared in `start()`, in lockstep with the
     /// ring's per-frame segment.
-    /// CPU-only descriptors for `fill_buffer`: `ClearUnorderedAccessViewUint`
-    /// wants the UAV in a non-shader-visible heap as well as in the bound one.
-    /// A single reused slot would be a gamble on when the runtime reads it, so
-    /// each clear takes its own and returns it once the submission that recorded
-    /// it is known complete — the same deferral `retired_cbv_heaps` uses.
-    pub(super) clear_uav_pool: DescriptorPool,
-    pub(super) clear_uav_in_flight: Vec<(u64, D3D12_CPU_DESCRIPTOR_HANDLE)>,
     pub(super) sampler_slots: std::collections::HashMap<u64, u32>,
     /// Scratch reused across `bind()` calls: samplers collected by `fill`, then
     /// the ring indices handed to the shader. Kept on the encoder purely to stop
@@ -1490,13 +1567,13 @@ impl crate::traits::CommandDevice for Context {
         // render encoder grows over its first frames to its steady need.
         let cbv_srv_uav_ring = DescriptorRing::new(
             &self.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            ENCODER_HEAP_START, self.cbv_srv_uav_heap_size, segments,
+            ENCODER_HEAP_START, self.cbv_srv_uav_heap_size, segments, true,
         );
         // Samplers cannot grow past the 2048 shader-visible-sampler-heap limit,
         // so start at and cap at that maximum.
         let sampler_ring = DescriptorRing::new(
             &self.device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-            ENCODER_SAMPLER_SIZE, ENCODER_SAMPLER_SIZE, segments,
+            ENCODER_SAMPLER_SIZE, ENCODER_SAMPLER_SIZE, segments, false,
         );
         let upload_ring = UploadRing::new(&self.device, UPLOAD_RING_SIZE, segments as u64);
 
@@ -1529,11 +1606,6 @@ impl crate::traits::CommandDevice for Context {
             retired_cbv_heaps: Vec::new(),
             active_cbv_tables: Vec::new(),
             bound_sampler_roots: None,
-            clear_uav_pool: DescriptorPool::new(
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-                CLEAR_UAV_PAGE_SIZE,
-            ),
-            clear_uav_in_flight: Vec::new(),
             sampler_slots: std::collections::HashMap::new(),
             sampler_binds: Vec::new(),
             sampler_indices: Vec::new(),
