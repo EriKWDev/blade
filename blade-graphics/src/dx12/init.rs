@@ -11,6 +11,32 @@ use windows::Win32::{
 
 use super::{Context, DescriptorPool, Queue};
 
+/// Silence debug-layer messages that say nothing about correctness and would
+/// otherwise bury the ones that do.
+///
+/// blade has no per-texture optimized clear value to give — a pass clears to
+/// whatever the frame asks for (the sky color, say) — so every clear reports
+/// that it took the slower path. At tens of clears per frame that is thousands
+/// of identical lines a second, which is what makes a validation log unreadable.
+unsafe fn mute_noisy_debug_messages(device: &ID3D12Device) {
+    let Ok(info_queue) = device.cast::<ID3D12InfoQueue>() else {
+        return;
+    };
+    let mut denied = [
+        D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+        D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
+    ];
+    let mut filter = D3D12_INFO_QUEUE_FILTER {
+        DenyList: D3D12_INFO_QUEUE_FILTER_DESC {
+            NumIDs: denied.len() as u32,
+            pIDList: denied.as_mut_ptr(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let _ = info_queue.PushStorageFilter(&mut filter);
+}
+
 /// Typed wrapper over `CheckFeatureSupport`, which is otherwise a raw
 /// pointer/size pair repeated at every call site. Returns false (leaving `data`
 /// at its default) when the runtime does not know the feature — i.e. an older
@@ -161,6 +187,10 @@ impl Context {
                 .map_err(|e| super::super::NotSupportedError::Platform(e))?;
             dev.unwrap()
         };
+
+        if desc.validation {
+            mute_noisy_debug_messages(&device);
+        }
 
         if gpu_validation {
             // GBV defaults to STATE_TRACKING_ONLY; GUARDED_VALIDATION additionally

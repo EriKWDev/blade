@@ -1523,6 +1523,14 @@ impl crate::traits::CommandDevice for Context {
         // ExecuteCommandLists reports a bad command list only via device removal;
         // surface it here (with DRED) instead of at some later silent failure.
         panic_if_device_removed(&self.device, "ExecuteCommandLists");
+        // Drain the debug layer every submit while validating. Previously this
+        // only ran after a call that *failed*, so the entire class of errors the
+        // layer reports without failing the call — an illegal view description,
+        // a resource in the wrong state for the way it is being used, a bad
+        // shading-rate setup — was recorded into the queue and never read.
+        if self.validation_mode {
+            log_debug_messages(&self.device);
+        }
 
         queue.last_progress += 1;
         let progress = queue.last_progress;

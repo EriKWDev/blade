@@ -442,7 +442,7 @@ fn compile_shader_function(
     vertex_fetch_states: &[crate::VertexFetchState],
     groups: &[GroupDescriptors],
     debug: bool,
-) -> (Vec<u8>, [u32; 3]) {
+) -> (Vec<u8>, [u32; 3], Vec<crate::VertexAttributeMapping>) {
     let ep_index = sf.entry_point_index();
     let ep = &sf.shader.module.entry_points[ep_index];
 
@@ -459,7 +459,7 @@ fn compile_shader_function(
     // write_array_size on constructs in otherwise-dead functions. Compaction
     // drops that unreachable code, which is why this no longer needs a bespoke
     // `assign_unused_bindings` pass for unused samplers.
-    let (module, module_info, _attribute_mappings) = crate::Shader::prepare(
+    let (module, module_info, attribute_mappings) = crate::Shader::prepare(
         sf,
         group_infos,
         group_layouts,
@@ -545,7 +545,7 @@ fn compile_shader_function(
     };
 
     let bytecode = compile_hlsl(&hlsl_source, sf.entry_point, target_str, debug);
-    (bytecode, wg_size)
+    (bytecode, wg_size, attribute_mappings)
 }
 
 // ── ShaderDevice impl ─────────────────────────────────────────────────────────
@@ -602,7 +602,7 @@ impl crate::traits::ShaderDevice for super::Context {
             .map(|l| l.to_info())
             .collect();
 
-        let (bytecode, wg_size) = compile_shader_function(
+        let (bytecode, wg_size, _) = compile_shader_function(
             desc.compute,
             naga::ShaderStage::Compute,
             desc.data_layouts,
@@ -714,7 +714,7 @@ impl crate::traits::ShaderDevice for super::Context {
             .iter()
             .map(|l| l.to_info())
             .collect();
-        let (vs_bytecode, _) = compile_shader_function(
+        let (vs_bytecode, _, vs_attribute_mappings) = compile_shader_function(
             desc.vertex,
             naga::ShaderStage::Vertex,
             desc.data_layouts,
@@ -730,7 +730,7 @@ impl crate::traits::ShaderDevice for super::Context {
                 .iter()
                 .map(|l| l.to_info())
                 .collect();
-            let (bytecode, _) = compile_shader_function(
+            let (bytecode, _, _) = compile_shader_function(
                 fs,
                 naga::ShaderStage::Fragment,
                 desc.data_layouts,
@@ -791,9 +791,9 @@ impl crate::traits::ShaderDevice for super::Context {
             .as_ref()
             .map_or(DXGI_FORMAT_UNKNOWN, |ds| super::map_texture_format(ds.format));
 
-        // Input layout from vertex fetch states
+        // Input layout, keyed by the locations the shader actually got.
         let (input_elements, _element_strs) =
-            build_input_layout(desc.vertex_fetches, desc.vertex);
+            build_input_layout(desc.vertex_fetches, &vs_attribute_mappings);
 
         let mut rtv_formats = [DXGI_FORMAT_UNKNOWN; 8];
         for (i, fmt) in color_formats.iter().enumerate() {
@@ -1041,41 +1041,41 @@ fn map_vertex_format(vf: crate::VertexFormat) -> DXGI_FORMAT {
 
 /// Returns (input_element_descs, semantic_name_strings).
 /// The strings must outlive the descs, so we return them together.
+///
+/// naga's HLSL backend names vertex inputs `LOC{n}`, where `n` is the location
+/// `fill_vertex_locations` assigned — and it assigns them in *shader member*
+/// order, recording which fetch attribute feeds each one in `attribute_mappings`
+/// (location == index into that list). Walking the fetch layouts and counting
+/// instead only agrees when the shader happens to declare its inputs in fetch
+/// order and use every attribute; otherwise the elements silently shift, so a
+/// draw reads the wrong bytes for every attribute past the first mismatch — the
+/// debug layer reports it only as a format/type mismatch warning. Vulkan builds
+/// its attribute descriptions from the same mappings; do the same here.
 fn build_input_layout(
     vertex_fetches: &[crate::VertexFetchState],
-    _vs_sf: crate::ShaderFunction,
+    attribute_mappings: &[crate::VertexAttributeMapping],
 ) -> (Vec<D3D12_INPUT_ELEMENT_DESC>, Vec<std::ffi::CString>) {
-    let mut elements: Vec<D3D12_INPUT_ELEMENT_DESC> = Vec::new();
-    let mut strings: Vec<std::ffi::CString> = Vec::new();
+    let mut elements: Vec<D3D12_INPUT_ELEMENT_DESC> = Vec::with_capacity(attribute_mappings.len());
+    let mut strings: Vec<std::ffi::CString> = Vec::with_capacity(attribute_mappings.len());
 
-    // Location index counter (matches what fill_vertex_locations assigned)
-    let mut location = 0u32;
-
-    // naga's HLSL backend names vertex inputs `LOC{n}`, i.e. base semantic "LOC"
-    // with SemanticIndex n. The input-element semantic must match the VS input
-    // signature exactly or CreateGraphicsPipelineState fails with E_INVALIDARG.
-    // `fill_vertex_locations` assigns locations in shader-member order; we mirror
-    // that with a running counter over the fetch attributes (they line up for the
-    // common case where shader inputs are declared in vertex-fetch order).
-    for (buf_index, fetch) in vertex_fetches.iter().enumerate() {
-        for (_attr_index, (_name, attr)) in fetch.layout.attributes.iter().enumerate() {
-            let semantic = std::ffi::CString::new("LOC").unwrap();
-            elements.push(D3D12_INPUT_ELEMENT_DESC {
-                SemanticName: PCSTR(semantic.as_ptr() as _),
-                SemanticIndex: location,
-                Format: map_vertex_format(attr.format),
-                InputSlot: buf_index as u32,
-                AlignedByteOffset: attr.offset,
-                InputSlotClass: if fetch.instanced {
-                    D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA
-                } else {
-                    D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA
-                },
-                InstanceDataStepRate: if fetch.instanced { 1 } else { 0 },
-            });
-            strings.push(semantic);
-            location += 1;
-        }
+    for (location, mapping) in attribute_mappings.iter().enumerate() {
+        let fetch = &vertex_fetches[mapping.buffer_index];
+        let (_name, attr) = &fetch.layout.attributes[mapping.attribute_index];
+        let semantic = std::ffi::CString::new("LOC").unwrap();
+        elements.push(D3D12_INPUT_ELEMENT_DESC {
+            SemanticName: PCSTR(semantic.as_ptr() as _),
+            SemanticIndex: location as u32,
+            Format: map_vertex_format(attr.format),
+            InputSlot: mapping.buffer_index as u32,
+            AlignedByteOffset: attr.offset,
+            InputSlotClass: if fetch.instanced {
+                D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA
+            } else {
+                D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA
+            },
+            InstanceDataStepRate: if fetch.instanced { 1 } else { 0 },
+        });
+        strings.push(semantic);
     }
 
     (elements, strings)
