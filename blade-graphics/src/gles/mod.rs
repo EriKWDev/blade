@@ -458,6 +458,13 @@ impl Context {
     }
 
     /// GLES does not support VK_KHR_present_wait. Always returns true immediately.
+    /// Blocks until the device has finished all submitted work.
+    pub fn wait_idle(&self) {
+        use glow::HasContext as _;
+        let gl = self.lock();
+        unsafe { gl.finish() };
+    }
+
     pub fn wait_for_present(
         &self,
         _surface: &Surface,

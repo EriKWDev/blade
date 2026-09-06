@@ -611,6 +611,21 @@ impl Context {
     }
 
     /// Metal serializes presentation implicitly; always returns true immediately.
+    /// Blocks until the device has finished all submitted work.
+    ///
+    /// Command buffers on one queue complete in order, so waiting on a freshly
+    /// committed empty buffer drains everything submitted before it.
+    pub fn wait_idle(&self) {
+        use metal::MTLCommandBuffer as _;
+        let queue = self.queue.lock().unwrap();
+        let cmd_buf = objc2::rc::autoreleasepool(|_| unsafe {
+            use metal::MTLCommandQueue as _;
+            queue.commandBufferWithUnretainedReferences().unwrap()
+        });
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+    }
+
     pub fn wait_for_present(
         &self,
         _surface: &Surface,

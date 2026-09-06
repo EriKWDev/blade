@@ -1764,6 +1764,12 @@ impl crate::traits::CommandDevice for Context {
 }
 
 impl Context {
+    /// Blocks until the device has finished all submitted work.
+    pub fn wait_idle(&self) {
+        let progress = self.queue.lock().unwrap().last_progress;
+        self.wait_for(&SyncPoint { progress }, !0);
+    }
+
     pub fn wait_for_present(&self, _surface: &Surface, _present_id: u64, _timeout_ms: u32) -> bool {
         true
     }
