@@ -167,18 +167,49 @@ impl super::Context {
     pub fn reconfigure_surface(&self, surface: &mut super::Surface, config: crate::SurfaceConfig) {
         let khr_surface = self.instance.surface.as_ref().unwrap();
 
-        let capabilities = unsafe {
-            khr_surface
-                .get_physical_device_surface_capabilities(self.physical_device, surface.raw)
-                .unwrap()
+        // On a surface that supports full-screen exclusive, the plain capabilities query
+        // reports the monitor extent instead of the window client area. Query through
+        // capabilities2 with the same full-screen-exclusive request we are about to make.
+        let capabilities = if surface.full_screen_exclusive {
+            let mut fse_info = vk::SurfaceFullScreenExclusiveInfoEXT {
+                full_screen_exclusive: if config.allow_exclusive_full_screen {
+                    vk::FullScreenExclusiveEXT::ALLOWED
+                } else {
+                    vk::FullScreenExclusiveEXT::DISALLOWED
+                },
+                ..Default::default()
+            };
+            let mut fse_win32 = vk::SurfaceFullScreenExclusiveWin32InfoEXT::default();
+            let surface_info = vk::PhysicalDeviceSurfaceInfo2KHR {
+                surface: surface.raw,
+                ..Default::default()
+            }
+            .push_next(&mut fse_info)
+            .push_next(&mut fse_win32);
+            let mut capabilities2 = vk::SurfaceCapabilities2KHR::default();
+            unsafe {
+                self.instance
+                    .get_surface_capabilities2
+                    .as_ref()
+                    .unwrap()
+                    .get_physical_device_surface_capabilities2(
+                        self.physical_device,
+                        &surface_info,
+                        &mut capabilities2,
+                    )
+                    .unwrap()
+            };
+            capabilities2.surface_capabilities
+        } else {
+            unsafe {
+                khr_surface
+                    .get_physical_device_surface_capabilities(self.physical_device, surface.raw)
+                    .unwrap()
+            }
         };
-        /*
-            NOTE: `imageExtent` must lie within [minImageExtent, maxImageExtent]
-                  (VUID-VkSwapchainCreateInfoKHR-pNext-07781). A surface can pin those to a size
-                  the caller does not know about - full-screen exclusive reports the monitor
-                  extent regardless of the window's client size - so clamp rather than trusting
-                  the request. `currentExtent` of u32::MAX means the surface takes whatever we ask.
-        */
+        // imageExtent must be within [minImageExtent, maxImageExtent]
+        // (VUID-VkSwapchainCreateInfoKHR-pNext-07781). currentExtent of u32::MAX means the
+        // surface accepts any size in that range.
         let mut config = config;
         let clamped = if capabilities.current_extent.width == u32::MAX
             && capabilities.current_extent.height == u32::MAX
@@ -356,6 +387,10 @@ impl super::Context {
             );
         }
 
+        let mut fse_disallowed_info = vk::SurfaceFullScreenExclusiveInfoEXT {
+            full_screen_exclusive: vk::FullScreenExclusiveEXT::DISALLOWED,
+            ..Default::default()
+        };
         let mut full_screen_exclusive_info = vk::SurfaceFullScreenExclusiveInfoEXT {
             full_screen_exclusive: if config.allow_exclusive_full_screen {
                 vk::FullScreenExclusiveEXT::ALLOWED
@@ -392,11 +427,30 @@ impl super::Context {
                 config.allow_exclusive_full_screen
             );
         }
-        let raw_swapchain = unsafe { surface.device.create_swapchain(&create_info, None).unwrap() };
-
-        unsafe {
-            surface.deinit_swapchain(&self.device.core);
-        }
+        // Recreating against a live old_swapchain can fail while the surface is leaving
+        // full-screen exclusive. Retire the old swapchain and retry before giving up.
+        let raw_swapchain = match unsafe { surface.device.create_swapchain(&create_info, None) } {
+            Ok(raw) => {
+                unsafe { surface.deinit_swapchain(&self.device.core) };
+                raw
+            }
+            Err(err) => {
+                log::warn!("create_swapchain failed ({err:?}), retrying without old_swapchain");
+                unsafe { surface.deinit_swapchain(&self.device.core) };
+                create_info.old_swapchain = vk::SwapchainKHR::null();
+                match unsafe { surface.device.create_swapchain(&create_info, None) } {
+                    Ok(raw) => raw,
+                    Err(err) => {
+                        // Windows can refuse the mode switch outright. Non-exclusive still
+                        // presents, so fall back rather than lose the device.
+                        log::warn!("create_swapchain failed again ({err:?}), disallowing exclusive full screen");
+                        create_info = create_info.push_next(&mut fse_disallowed_info);
+                        unsafe { surface.device.create_swapchain(&create_info, None) }
+                            .expect("failed to create swapchain without full screen exclusive")
+                    }
+                }
+            }
+        };
         surface.next_present_id = 1;
 
         let images = unsafe { surface.device.get_swapchain_images(raw_swapchain).unwrap() };
