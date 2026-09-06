@@ -673,6 +673,11 @@ impl Context {
     /// If VK_KHR_present_wait is not supported, returns `true` immediately.
     ///
     /// `present_id` is obtained from [`Surface::last_present_id`] after submitting the
+    /// Blocks until the device has finished all submitted work.
+    pub fn wait_idle(&self) {
+        let _ = unsafe { self.device.core.device_wait_idle() };
+    }
+
     /// encoder that calls [`CommandEncoder::present`].
     pub fn wait_for_present(&self, surface: &Surface, present_id: u64, timeout_ms: u32) -> bool {
         match self.device.present_wait {
