@@ -115,7 +115,7 @@ impl crate::ShaderBindable for crate::BufferPiece {
         // instead of re-creating a view on every bind.
         let raw_first = (self.offset / 4) as u32;
         let avail = self.buffer.size.saturating_sub(self.offset);
-        // A piece may cover only part of the remainder; belt sub-allocations set `size`.
+        // Belt sub-allocations set size and cover only part of the remainder.
         let extent = if self.size == 0 {
             avail
         } else {

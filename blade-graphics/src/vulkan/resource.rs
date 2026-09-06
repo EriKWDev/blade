@@ -38,6 +38,9 @@ impl super::Context {
             }
         };
         let memory_types = requirements.memory_type_bits & manager.valid_ash_memory_types;
+        // A buffer and an optimal-tiling image sharing a bufferImageGranularity page alias.
+        // gpu_alloc does not track tiling, so align every suballocation to the granularity.
+        let align = requirements.alignment.max(manager.buffer_image_granularity);
         let mut block = match memory {
             crate::Memory::External(e) => {
                 let memory_properties = unsafe {
@@ -111,17 +114,15 @@ impl super::Context {
                 }
             }
             _ => unsafe {
+                let request = gpu_alloc::Request {
+                    size: requirements.size,
+                    align_mask: align - 1,
+                    usage: alloc_usage,
+                    memory_types,
+                };
                 manager
                     .allocator
-                    .alloc(
-                        AshMemoryDevice::wrap(&self.device.core),
-                        gpu_alloc::Request {
-                            size: requirements.size,
-                            align_mask: requirements.alignment - 1,
-                            usage: alloc_usage,
-                            memory_types,
-                        },
-                    )
+                    .alloc(AshMemoryDevice::wrap(&self.device.core), request)
                     .unwrap()
             },
         };

@@ -87,6 +87,10 @@ struct MemoryManager {
     allocator: gpu_alloc::GpuAllocator<vk::DeviceMemory>,
     slab: slab::Slab<gpu_alloc::MemoryBlock<vk::DeviceMemory>>,
     valid_ash_memory_types: u32,
+    /// A buffer and an optimal-tiling image bound to the same memory within one
+    /// of these pages alias. gpu_alloc does not track resource tiling, so every
+    /// suballocation is aligned to it.
+    buffer_image_granularity: u64,
 }
 
 struct Queue {

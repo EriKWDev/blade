@@ -992,6 +992,7 @@ impl super::Context {
                 allocator: gpu_alloc::GpuAllocator::new(config, properties),
                 slab: slab::Slab::new(),
                 valid_ash_memory_types,
+                buffer_image_granularity: limits.buffer_image_granularity.max(1),
             }
         };
 
