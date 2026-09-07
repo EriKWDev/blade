@@ -54,6 +54,18 @@ impl Frame {
             aspects: crate::TexelAspects::COLOR,
         }
     }
+
+    pub fn is_out_of_date(&self) -> bool {
+        false
+    }
+
+    pub fn size(&self) -> crate::Extent {
+        crate::Extent {
+            width: self.texture.width() as u32,
+            height: self.texture.height() as u32,
+            depth: 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

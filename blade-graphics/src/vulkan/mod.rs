@@ -165,6 +165,18 @@ impl Frame {
             aspects: self.swapchain.format.aspects(),
         }
     }
+
+    pub fn is_out_of_date(&self) -> bool {
+        self.image_index.is_none()
+    }
+
+    pub fn size(&self) -> crate::Extent {
+        crate::Extent {
+            width: self.swapchain.target_size[0] as u32,
+            height: self.swapchain.target_size[1] as u32,
+            depth: 1,
+        }
+    }
 }
 
 fn map_timeout(millis: u32) -> u64 {

@@ -259,6 +259,18 @@ impl Frame {
             owns_descriptors: false,
         }
     }
+
+    pub fn is_out_of_date(&self) -> bool {
+        false
+    }
+
+    pub fn size(&self) -> crate::Extent {
+        crate::Extent {
+            width: self.target_size[0] as u32,
+            height: self.target_size[1] as u32,
+            depth: 1,
+        }
+    }
 }
 
 // ── Synchronization ───────────────────────────────────────────────────────────
