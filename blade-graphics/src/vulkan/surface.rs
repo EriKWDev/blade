@@ -6,6 +6,7 @@ impl super::Surface {
         crate::SurfaceInfo {
             format: self.swapchain.format,
             alpha: self.swapchain.alpha,
+            frame_count: self.frames.len() as u32,
         }
     }
 
@@ -419,6 +420,10 @@ impl super::Context {
         }
         .queue_family_indices(&queue_families);
 
+        // Kept before any push_next so the fallback can build a fresh chain rather than
+        // appending a second VkSurfaceFullScreenExclusiveInfoEXT to this one.
+        let base_create_info = create_info;
+
         if surface.full_screen_exclusive {
             assert!(self.device.full_screen_exclusive.is_some());
             create_info = create_info.push_next(&mut full_screen_exclusive_info);
@@ -444,9 +449,27 @@ impl super::Context {
                         // Windows can refuse the mode switch outright. Non-exclusive still
                         // presents, so fall back rather than lose the device.
                         log::warn!("create_swapchain failed again ({err:?}), disallowing exclusive full screen");
-                        create_info = create_info.push_next(&mut fse_disallowed_info);
-                        unsafe { surface.device.create_swapchain(&create_info, None) }
-                            .expect("failed to create swapchain without full screen exclusive")
+                        let mut fallback_info = base_create_info;
+                        fallback_info.old_swapchain = vk::SwapchainKHR::null();
+                        if surface.full_screen_exclusive {
+                            fallback_info = fallback_info.push_next(&mut fse_disallowed_info);
+                        }
+                        match unsafe { surface.device.create_swapchain(&fallback_info, None) } {
+                            Ok(raw) => raw,
+                            Err(err) => {
+                                /*
+                                    Swapchain creation also fails for a while after the device is
+                                    reset, so aborting here kills the process before the crash
+                                    handler can report where the GPU actually died. Leave the
+                                    surface unconfigured and let the caller try again.
+                                */
+                                log::error!(
+                                    "could not create a swapchain at all ({err:?}), leaving the surface unconfigured"
+                                );
+                                surface.swapchain.raw = vk::SwapchainKHR::null();
+                                return;
+                            }
+                        }
                     }
                 }
             }
