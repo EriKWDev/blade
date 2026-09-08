@@ -691,6 +691,22 @@ impl Context {
         let _ = unsafe { self.device.core.device_wait_idle() };
     }
 
+    /// Return memory blocks that no longer hold any suballocation to the driver.
+    ///
+    /// The suballocator keeps emptied blocks for reuse, so a workload that repeatedly recreates
+    /// large resources grows the pool until an allocation fails. Call this after such a
+    /// recreation, while no work is in flight.
+    pub fn cleanup_memory(&self) {
+        profiling::function_scope!();
+
+        let mut manager = self.memory.lock().unwrap();
+        unsafe {
+            manager
+                .allocator
+                .cleanup(gpu_alloc_ash::AshMemoryDevice::wrap(&self.device.core));
+        }
+    }
+
     /// encoder that calls [`CommandEncoder::present`].
     pub fn wait_for_present(&self, surface: &Surface, present_id: u64, timeout_ms: u32) -> bool {
         match self.device.present_wait {

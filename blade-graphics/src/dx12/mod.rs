@@ -1782,6 +1782,14 @@ impl Context {
         self.wait_for(&SyncPoint { progress }, !0);
     }
 
+    /// Return memory blocks that no longer hold any suballocation to the driver.
+    ///
+    /// Present so callers do not need to know which backend they are on. This backend does
+    /// not pool device memory the way the Vulkan one does, so there is nothing to return.
+    pub fn cleanup_memory(&self) {
+        profiling::function_scope!();
+    }
+
     pub fn wait_for_present(&self, _surface: &Surface, _present_id: u64, _timeout_ms: u32) -> bool {
         true
     }

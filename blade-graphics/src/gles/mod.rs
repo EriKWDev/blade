@@ -477,6 +477,14 @@ impl Context {
         unsafe { gl.finish() };
     }
 
+    /// Return memory blocks that no longer hold any suballocation to the driver.
+    ///
+    /// Present so callers do not need to know which backend they are on. This backend does
+    /// not pool device memory the way the Vulkan one does, so there is nothing to return.
+    pub fn cleanup_memory(&self) {
+        profiling::function_scope!();
+    }
+
     pub fn wait_for_present(
         &self,
         _surface: &Surface,
