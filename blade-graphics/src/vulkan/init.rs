@@ -77,6 +77,9 @@ struct AdapterCapabilities {
     ray_tracing: Option<RayTracingCapabilities>,
     buffer_device_address: bool,
     shader_float16: bool,
+    storage_buffer16: bool,
+    uniform_and_storage_buffer16: bool,
+    storage_input_output16: bool,
     inline_uniform_blocks: bool,
     buffer_marker: bool,
     shader_info: bool,
@@ -197,6 +200,7 @@ unsafe fn inspect_adapter(
     let mut buffer_device_address_features =
         vk::PhysicalDeviceBufferDeviceAddressFeaturesKHR::default();
     let mut shader_float16_int8_features = vk::PhysicalDeviceShaderFloat16Int8Features::default();
+    let mut storage_16bit_features = vk::PhysicalDevice16BitStorageFeatures::default();
     let mut acceleration_structure_features =
         vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
     let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
@@ -213,6 +217,7 @@ unsafe fn inspect_adapter(
         .push_next(&mut descriptor_indexing_features)
         .push_next(&mut buffer_device_address_features)
         .push_next(&mut shader_float16_int8_features)
+        .push_next(&mut storage_16bit_features)
         .push_next(&mut acceleration_structure_features)
         .push_next(&mut ray_query_features)
         .push_next(&mut present_id_features)
@@ -435,6 +440,11 @@ unsafe fn inspect_adapter(
         ray_tracing,
         buffer_device_address,
         shader_float16: shader_float16_int8_features.shader_float16 == vk::TRUE,
+        storage_buffer16: storage_16bit_features.storage_buffer16_bit_access == vk::TRUE,
+        uniform_and_storage_buffer16: storage_16bit_features
+            .uniform_and_storage_buffer16_bit_access
+            == vk::TRUE,
+        storage_input_output16: storage_16bit_features.storage_input_output16 == vk::TRUE,
         inline_uniform_blocks,
         buffer_marker,
         shader_info,
@@ -710,6 +720,13 @@ impl super::Context {
                 shader_float16: vk::TRUE,
                 ..Default::default()
             };
+            let mut storage_16bit = vk::PhysicalDevice16BitStorageFeatures {
+                storage_buffer16_bit_access: capabilities.storage_buffer16 as vk::Bool32,
+                uniform_and_storage_buffer16_bit_access: capabilities.uniform_and_storage_buffer16
+                    as vk::Bool32,
+                storage_input_output16: capabilities.storage_input_output16 as vk::Bool32,
+                ..Default::default()
+            };
             let mut khr_present_id = vk::PhysicalDevicePresentIdFeaturesKHR {
                 present_id: vk::TRUE,
                 ..Default::default()
@@ -770,6 +787,12 @@ impl super::Context {
             }
             if capabilities.shader_float16 {
                 device_create_info = device_create_info.push_next(&mut shader_float16_int8);
+            }
+            if capabilities.storage_buffer16
+                || capabilities.uniform_and_storage_buffer16
+                || capabilities.storage_input_output16
+            {
+                device_create_info = device_create_info.push_next(&mut storage_16bit);
             }
 
             #[cfg(feature = "aftermath")]
@@ -847,6 +870,7 @@ impl super::Context {
             },
             buffer_device_address: capabilities.buffer_device_address,
             shader_float16: capabilities.shader_float16,
+            storage_input_output16: capabilities.storage_input_output16,
             inline_uniform_blocks: capabilities.inline_uniform_blocks,
             buffer_marker: if capabilities.buffer_marker && desc.validation {
                 Some(amd::buffer_marker::Device::new(

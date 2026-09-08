@@ -61,6 +61,7 @@ struct Device {
     ray_tracing: Option<RayTracingDevice>,
     buffer_device_address: bool,
     shader_float16: bool,
+    storage_input_output16: bool,
     inline_uniform_blocks: bool,
     buffer_marker: Option<ash::amd::buffer_marker::Device>,
     shader_info: Option<ash::amd::shader_info::Device>,

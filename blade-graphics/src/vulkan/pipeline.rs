@@ -57,7 +57,7 @@ impl super::Context {
             force_loop_bounding: false,
             debug_info: None,
             fake_missing_bindings: true,
-            use_storage_input_output_16: true,
+            use_storage_input_output_16: self.device.storage_input_output16,
             ray_query_initialization_tracking: false,
             trace_ray_argument_validation: true,
             task_dispatch_limits: None,
