@@ -445,7 +445,7 @@ impl super::Context {
                 },
             },
             extent: config.size,
-            info: crate::SurfaceInfo { format, alpha },
+            info: crate::SurfaceInfo { format, alpha, frame_count: 2 },
             swap_interval: match config.display_sync {
                 crate::DisplaySync::Block => 1,
                 crate::DisplaySync::Recent | crate::DisplaySync::Tear => 0,

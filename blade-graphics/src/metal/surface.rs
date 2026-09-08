@@ -6,6 +6,7 @@ use objc2_quartz_core::CAMetalLayer;
 const SURFACE_INFO: crate::SurfaceInfo = crate::SurfaceInfo {
     format: crate::TextureFormat::Rgba8Unorm,
     alpha: crate::AlphaMode::Ignored,
+    frame_count: 3,
 };
 
 impl super::Surface {
@@ -115,6 +116,7 @@ impl super::Context {
     pub fn reconfigure_surface(&self, surface: &mut super::Surface, config: crate::SurfaceConfig) {
         let device = &self.device.0;
         surface.info = crate::SurfaceInfo {
+            frame_count: 3,
             format: match config.color_space {
                 crate::ColorSpace::Linear => crate::TextureFormat::Bgra8UnormSrgb,
                 crate::ColorSpace::Srgb => crate::TextureFormat::Bgra8Unorm,

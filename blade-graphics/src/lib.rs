@@ -1383,6 +1383,11 @@ pub enum AlphaMode {
 pub struct SurfaceInfo {
     pub format: TextureFormat,
     pub alpha: AlphaMode,
+    /// Images the swapchain was actually created with.
+    ///
+    /// A presenting encoder retires its command buffers at this rate, so it needs at least this
+    /// many of them or it will reset one the GPU has not finished with.
+    pub frame_count: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

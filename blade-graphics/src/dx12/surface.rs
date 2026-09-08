@@ -258,6 +258,7 @@ impl super::Surface {
         crate::SurfaceInfo {
             format: self.format,
             alpha: self.alpha,
+            frame_count: self.frames.len() as u32,
         }
     }
 

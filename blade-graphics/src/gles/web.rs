@@ -109,6 +109,7 @@ impl super::Context {
     ) -> Result<super::Surface, crate::NotSupportedError> {
         let platform = PlatformSurface {
             info: crate::SurfaceInfo {
+                frame_count: 2,
                 format: crate::TextureFormat::Rgba8Unorm,
                 alpha: crate::AlphaMode::PreMultiplied,
             },
