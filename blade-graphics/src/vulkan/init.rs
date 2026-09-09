@@ -800,7 +800,8 @@ impl super::Context {
                 flags: vk::DeviceDiagnosticsConfigFlagsNV::empty()
                     | vk::DeviceDiagnosticsConfigFlagsNV::ENABLE_AUTOMATIC_CHECKPOINTS
                     | vk::DeviceDiagnosticsConfigFlagsNV::ENABLE_RESOURCE_TRACKING
-                    | vk::DeviceDiagnosticsConfigFlagsNV::ENABLE_SHADER_DEBUG_INFO,
+                    | vk::DeviceDiagnosticsConfigFlagsNV::ENABLE_SHADER_DEBUG_INFO
+                    | vk::DeviceDiagnosticsConfigFlagsNV::ENABLE_SHADER_ERROR_REPORTING,
                 ..Default::default()
             };
 
