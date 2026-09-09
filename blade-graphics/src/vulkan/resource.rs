@@ -38,6 +38,20 @@ impl super::Context {
             }
         };
         let memory_types = requirements.memory_type_bits & manager.valid_ash_memory_types;
+        /*
+            NOTE: gpu_alloc treats FAST_DEVICE_ACCESS as a preference and falls through to the
+                  next allowed memory type when a device local allocation fails. On NVIDIA Windows
+                  the next type is a flagless one on the system RAM heap, so a render target ends
+                  up rendered across PCIe with nothing reporting that it happened. Ask for device
+                  local only, and let a real exhaustion surface instead.
+        */
+        let device_local_only = matches!(memory, crate::Memory::Device)
+            && (memory_types & manager.device_local_memory_types) != 0;
+        let memory_types = if device_local_only {
+            memory_types & manager.device_local_memory_types
+        } else {
+            memory_types
+        };
         // A buffer and an optimal-tiling image sharing a bufferImageGranularity page alias.
         // gpu_alloc does not track tiling, so align every suballocation to the granularity.
         let align = requirements.alignment.max(manager.buffer_image_granularity);
@@ -120,12 +134,43 @@ impl super::Context {
                     usage: alloc_usage,
                     memory_types,
                 };
-                manager
-                    .allocator
-                    .alloc(AshMemoryDevice::wrap(&self.device.core), request)
-                    .unwrap()
+                let device = AshMemoryDevice::wrap(&self.device.core);
+                match manager.allocator.alloc(device, request) {
+                    Ok(block) => block,
+                    Err(first) => {
+                        /*
+                            NOTE: The suballocator holds on to emptied blocks, so an exhausted heap
+                                  can still have room once those go back to the driver.
+                        */
+                        manager.allocator.cleanup(device);
+                        manager.allocator.alloc(device, request).unwrap_or_else(|second| {
+                            panic!(
+                                "out of device memory allocating {} bytes from memory types {:#x}: {:?}, and {:?} after returning empty blocks",
+                                requirements.size, memory_types, first, second,
+                            )
+                        })
+                    }
+                }
             },
         };
+
+        /*
+            NOTE: Only reachable when the resource allows no device local memory type at all,
+                  since the request above is restricted otherwise. Worth hearing about: it means
+                  something is about to be rendered across PCIe.
+        */
+        if matches!(memory, crate::Memory::Device)
+            && !block
+                .props()
+                .contains(gpu_alloc::MemoryPropertyFlags::DEVICE_LOCAL)
+        {
+            log::warn!(
+                "device allocation of {} bytes landed in memory type {} with props {:?}, not device local",
+                requirements.size,
+                block.memory_type(),
+                block.props(),
+            );
+        }
 
         let data = match memory {
             crate::Memory::External(crate::ExternalMemorySource::HostAllocation(ptr)) => {

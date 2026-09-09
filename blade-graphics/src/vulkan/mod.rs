@@ -88,6 +88,9 @@ struct MemoryManager {
     allocator: gpu_alloc::GpuAllocator<vk::DeviceMemory>,
     slab: slab::Slab<gpu_alloc::MemoryBlock<vk::DeviceMemory>>,
     valid_ash_memory_types: u32,
+    /// Memory types on a DEVICE_LOCAL heap. Device allocations are restricted to these, see
+    /// `allocate_memory`.
+    device_local_memory_types: u32,
     /// A buffer and an optimal-tiling image bound to the same memory within one
     /// of these pages alias. gpu_alloc does not track resource tiling, so every
     /// suballocation is aligned to it.
@@ -194,6 +197,7 @@ pub struct Context {
     queue_family_index: u32,
     queue: Mutex<Queue>,
     physical_device: vk::PhysicalDevice,
+    has_memory_budget: bool,
     naga_flags: naga::back::spv::WriterFlags,
     shader_debug_path: Option<PathBuf>,
     min_buffer_alignment: u64,
@@ -705,6 +709,34 @@ impl Context {
                 .allocator
                 .cleanup(gpu_alloc_ash::AshMemoryDevice::wrap(&self.device.core));
         }
+    }
+
+    /*
+        NOTE: (usage, budget) in bytes per device local heap. A successful DEVICE_LOCAL allocation
+              does not mean the memory stays in video memory: once usage passes budget the OS
+              pages allocations out, so the heap size is not the limit that matters. Empty when
+              VK_EXT_memory_budget is unavailable.
+    */
+    pub fn device_memory_budget(&self) -> Vec<(u64, u64)> {
+        if !self.has_memory_budget {
+            return Vec::new();
+        }
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut props = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        unsafe {
+            self.instance
+                .core
+                .get_physical_device_memory_properties2(self.physical_device, &mut props)
+        };
+        let memory = props.memory_properties;
+        (0..memory.memory_heap_count as usize)
+            .filter(|&i| {
+                memory.memory_heaps[i]
+                    .flags
+                    .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+            })
+            .map(|i| (budget.heap_usage[i], budget.heap_budget[i]))
+            .collect()
     }
 
     /// encoder that calls [`CommandEncoder::present`].

@@ -646,6 +646,11 @@ impl Context {
         profiling::function_scope!();
     }
 
+    /// No device memory budget to report on this backend.
+    pub fn device_memory_budget(&self) -> Vec<(u64, u64)> {
+        Vec::new()
+    }
+
     pub fn wait_for_present(
         &self,
         _surface: &Surface,

@@ -97,6 +97,7 @@ struct AdapterCapabilities {
     fragment_shading_rate_attachment_texel_size: Option<[u32; 2]>,
     pipeline_statistics_query: bool,
     present_wait: bool,
+    memory_budget: bool,
     vendor: crate::GpuVendor,
 }
 
@@ -175,6 +176,8 @@ unsafe fn inspect_adapter(
     }
 
     let draw_indirect_count = supported_extensions.contains(&vk::AMD_DRAW_INDIRECT_COUNT_NAME);
+    // Lets the driver report what it will actually keep resident, which is not the heap size.
+    let memory_budget = supported_extensions.contains(&vk::EXT_MEMORY_BUDGET_NAME);
 
     let bugs = SystemBugs {
         //Note: this is somewhat broad across X11/Wayland and different drivers.
@@ -462,6 +465,7 @@ unsafe fn inspect_adapter(
         fragment_shading_rate_attachment_texel_size,
         pipeline_statistics_query,
         present_wait,
+        memory_budget,
         vendor: map_vendor(properties.vendor_id),
     })
 }
@@ -643,6 +647,9 @@ impl super::Context {
             let mut device_extensions = REQUIRED_DEVICE_EXTENSIONS.to_vec();
             if capabilities.inline_uniform_blocks {
                 device_extensions.push(vk::EXT_INLINE_UNIFORM_BLOCK_NAME);
+            }
+            if capabilities.memory_budget {
+                device_extensions.push(vk::EXT_MEMORY_BUDGET_NAME);
             }
             if desc.presentation {
                 device_extensions.push(vk::KHR_SWAPCHAIN_NAME);
@@ -1013,10 +1020,22 @@ impl super::Context {
                     u | (1 << i)
                 }
             });
+            let device_local_memory_types =
+                memory_types.iter().enumerate().fold(0, |u, (i, mem)| {
+                    if mem
+                        .property_flags
+                        .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                    {
+                        u | (1 << i)
+                    } else {
+                        u
+                    }
+                });
             super::MemoryManager {
                 allocator: gpu_alloc::GpuAllocator::new(config, properties),
                 slab: slab::Slab::new(),
                 valid_ash_memory_types,
+                device_local_memory_types,
                 buffer_image_granularity: limits.buffer_image_granularity.max(1),
             }
         };
@@ -1058,6 +1077,7 @@ impl super::Context {
                 last_progress,
             }),
             physical_device,
+            has_memory_budget: capabilities.memory_budget,
             naga_flags,
             shader_debug_path,
             min_buffer_alignment,
