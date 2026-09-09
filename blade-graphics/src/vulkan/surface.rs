@@ -10,7 +10,15 @@ impl super::Surface {
         }
     }
 
-    unsafe fn deinit_swapchain(&mut self, raw_device: &ash::Device) {
+    /*
+        NOTE: queue is a witness that the caller holds the queue lock. vkDeviceWaitIdle externally
+              synchronizes every queue, so it races any other thread inside vkQueueSubmit.
+    */
+    unsafe fn deinit_swapchain(
+        &mut self,
+        raw_device: &ash::Device,
+        _queue: &std::sync::MutexGuard<'_, super::Queue>,
+    ) {
         let _ = raw_device.device_wait_idle();
         self.device
             .destroy_swapchain(mem::take(&mut self.swapchain.raw), None);
@@ -154,8 +162,9 @@ impl super::Context {
     }
 
     pub fn destroy_surface(&self, surface: &mut super::Surface) {
+        let queue = self.queue.lock().unwrap();
         unsafe {
-            surface.deinit_swapchain(&self.device.core);
+            surface.deinit_swapchain(&self.device.core, &queue);
             self.device
                 .core
                 .destroy_semaphore(surface.next_semaphore, None)
@@ -436,12 +445,12 @@ impl super::Context {
         // full-screen exclusive. Retire the old swapchain and retry before giving up.
         let raw_swapchain = match unsafe { surface.device.create_swapchain(&create_info, None) } {
             Ok(raw) => {
-                unsafe { surface.deinit_swapchain(&self.device.core) };
+                unsafe { surface.deinit_swapchain(&self.device.core, &self.queue.lock().unwrap()) };
                 raw
             }
             Err(err) => {
                 log::warn!("create_swapchain failed ({err:?}), retrying without old_swapchain");
-                unsafe { surface.deinit_swapchain(&self.device.core) };
+                unsafe { surface.deinit_swapchain(&self.device.core, &self.queue.lock().unwrap()) };
                 create_info.old_swapchain = vk::SwapchainKHR::null();
                 match unsafe { surface.device.create_swapchain(&create_info, None) } {
                     Ok(raw) => raw,

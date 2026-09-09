@@ -692,6 +692,12 @@ impl Context {
     /// `present_id` is obtained from [`Surface::last_present_id`] after submitting the
     /// Blocks until the device has finished all submitted work.
     pub fn wait_idle(&self) {
+        /*
+            NOTE: vkDeviceWaitIdle externally synchronizes every queue the device owns, so it
+                  races any other thread inside vkQueueSubmit. Validation reports that as
+                  UNASSIGNED-Threading-MultipleThreads-Write on the VkQueue.
+        */
+        let _queue = self.queue.lock().unwrap();
         let _ = unsafe { self.device.core.device_wait_idle() };
     }
 
