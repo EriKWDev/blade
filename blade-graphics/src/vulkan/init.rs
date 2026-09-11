@@ -625,10 +625,32 @@ impl super::Context {
             .map_err(super::PlatformError::Init)?;
         let (physical_device, capabilities) = physical_devices
             .into_iter()
-            .find_map(|phd| {
+            .filter_map(|phd| {
                 inspect_adapter(phd, &instance, driver_api_version, &desc).map(|caps| (phd, caps))
             })
+            .enumerate()
+            .max_by_key(|&(enumeration_index, (phd, _))| {
+                let type_rank = match instance.core.get_physical_device_properties(phd).device_type {
+                    vk::PhysicalDeviceType::DISCRETE_GPU => 4,
+                    vk::PhysicalDeviceType::INTEGRATED_GPU => 3,
+                    vk::PhysicalDeviceType::VIRTUAL_GPU => 2,
+                    vk::PhysicalDeviceType::OTHER => 1,
+                    _ => 0,
+                };
+                (type_rank, core::cmp::Reverse(enumeration_index))
+            })
+            .map(|(_, adapter)| adapter)
             .ok_or_else(|| NotSupportedError::NoSupportedDeviceFound)?;
+        log::info!(
+            "Selected adapter: {:?}",
+            ffi::CStr::from_ptr(
+                instance
+                    .core
+                    .get_physical_device_properties(physical_device)
+                    .device_name
+                    .as_ptr()
+            )
+        );
 
         log::debug!("Adapter {:#?}", capabilities);
         let mut min_buffer_alignment = 1;
