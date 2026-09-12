@@ -260,6 +260,7 @@ struct PipelineLayout {
     group_mappings: Box<[ShaderDataMapping]>,
     group_infos: Box<[crate::ShaderDataInfo]>,
     sizes_buffer_slot: Option<u32>,
+    sizes_buffer: Box<[u32]>,
 }
 
 pub struct ComputePipeline {

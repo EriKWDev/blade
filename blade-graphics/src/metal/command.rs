@@ -697,11 +697,11 @@ impl super::ComputeCommandEncoder<'_> {
         self.raw.setComputePipelineState(&pipeline.raw);
         if let Some(index) = pipeline.layout.sizes_buffer_slot {
             //TODO: get real sizes? shouldn't matter without bounds checks
-            let runtime_sizes = [0u8; 8];
+            let runtime_sizes = &pipeline.layout.sizes_buffer;
             unsafe {
                 self.raw.setBytes_length_atIndex(
                     NonNull::new(runtime_sizes.as_ptr() as *const _ as *mut _).unwrap(),
-                    runtime_sizes.len(),
+                    std::mem::size_of_val(runtime_sizes.as_ref()),
                     index as _,
                 );
             }
@@ -796,16 +796,16 @@ impl super::RenderCommandEncoder<'_> {
         self.raw.setRenderPipelineState(&pipeline.raw);
         if let Some(index) = pipeline.layout.sizes_buffer_slot {
             //TODO: get real sizes
-            let runtime_sizes = [0u8; 8];
+            let runtime_sizes = &pipeline.layout.sizes_buffer;
             unsafe {
                 self.raw.setVertexBytes_length_atIndex(
                     NonNull::new(runtime_sizes.as_ptr() as *const _ as *mut _).unwrap(),
-                    runtime_sizes.len(),
+                    std::mem::size_of_val(runtime_sizes.as_ref()),
                     index as _,
                 );
                 self.raw.setFragmentBytes_length_atIndex(
                     NonNull::new(runtime_sizes.as_ptr() as *const _ as *mut _).unwrap(),
-                    runtime_sizes.len(),
+                    std::mem::size_of_val(runtime_sizes.as_ref()),
                     index as _,
                 );
             }

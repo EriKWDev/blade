@@ -182,6 +182,7 @@ fn make_pipeline_layout(
         } else {
             None
         },
+        sizes_buffer: vec![0; unsized_buffer_count].into_boxed_slice(),
     }
 }
 
