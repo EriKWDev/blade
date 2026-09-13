@@ -21,6 +21,21 @@ struct Vertex {
 }
 var<storage, read> r_vertex_data: array<Vertex>;
 
+struct TextureInfo {
+    sampled_as_linear: u32,
+    padding_0: u32,
+    padding_1: u32,
+    padding_2: u32,
+};
+var<uniform> r_texture_info: TextureInfo;
+
+fn gamma_from_linear(rgb: vec3<f32>) -> vec3<f32> {
+    let cutoff = rgb < vec3<f32>(0.0031308);
+    let lower = rgb * vec3<f32>(12.92);
+    let higher = vec3<f32>(1.055) * pow(rgb, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(higher, lower, cutoff);
+}
+
 fn linear_from_gamma(srgb: vec3<f32>) -> vec3<f32> {
     let cutoff = srgb < vec3<f32>(0.04045);
     let lower = srgb / vec3<f32>(12.92);
@@ -53,6 +68,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     //Note: we always assume rendering to linear color space,
     // but Egui wants to blend in gamma space, see
     // https://github.com/emilk/egui/pull/2071
-    let blended = in.color * textureSample(r_texture, r_sampler, in.tex_coord);
+    var texel = textureSample(r_texture, r_sampler, in.tex_coord);
+    //Note: an sRGB texture is sampled as linear, so it is brought back to the gamma space egui
+    // blends its own textures in.
+    if r_texture_info.sampled_as_linear != 0u {
+        texel = vec4<f32>(gamma_from_linear(texel.rgb), texel.a);
+    }
+    let blended = in.color * texel;
     return vec4f(linear_from_gamma(blended.xyz), blended.a);
 }

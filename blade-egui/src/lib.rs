@@ -30,11 +30,38 @@ struct Globals {
     r_uniforms: Uniforms,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+struct TextureInfo {
+    sampled_as_linear: u32,
+    padding: [u32; 3],
+}
+
 #[derive(blade_macros::ShaderData)]
 struct Locals {
     r_vertex_data: blade_graphics::BufferPiece,
     r_texture: blade_graphics::TextureView,
     r_sampler: blade_graphics::Sampler,
+    r_texture_info: TextureInfo,
+}
+
+/// A texture the application owns and egui paints under a user texture id.
+struct NativeTexture {
+    view: blade_graphics::TextureView,
+    sampled_as_linear: bool,
+}
+
+fn is_srgb(format: blade_graphics::TextureFormat) -> bool {
+    use blade_graphics::TextureFormat as Tf;
+    matches!(
+        format,
+        Tf::Rgba8UnormSrgb
+            | Tf::Bgra8UnormSrgb
+            | Tf::Bc1UnormSrgb
+            | Tf::Bc2UnormSrgb
+            | Tf::Bc3UnormSrgb
+            | Tf::Bc7UnormSrgb
+    )
 }
 
 #[derive(Debug, PartialEq)]
@@ -139,6 +166,8 @@ pub struct GuiPainter {
     //TODO: find a better way to allocate temporary buffers.
     belt: BufferBelt,
     textures: HashMap<egui::TextureId, GuiTexture>,
+    native_textures: HashMap<egui::TextureId, NativeTexture>,
+    native_sampler: blade_graphics::Sampler,
     //TODO: this could also look better
     textures_dropped: Vec<GuiTexture>,
     textures_to_delete: Vec<(GuiTexture, blade_graphics::SyncPoint)>,
@@ -149,6 +178,8 @@ impl GuiPainter {
     pub fn destroy(&mut self, context: &blade_graphics::Context) {
         context.destroy_render_pipeline(&mut self.pipeline);
         self.belt.destroy(context);
+        self.native_textures.clear();
+        context.destroy_sampler(self.native_sampler);
         for (_, gui_texture) in self.textures.drain() {
             gui_texture.delete(context);
         }
@@ -207,13 +238,46 @@ impl GuiPainter {
             alignment: blade_graphics::limits::STORAGE_BUFFER_ALIGNMENT,
         });
 
+        let native_sampler = context.create_sampler(blade_graphics::SamplerDesc {
+            name: "gui native",
+            address_modes: [blade_graphics::AddressMode::ClampToEdge; 3],
+            mag_filter: blade_graphics::FilterMode::Linear,
+            min_filter: blade_graphics::FilterMode::Linear,
+            ..Default::default()
+        });
+
         Self {
             pipeline,
             belt,
             textures: Default::default(),
+            native_textures: Default::default(),
+            native_sampler,
             textures_dropped: Vec::new(),
             textures_to_delete: Vec::new(),
         }
+    }
+
+    /// Paints a texture the application owns wherever egui paints `texture_id`, which should be
+    /// an `egui::TextureId::User` id so egui never allocates it for its own images. The painter
+    /// never destroys the texture. A view of an sRGB format is sampled as linear, so its samples
+    /// are converted back to gamma and then blended like egui's own textures.
+    pub fn set_native_texture(
+        &mut self,
+        texture_id: egui::TextureId,
+        view: blade_graphics::TextureView,
+        format: blade_graphics::TextureFormat,
+    ) {
+        self.native_textures.insert(
+            texture_id,
+            NativeTexture {
+                view,
+                sampled_as_linear: is_srgb(format),
+            },
+        );
+    }
+
+    pub fn remove_native_texture(&mut self, texture_id: egui::TextureId) {
+        self.native_textures.remove(&texture_id);
     }
 
     #[profiling::function]
@@ -358,7 +422,16 @@ impl GuiPainter {
             });
 
             if let egui::epaint::Primitive::Mesh(ref mesh) = clipped_prim.primitive {
-                let texture = self.textures.get(&mesh.texture_id).unwrap();
+                let (view, sampler, sampled_as_linear) = match self
+                    .native_textures
+                    .get(&mesh.texture_id)
+                {
+                    Some(native) => (native.view, self.native_sampler, native.sampled_as_linear),
+                    None => {
+                        let texture = self.textures.get(&mesh.texture_id).unwrap();
+                        (texture.view, texture.sampler, false)
+                    }
+                };
                 let index_buf = self.belt.alloc_pod(&mesh.indices, context);
                 let vertex_buf = self.belt.alloc_pod(&mesh.vertices, context);
 
@@ -366,8 +439,12 @@ impl GuiPainter {
                     1,
                     &Locals {
                         r_vertex_data: vertex_buf,
-                        r_texture: texture.view,
-                        r_sampler: texture.sampler,
+                        r_texture: view,
+                        r_sampler: sampler,
+                        r_texture_info: TextureInfo {
+                            sampled_as_linear: u32::from(sampled_as_linear),
+                            padding: [0; 3],
+                        },
                     },
                 );
 
