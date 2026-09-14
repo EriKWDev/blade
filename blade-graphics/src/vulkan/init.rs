@@ -90,6 +90,7 @@ struct AdapterCapabilities {
     multidraw_indirect: bool,
     draw_indirect_first_instance: bool,
     fill_mode_non_solid: bool,
+    shader_storage_image_extended_formats: bool,
     draw_indirect_count: bool,
     multisampled_render_to_single_sampled: bool,
     fragment_shading_rate: bool,
@@ -235,6 +236,8 @@ unsafe fn inspect_adapter(
     let draw_indirect_first_instance =
         features2_khr.features.draw_indirect_first_instance == vk::TRUE;
     let fill_mode_non_solid = features2_khr.features.fill_mode_non_solid == vk::TRUE;
+    let shader_storage_image_extended_formats =
+        features2_khr.features.shader_storage_image_extended_formats == vk::TRUE;
     let pipeline_statistics_query = features2_khr.features.pipeline_statistics_query == vk::TRUE;
 
     let has_inline_ub = supported_extensions.contains(&vk::EXT_INLINE_UNIFORM_BLOCK_NAME)
@@ -458,6 +461,7 @@ unsafe fn inspect_adapter(
         multidraw_indirect,
         draw_indirect_first_instance,
         fill_mode_non_solid,
+        shader_storage_image_extended_formats,
         draw_indirect_count,
         multisampled_render_to_single_sampled,
         fragment_shading_rate,
@@ -788,6 +792,9 @@ impl super::Context {
             }
             if capabilities.fill_mode_non_solid {
                 features = features.fill_mode_non_solid(true);
+            }
+            if capabilities.shader_storage_image_extended_formats {
+                features = features.shader_storage_image_extended_formats(true);
             }
             if pipeline_statistics {
                 features = features.pipeline_statistics_query(true);
@@ -1157,16 +1164,35 @@ impl super::Context {
         }
     }
 
-    pub fn supports_storage_read_write(&self, format: crate::TextureFormat) -> bool {
-        let properties = unsafe {
-            self.instance.core.get_physical_device_format_properties(
-                self.physical_device,
-                super::map_texture_format(format),
+    pub fn supports_storage_write(&self, format: crate::TextureFormat) -> bool {
+        use crate::TextureFormat;
+
+        let (properties, features) = unsafe {
+            (
+                self.instance.core.get_physical_device_format_properties(
+                    self.physical_device,
+                    super::map_texture_format(format),
+                ),
+                self.instance
+                    .core
+                    .get_physical_device_features(self.physical_device),
             )
         };
+        let extended_format = matches!(
+            format,
+            TextureFormat::R8Unorm
+                | TextureFormat::R8Uint
+                | TextureFormat::Rg8Unorm
+                | TextureFormat::Rg8Snorm
+                | TextureFormat::R16Float
+                | TextureFormat::Rg16Float
+                | TextureFormat::Rg11b10Ufloat
+                | TextureFormat::Rgb10a2Unorm
+        );
         properties
             .optimal_tiling_features
             .contains(vk::FormatFeatureFlags::STORAGE_IMAGE)
+            && (!extended_format || features.shader_storage_image_extended_formats == vk::TRUE)
     }
 
     pub fn device_information(&self) -> &crate::DeviceInformation {

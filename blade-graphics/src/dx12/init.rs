@@ -318,17 +318,14 @@ impl Context {
         self.capabilities.clone()
     }
 
-    pub fn supports_storage_read_write(&self, format: crate::TextureFormat) -> bool {
+    pub fn supports_storage_write(&self, format: crate::TextureFormat) -> bool {
         let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
             Format: super::map_texture_format(format),
             ..Default::default()
         };
         let known =
             unsafe { check_feature(&self.device, D3D12_FEATURE_FORMAT_SUPPORT, &mut support) };
-        known
-            && support.Support2.contains(
-                D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD | D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE,
-            )
+        known && support.Support2.contains(D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)
     }
 
     pub fn device_information(&self) -> &crate::DeviceInformation {

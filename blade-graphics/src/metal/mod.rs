@@ -686,29 +686,27 @@ impl Context {
         true
     }
 
-    pub fn supports_storage_read_write(&self, format: crate::TextureFormat) -> bool {
+    pub fn supports_storage_write(&self, format: crate::TextureFormat) -> bool {
         use crate::TextureFormat;
         use metal::MTLDevice as _;
 
-        let device = &self.device.0;
         match format {
-            TextureFormat::R32Float | TextureFormat::R32Uint => {
-                device.readWriteTextureSupport() != metal::MTLReadWriteTextureTier::TierNone
-            }
             TextureFormat::R8Unorm
-            | TextureFormat::R8Uint
-            | TextureFormat::R16Float
             | TextureFormat::Rgba8Unorm
+            | TextureFormat::R16Float
+            | TextureFormat::Rg16Float
             | TextureFormat::Rgba16Float
+            | TextureFormat::R32Float
+            | TextureFormat::Rg32Float
             | TextureFormat::Rgba32Float
-            | TextureFormat::Rgba32Uint => {
-                device.readWriteTextureSupport() == metal::MTLReadWriteTextureTier::Tier2
+            | TextureFormat::R32Uint
+            | TextureFormat::Rg32Uint
+            | TextureFormat::Rgba32Uint => true,
+            // Every Mac GPU family can write RG11B10Float, Apple GPUs from Apple3 on.
+            TextureFormat::Rg11b10Ufloat => {
+                cfg!(target_os = "macos")
+                    || self.device.0.supportsFamily(metal::MTLGPUFamily::Apple3)
             }
-            /*
-                NOTE: RG11B10Float is outside both documented read-write tiers, but Apple GPUs
-                      (M-series) accept it in practice. Intel and AMD Macs only get the tiers.
-            */
-            TextureFormat::Rg11b10Ufloat => device.supportsFamily(metal::MTLGPUFamily::Apple7),
             _ => false,
         }
     }
