@@ -499,6 +499,14 @@ impl Context {
         true
     }
 
+    pub fn supports_storage_read_write(&self, format: crate::TextureFormat) -> bool {
+        // GLES 3.1 only allows read_write image access on the single-channel 32-bit formats.
+        matches!(
+            format,
+            crate::TextureFormat::R32Float | crate::TextureFormat::R32Uint
+        )
+    }
+
     pub fn device_information(&self) -> &crate::DeviceInformation {
         &self.device_information
     }

@@ -1157,6 +1157,18 @@ impl super::Context {
         }
     }
 
+    pub fn supports_storage_read_write(&self, format: crate::TextureFormat) -> bool {
+        let properties = unsafe {
+            self.instance.core.get_physical_device_format_properties(
+                self.physical_device,
+                super::map_texture_format(format),
+            )
+        };
+        properties
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::STORAGE_IMAGE)
+    }
+
     pub fn device_information(&self) -> &crate::DeviceInformation {
         &self.device.device_information
     }

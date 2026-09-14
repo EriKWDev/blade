@@ -661,6 +661,33 @@ impl Context {
         true
     }
 
+    pub fn supports_storage_read_write(&self, format: crate::TextureFormat) -> bool {
+        use crate::TextureFormat;
+        use metal::MTLDevice as _;
+
+        let device = &self.device.0;
+        match format {
+            TextureFormat::R32Float | TextureFormat::R32Uint => {
+                device.readWriteTextureSupport() != metal::MTLReadWriteTextureTier::TierNone
+            }
+            TextureFormat::R8Unorm
+            | TextureFormat::R8Uint
+            | TextureFormat::R16Float
+            | TextureFormat::Rgba8Unorm
+            | TextureFormat::Rgba16Float
+            | TextureFormat::Rgba32Float
+            | TextureFormat::Rgba32Uint => {
+                device.readWriteTextureSupport() == metal::MTLReadWriteTextureTier::Tier2
+            }
+            /*
+                NOTE: RG11B10Float is outside both documented read-write tiers, but Apple GPUs
+                      (M-series) accept it in practice. Intel and AMD Macs only get the tiers.
+            */
+            TextureFormat::Rg11b10Ufloat => device.supportsFamily(metal::MTLGPUFamily::Apple7),
+            _ => false,
+        }
+    }
+
     pub fn device_information(&self) -> &crate::DeviceInformation {
         &self.device_information
     }
