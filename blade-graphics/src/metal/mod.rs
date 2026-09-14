@@ -347,6 +347,32 @@ pub struct RenderPipelineContext<'a> {
     group_mappings: &'a [ShaderDataMapping],
 }
 
+/*
+    NOTE: The newest MSL version the OS ships, capped at 2.4 which the shaders are generated and
+          tested for. Asking for a version the OS doesn't know fails every pipeline (macOS 11 only
+          has 2.3).
+*/
+fn select_language_version() -> metal::MTLLanguageVersion {
+    use metal::MTLLanguageVersion as Version;
+
+    let os = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+    if cfg!(target_os = "macos") {
+        match (os.majorVersion, os.minorVersion) {
+            (12.., _) => Version::Version2_4,
+            (11, _) => Version::Version2_3,
+            (10, 15) => Version::Version2_2,
+            _ => Version::Version2_1,
+        }
+    } else {
+        match os.majorVersion {
+            15.. => Version::Version2_4,
+            14 => Version::Version2_3,
+            13 => Version::Version2_2,
+            _ => Version::Version2_1,
+        }
+    }
+}
+
 fn map_texture_format(format: crate::TextureFormat) -> metal::MTLPixelFormat {
     use crate::TextureFormat as Tf;
     use metal::MTLPixelFormat as Mpf;
@@ -580,8 +606,7 @@ impl Context {
             capture,
             timestamp_counter_set,
             info: PrivateInfo {
-                //TODO: determine based on OS version
-                language_version: metal::MTLLanguageVersion::Version2_4,
+                language_version: select_language_version(),
                 enable_debug_groups: desc.capture || desc.command_labels,
                 enable_dispatch_type: true,
             },
