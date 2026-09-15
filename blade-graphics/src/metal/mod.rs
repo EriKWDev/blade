@@ -672,9 +672,22 @@ impl Context {
         profiling::function_scope!();
     }
 
-    /// No device memory budget to report on this backend.
-    pub fn device_memory_budget(&self) -> Vec<(u64, u64)> {
-        Vec::new()
+    /// A single heap for all of the device's memory. Its budget is the working set size the
+    /// system recommends staying under, which older iOS versions do not report.
+    pub fn device_memory_heaps(&self) -> Vec<crate::MemoryHeap> {
+        use metal::MTLDevice as _;
+        use objc2::runtime::NSObjectProtocol as _;
+
+        let device = &self.device.0;
+        let budget = device
+            .respondsToSelector(objc2::sel!(recommendedMaxWorkingSetSize))
+            .then(|| device.recommendedMaxWorkingSetSize());
+        vec![crate::MemoryHeap {
+            size: budget.unwrap_or(0),
+            usage: Some(device.currentAllocatedSize() as u64),
+            budget,
+            device_local: !device.hasUnifiedMemory(),
+        }]
     }
 
     pub fn wait_for_present(

@@ -238,6 +238,20 @@ impl Capabilities {
     }
 }
 
+/// One memory heap of the device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryHeap {
+    /// Total size of the heap in bytes.
+    pub size: u64,
+    /// Bytes this application has allocated from the heap, when the driver reports it.
+    pub usage: Option<u64>,
+    /// Bytes the driver lets this application use before it starts paging allocations out,
+    /// when the driver reports it.
+    pub budget: Option<u64>,
+    /// Memory on the device itself, such as video memory, rather than system memory.
+    pub device_local: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DeviceInformation {
     /// If this is something like llvmpipe, not a real GPU

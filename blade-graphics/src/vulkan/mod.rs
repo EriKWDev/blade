@@ -718,14 +718,28 @@ impl Context {
     }
 
     /*
-        NOTE: (usage, budget) in bytes per device local heap. A successful DEVICE_LOCAL allocation
-              does not mean the memory stays in video memory: once usage passes budget the OS
-              pages allocations out, so the heap size is not the limit that matters. Empty when
-              VK_EXT_memory_budget is unavailable.
+        NOTE: A successful DEVICE_LOCAL allocation does not mean the memory stays in video memory:
+              once usage passes budget the OS pages allocations out, so the heap size is not the
+              limit that matters. Usage and budget are None without VK_EXT_memory_budget.
     */
-    pub fn device_memory_budget(&self) -> Vec<(u64, u64)> {
+    pub fn device_memory_heaps(&self) -> Vec<crate::MemoryHeap> {
+        let heap = |memory: &vk::PhysicalDeviceMemoryProperties, i: usize| crate::MemoryHeap {
+            size: memory.memory_heaps[i].size,
+            usage: None,
+            budget: None,
+            device_local: memory.memory_heaps[i]
+                .flags
+                .contains(vk::MemoryHeapFlags::DEVICE_LOCAL),
+        };
         if !self.has_memory_budget {
-            return Vec::new();
+            let memory = unsafe {
+                self.instance
+                    .core
+                    .get_physical_device_memory_properties(self.physical_device)
+            };
+            return (0..memory.memory_heap_count as usize)
+                .map(|i| heap(&memory, i))
+                .collect();
         }
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
         let mut props = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
@@ -736,12 +750,11 @@ impl Context {
         };
         let memory = props.memory_properties;
         (0..memory.memory_heap_count as usize)
-            .filter(|&i| {
-                memory.memory_heaps[i]
-                    .flags
-                    .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+            .map(|i| crate::MemoryHeap {
+                usage: Some(budget.heap_usage[i]),
+                budget: Some(budget.heap_budget[i]),
+                ..heap(&memory, i)
             })
-            .map(|i| (budget.heap_usage[i], budget.heap_budget[i]))
             .collect()
     }
 

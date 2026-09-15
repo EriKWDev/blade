@@ -1790,8 +1790,8 @@ impl Context {
         profiling::function_scope!();
     }
 
-    /// No device memory budget to report on this backend.
-    pub fn device_memory_budget(&self) -> Vec<(u64, u64)> {
+    /// No memory heaps to report on this backend.
+    pub fn device_memory_heaps(&self) -> Vec<crate::MemoryHeap> {
         Vec::new()
     }
 
