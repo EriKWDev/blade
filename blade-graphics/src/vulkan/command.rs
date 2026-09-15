@@ -878,6 +878,7 @@ impl crate::traits::CommandEncoder for super::CommandEncoder {
             acquire_semaphore: frame.internal.acquire_semaphore,
             present_semaphore: frame.internal.present_semaphore,
             present_id: frame.present_id,
+            present_fence: frame.present_fence,
         });
 
         let barrier = vk::ImageMemoryBarrier {

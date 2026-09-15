@@ -28,6 +28,7 @@ struct Instance {
     fragment_shading_rate: khr::fragment_shading_rate::Instance,
     get_surface_capabilities2: Option<khr::get_surface_capabilities2::Instance>,
     surface: Option<khr::surface::Instance>,
+    surface_maintenance1: bool,
 }
 
 #[derive(Clone)]
@@ -71,6 +72,7 @@ struct Device {
     #[cfg(not(target_os = "windows"))]
     external_memory: Option<ash::khr::external_memory_fd::Device>,
     present_wait: Option<khr::present_wait::Device>,
+    swapchain_maintenance1: bool,
     command_scope: Option<CommandScopeDevice>,
     timing: Option<TimingDevice>,
     workarounds: Workarounds,
@@ -111,6 +113,22 @@ struct InternalFrame {
     view: vk::ImageView,
 }
 
+/// A swapchain replaced by a reconfigure, kept until every present made on it has finished.
+struct RetiredSwapchain {
+    raw: vk::SwapchainKHR,
+    frames: Vec<InternalFrame>,
+    present_fences: Vec<vk::Fence>,
+}
+
+/// Fences attached to presents through VK_EXT_swapchain_maintenance1, which tell when the
+/// presentation engine is done with a swapchain, so a reconfigure does not have to idle the device.
+struct PresentFences {
+    device: ash::Device,
+    free: Vec<vk::Fence>,
+    pending: Vec<vk::Fence>,
+    retired: Vec<RetiredSwapchain>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Swapchain {
     raw: vk::SwapchainKHR,
@@ -129,6 +147,7 @@ pub struct Surface {
     /// Monotonically increasing ID assigned to each vkQueuePresentKHR call.
     /// Used with VK_KHR_present_wait to block until a specific frame is displayed.
     next_present_id: u64,
+    present_fences: Option<PresentFences>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,6 +158,7 @@ struct Presentation {
     present_semaphore: vk::Semaphore,
     /// The present ID assigned at acquire time (0 = not tracked).
     present_id: u64,
+    present_fence: vk::Fence,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -148,6 +168,7 @@ pub struct Frame {
     internal: InternalFrame,
     /// Present ID to assign when this frame is submitted for display (0 = not tracked).
     present_id: u64,
+    present_fence: vk::Fence,
 }
 
 impl Frame {
@@ -642,22 +663,22 @@ impl crate::traits::CommandDevice for Context {
             let swapchains = [presentation.swapchain];
             let image_indices = [presentation.image_index];
             let wait_semaphores = [presentation.present_semaphore];
-            let ret = if self.device.present_wait.is_some() && presentation.present_id != 0 {
-                let present_ids = [presentation.present_id];
-                let mut present_id_info = vk::PresentIdKHR::default().present_ids(&present_ids);
-                let present_info = vk::PresentInfoKHR::default()
-                    .swapchains(&swapchains)
-                    .image_indices(&image_indices)
-                    .wait_semaphores(&wait_semaphores)
-                    .push_next(&mut present_id_info);
-                unsafe { khr_swapchain.queue_present(queue.raw, &present_info) }
-            } else {
-                let present_info = vk::PresentInfoKHR::default()
-                    .swapchains(&swapchains)
-                    .image_indices(&image_indices)
-                    .wait_semaphores(&wait_semaphores);
-                unsafe { khr_swapchain.queue_present(queue.raw, &present_info) }
-            };
+            let present_ids = [presentation.present_id];
+            let mut present_id_info = vk::PresentIdKHR::default().present_ids(&present_ids);
+            let present_fences = [presentation.present_fence];
+            let mut present_fence_info =
+                vk::SwapchainPresentFenceInfoEXT::default().fences(&present_fences);
+            let mut present_info = vk::PresentInfoKHR::default()
+                .swapchains(&swapchains)
+                .image_indices(&image_indices)
+                .wait_semaphores(&wait_semaphores);
+            if self.device.present_wait.is_some() && presentation.present_id != 0 {
+                present_info = present_info.push_next(&mut present_id_info);
+            }
+            if presentation.present_fence != vk::Fence::null() {
+                present_info = present_info.push_next(&mut present_fence_info);
+            }
+            let ret = unsafe { khr_swapchain.queue_present(queue.raw, &present_info) };
             let _ = encoder.check_gpu_crash(ret);
         }
 

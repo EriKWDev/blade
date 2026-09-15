@@ -98,6 +98,7 @@ struct AdapterCapabilities {
     fragment_shading_rate_attachment_texel_size: Option<[u32; 2]>,
     pipeline_statistics_query: bool,
     present_wait: bool,
+    swapchain_maintenance1: bool,
     memory_budget: bool,
     vendor: crate::GpuVendor,
 }
@@ -214,6 +215,8 @@ unsafe fn inspect_adapter(
         vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT::default();
     let mut fragment_shading_rate_features =
         vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default();
+    let mut swapchain_maintenance1_features =
+        vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default();
     let mut features2_khr = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut inline_uniform_block_features)
         .push_next(&mut timeline_semaphore_features)
@@ -228,6 +231,9 @@ unsafe fn inspect_adapter(
         .push_next(&mut present_wait_features)
         .push_next(&mut multisampled_render_to_single_sampled_features)
         .push_next(&mut fragment_shading_rate_features);
+    if supported_extensions.contains(&vk::EXT_SWAPCHAIN_MAINTENANCE1_NAME) {
+        features2_khr = features2_khr.push_next(&mut swapchain_maintenance1_features);
+    }
     instance
         .get_physical_device_properties2
         .get_physical_device_features2(phd, &mut features2_khr);
@@ -357,6 +363,14 @@ unsafe fn inspect_adapter(
         log::info!("VK_KHR_present_wait is supported");
     }
 
+    let swapchain_maintenance1 = desc.presentation
+        && instance.surface_maintenance1
+        && supported_extensions.contains(&vk::EXT_SWAPCHAIN_MAINTENANCE1_NAME)
+        && swapchain_maintenance1_features.swapchain_maintenance1 != 0;
+    if swapchain_maintenance1 {
+        log::info!("VK_EXT_swapchain_maintenance1 is supported");
+    }
+
     let multisampled_render_to_single_sampled = supported_extensions
         .contains(&vk::EXT_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_NAME)
         && multisampled_render_to_single_sampled_features.multisampled_render_to_single_sampled
@@ -469,6 +483,7 @@ unsafe fn inspect_adapter(
         fragment_shading_rate_attachment_texel_size,
         pipeline_statistics_query,
         present_wait,
+        swapchain_maintenance1,
         memory_budget,
         vendor: map_vendor(properties.vendor_id),
     })
@@ -558,6 +573,7 @@ impl super::Context {
                     vk::KHR_WIN32_SURFACE_NAME,
                     vk::KHR_ANDROID_SURFACE_NAME,
                     vk::EXT_SWAPCHAIN_COLORSPACE_NAME,
+                    vk::EXT_SURFACE_MAINTENANCE1_NAME,
                 ];
                 for candidate in candidates.iter() {
                     if supported_instance_extensions.contains(candidate) {
@@ -620,6 +636,8 @@ impl super::Context {
                 } else {
                     None
                 },
+                surface_maintenance1: desc.presentation
+                    && supported_instance_extensions.contains(&vk::EXT_SURFACE_MAINTENANCE1_NAME),
                 core: core_instance,
             };
 
@@ -634,7 +652,11 @@ impl super::Context {
             })
             .enumerate()
             .max_by_key(|&(enumeration_index, (phd, _))| {
-                let type_rank = match instance.core.get_physical_device_properties(phd).device_type {
+                let type_rank = match instance
+                    .core
+                    .get_physical_device_properties(phd)
+                    .device_type
+                {
                     vk::PhysicalDeviceType::DISCRETE_GPU => 4,
                     vk::PhysicalDeviceType::INTEGRATED_GPU => 3,
                     vk::PhysicalDeviceType::VIRTUAL_GPU => 2,
@@ -719,6 +741,9 @@ impl super::Context {
                 device_extensions.push(vk::KHR_PRESENT_ID_NAME);
                 device_extensions.push(vk::KHR_PRESENT_WAIT_NAME);
             }
+            if capabilities.swapchain_maintenance1 {
+                device_extensions.push(vk::EXT_SWAPCHAIN_MAINTENANCE1_NAME);
+            }
             if capabilities.multisampled_render_to_single_sampled {
                 device_extensions.push(vk::EXT_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_NAME);
             }
@@ -768,6 +793,9 @@ impl super::Context {
                 present_wait: vk::TRUE,
                 ..Default::default()
             };
+            let mut ext_swapchain_maintenance1 =
+                vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default()
+                    .swapchain_maintenance1(true);
             let mut ext_multisampled_render_to_single_sampled =
                 vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT {
                     multisampled_render_to_single_sampled: vk::TRUE,
@@ -813,6 +841,9 @@ impl super::Context {
                 device_create_info = device_create_info
                     .push_next(&mut khr_present_id)
                     .push_next(&mut khr_present_wait);
+            }
+            if capabilities.swapchain_maintenance1 {
+                device_create_info = device_create_info.push_next(&mut ext_swapchain_maintenance1);
             }
             if capabilities.multisampled_render_to_single_sampled {
                 device_create_info =
@@ -945,6 +976,7 @@ impl super::Context {
             } else {
                 None
             },
+            swapchain_maintenance1: capabilities.swapchain_maintenance1,
             core: device_core,
             device_information: capabilities.device_information,
             command_scope: if desc.capture || desc.command_labels {

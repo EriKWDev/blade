@@ -29,7 +29,38 @@ impl super::Surface {
         }
     }
 
+    /*
+        NOTE: With present fences the old swapchain is only retired on a reconfigure. The spec
+              allows destroying it, its image views and its semaphores once every present made on
+              it has signaled its fence, which also means the submits that waited on its acquire
+              semaphores have finished.
+    */
+    unsafe fn retire_swapchain(
+        &mut self,
+        raw_device: &ash::Device,
+        queue: &std::sync::MutexGuard<'_, super::Queue>,
+    ) {
+        match self.present_fences.as_mut() {
+            Some(present_fences) => {
+                let raw = mem::take(&mut self.swapchain.raw);
+                let frames = mem::take(&mut self.frames);
+                let fences = mem::take(&mut present_fences.pending);
+                if raw != vk::SwapchainKHR::null() {
+                    present_fences.retired.push(super::RetiredSwapchain {
+                        raw,
+                        frames,
+                        present_fences: fences,
+                    });
+                }
+            }
+            None => self.deinit_swapchain(raw_device, queue),
+        }
+    }
+
     pub fn acquire_frame(&mut self) -> super::Frame {
+        if let Some(present_fences) = self.present_fences.as_mut() {
+            unsafe { present_fences.collect_finished(&self.device) };
+        }
         let acquire_semaphore = self.next_semaphore;
         let present_id = self.next_present_id;
         self.next_present_id += 1;
@@ -46,11 +77,18 @@ impl super::Surface {
                     &mut self.frames[index as usize].acquire_semaphore,
                     acquire_semaphore,
                 );
+                let present_fence = self
+                    .present_fences
+                    .as_mut()
+                    .map_or(vk::Fence::null(), |present_fences| {
+                        present_fences.next_fence()
+                    });
                 super::Frame {
                     internal: self.frames[index as usize],
                     swapchain: self.swapchain,
                     image_index: Some(index),
                     present_id,
+                    present_fence,
                 }
             }
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
@@ -60,6 +98,7 @@ impl super::Surface {
                     swapchain: self.swapchain,
                     image_index: None,
                     present_id: 0,
+                    present_fence: vk::Fence::null(),
                 }
             }
             Err(other) => panic!("Aquire image error {}", other),
@@ -72,6 +111,74 @@ impl super::Surface {
     /// to get the ID to pass to [`Context::wait_for_present`].
     pub fn last_present_id(&self) -> u64 {
         self.next_present_id.saturating_sub(1)
+    }
+}
+
+impl super::PresentFences {
+    fn next_fence(&mut self) -> vk::Fence {
+        let fence = self.free.pop().unwrap_or_else(|| unsafe {
+            self.device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+                .unwrap()
+        });
+        self.pending.push(fence);
+        fence
+    }
+
+    unsafe fn collect_finished(&mut self, swapchain_device: &ash::khr::swapchain::Device) {
+        let device = &self.device;
+        let signaled = |fence: &vk::Fence| device.get_fence_status(*fence) == Ok(true);
+
+        let mut index = 0;
+        while index < self.pending.len() {
+            if signaled(&self.pending[index]) {
+                let fence = self.pending.swap_remove(index);
+                device.reset_fences(&[fence]).unwrap();
+                self.free.push(fence);
+            } else {
+                index += 1;
+            }
+        }
+
+        let mut index = 0;
+        while index < self.retired.len() {
+            if self.retired[index].present_fences.iter().all(signaled) {
+                let retired = self.retired.swap_remove(index);
+                destroy_retired_swapchain(device, swapchain_device, &retired);
+                if !retired.present_fences.is_empty() {
+                    device.reset_fences(&retired.present_fences).unwrap();
+                }
+                self.free.extend(retired.present_fences);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// Only valid once the device is idle.
+    unsafe fn destroy(&mut self, swapchain_device: &ash::khr::swapchain::Device) {
+        for retired in self.retired.drain(..) {
+            destroy_retired_swapchain(&self.device, swapchain_device, &retired);
+            for fence in retired.present_fences {
+                self.device.destroy_fence(fence, None);
+            }
+        }
+        for fence in self.free.drain(..).chain(self.pending.drain(..)) {
+            self.device.destroy_fence(fence, None);
+        }
+    }
+}
+
+unsafe fn destroy_retired_swapchain(
+    device: &ash::Device,
+    swapchain_device: &ash::khr::swapchain::Device,
+    retired: &super::RetiredSwapchain,
+) {
+    swapchain_device.destroy_swapchain(retired.raw, None);
+    for frame in &retired.frames {
+        device.destroy_image_view(frame.view, None);
+        device.destroy_semaphore(frame.acquire_semaphore, None);
+        device.destroy_semaphore(frame.present_semaphore, None);
     }
 }
 
@@ -158,6 +265,15 @@ impl super::Context {
             },
             full_screen_exclusive: fullscreen_exclusive_ext.full_screen_exclusive_supported != 0,
             next_present_id: 1,
+            present_fences: self
+                .device
+                .swapchain_maintenance1
+                .then(|| super::PresentFences {
+                    device: self.device.core.clone(),
+                    free: Vec::new(),
+                    pending: Vec::new(),
+                    retired: Vec::new(),
+                }),
         })
     }
 
@@ -165,6 +281,9 @@ impl super::Context {
         let queue = self.queue.lock().unwrap();
         unsafe {
             surface.deinit_swapchain(&self.device.core, &queue);
+            if let Some(mut present_fences) = surface.present_fences.take() {
+                present_fences.destroy(&surface.device);
+            }
             self.device
                 .core
                 .destroy_semaphore(surface.next_semaphore, None)
@@ -445,7 +564,7 @@ impl super::Context {
         // full-screen exclusive. Retire the old swapchain and retry before giving up.
         let raw_swapchain = match unsafe { surface.device.create_swapchain(&create_info, None) } {
             Ok(raw) => {
-                unsafe { surface.deinit_swapchain(&self.device.core, &self.queue.lock().unwrap()) };
+                unsafe { surface.retire_swapchain(&self.device.core, &self.queue.lock().unwrap()) };
                 raw
             }
             Err(err) => {
