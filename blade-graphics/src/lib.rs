@@ -250,6 +250,8 @@ pub struct MemoryHeap {
     pub budget: Option<u64>,
     /// Memory on the device itself, such as video memory, rather than system memory.
     pub device_local: bool,
+    /// Memory the CPU can map and write into directly.
+    pub host_visible: bool,
 }
 
 #[derive(Clone, Debug, Default)]

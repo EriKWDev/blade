@@ -687,6 +687,7 @@ impl Context {
             usage: Some(device.currentAllocatedSize() as u64),
             budget,
             device_local: !device.hasUnifiedMemory(),
+            host_visible: device.hasUnifiedMemory(),
         }]
     }
 

@@ -751,6 +751,14 @@ impl Context {
             device_local: memory.memory_heaps[i]
                 .flags
                 .contains(vk::MemoryHeapFlags::DEVICE_LOCAL),
+            host_visible: memory.memory_types[..memory.memory_type_count as usize]
+                .iter()
+                .any(|memory_type| {
+                    memory_type.heap_index as usize == i
+                        && memory_type
+                            .property_flags
+                            .contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
+                }),
         };
         if !self.has_memory_budget {
             let memory = unsafe {
