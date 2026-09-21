@@ -66,6 +66,10 @@ struct Device {
     shader_float16: bool,
     storage_input_output16: bool,
     inline_uniform_blocks: bool,
+    /// The most descriptors of a single type that one set layout has needed so far. Pool sizes
+    /// are per type across the whole pool, so a set layout with many bindings of one type needs
+    /// that many times `max_sets` of it, not one per set.
+    descriptors_of_one_type_per_set: std::sync::Arc<std::sync::atomic::AtomicU32>,
     buffer_marker: Option<ash::amd::buffer_marker::Device>,
     shader_info: Option<ash::amd::shader_info::Device>,
     full_screen_exclusive: Option<ash::ext::full_screen_exclusive::Device>,

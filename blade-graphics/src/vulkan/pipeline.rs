@@ -363,6 +363,24 @@ impl super::Context {
             update_offset += descriptor_size * descriptor_count as usize;
         }
 
+        {
+            let mut widest = 0;
+            for candidate in vk_bindings
+                .iter()
+                .filter(|it| it.descriptor_type != vk::DescriptorType::INLINE_UNIFORM_BLOCK_EXT)
+            {
+                let of_this_type: u32 = vk_bindings
+                    .iter()
+                    .filter(|it| it.descriptor_type == candidate.descriptor_type)
+                    .map(|it| it.descriptor_count)
+                    .sum();
+                widest = widest.max(of_this_type);
+            }
+            self.device
+                .descriptors_of_one_type_per_set
+                .fetch_max(widest, std::sync::atomic::Ordering::Relaxed);
+        }
+
         let mut binding_flags_info =
             vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
         let set_layout_info = vk::DescriptorSetLayoutCreateInfo::default()

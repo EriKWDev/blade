@@ -971,6 +971,7 @@ impl super::Context {
             shader_float16: capabilities.shader_float16,
             storage_input_output16: capabilities.storage_input_output16,
             inline_uniform_blocks: capabilities.inline_uniform_blocks,
+            descriptors_of_one_type_per_set: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1)),
             buffer_marker: if capabilities.buffer_marker && desc.validation {
                 Some(amd::buffer_marker::Device::new(
                     &instance.core,

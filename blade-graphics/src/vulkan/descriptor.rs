@@ -8,27 +8,33 @@ const COUNT_BASE: u32 = 16;
 pub struct DescriptorPool {
     sub_pools: Vec<vk::DescriptorPool>,
     growth_iter: usize,
+    descriptors_of_one_type_per_set: u32,
 }
 
 impl super::Device {
-    fn create_descriptor_sub_pool(&self, max_sets: u32) -> vk::DescriptorPool {
-        log::info!("Creating a descriptor pool for at most {} sets", max_sets);
+    fn create_descriptor_sub_pool(&self, max_sets: u32, per_set: u32) -> vk::DescriptorPool {
+        log::info!(
+            "Creating a descriptor pool for at most {} sets of up to {} descriptors of one type",
+            max_sets,
+            per_set
+        );
+        let per_type = max_sets * per_set;
         let mut descriptor_sizes = vec![
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: max_sets,
+                descriptor_count: per_type,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::SAMPLED_IMAGE,
-                descriptor_count: 2 * max_sets,
+                descriptor_count: 2 * per_type,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::SAMPLER,
-                descriptor_count: max_sets,
+                descriptor_count: per_type,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
-                descriptor_count: max_sets,
+                descriptor_count: per_type,
             },
         ];
         if self.inline_uniform_blocks {
@@ -39,13 +45,13 @@ impl super::Device {
         } else {
             descriptor_sizes.push(vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: max_sets,
+                descriptor_count: per_type,
             });
         }
         if self.ray_tracing.is_some() {
             descriptor_sizes.push(vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
-                descriptor_count: max_sets,
+                descriptor_count: per_type,
             });
         }
 
@@ -70,10 +76,14 @@ impl super::Device {
     }
 
     pub(super) fn create_descriptor_pool(&self) -> DescriptorPool {
-        let vk_pool = self.create_descriptor_sub_pool(COUNT_BASE);
+        let per_set = self
+            .descriptors_of_one_type_per_set
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let vk_pool = self.create_descriptor_sub_pool(COUNT_BASE, per_set);
         DescriptorPool {
             sub_pools: vec![vk_pool],
             growth_iter: 0,
+            descriptors_of_one_type_per_set: per_set,
         }
     }
 
@@ -90,6 +100,16 @@ impl super::Device {
     ) -> vk::DescriptorSet {
         let descriptor_set_layouts = [layout.raw];
 
+        let per_set = self
+            .descriptors_of_one_type_per_set
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if per_set > pool.descriptors_of_one_type_per_set {
+            pool.descriptors_of_one_type_per_set = per_set;
+            let max_sets = COUNT_BASE.pow(pool.growth_iter as u32 + 1);
+            let vk_pool = self.create_descriptor_sub_pool(max_sets, per_set);
+            pool.sub_pools.insert(0, vk_pool);
+        }
+
         loop {
             let descriptor_set_info = vk::DescriptorSetAllocateInfo::default()
                 .descriptor_pool(pool.sub_pools[0])
@@ -103,7 +123,7 @@ impl super::Device {
 
             let next_max_sets = COUNT_BASE.pow(pool.growth_iter as u32 + 1);
             pool.growth_iter += 1;
-            let vk_pool = self.create_descriptor_sub_pool(next_max_sets);
+            let vk_pool = self.create_descriptor_sub_pool(next_max_sets, per_set);
             pool.sub_pools.insert(0, vk_pool);
         }
     }
