@@ -448,6 +448,7 @@ impl From<Texture> for TexturePiece {
 
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Hash, Eq, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub enum TextureFormat {
     // color
     R8Unorm,
@@ -654,6 +655,7 @@ pub enum FilterMode {
 
 /// Comparison function used for depth and stencil operations.
 #[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub enum CompareFunction {
     /// Function never passes
     Never,
@@ -724,6 +726,7 @@ pub struct AccelerationStructureDesc<'a> {
 
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Hash, Eq, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub enum VertexFormat {
     F32,
     F32Vec2,
@@ -815,6 +818,7 @@ impl ShaderFunction<'_> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub enum ShaderBinding {
     Texture,
     TextureArray { count: u32 },
@@ -858,6 +862,7 @@ pub trait ShaderData {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct VertexAttribute {
     pub offset: u32,
     pub format: VertexFormat,
@@ -931,6 +936,7 @@ pub struct ComputePipelineDesc<'a> {
 
 /// Primitive type the input mesh is composed of.
 #[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub enum PrimitiveTopology {
     /// Vertex data is a list of points. Each vertex is a new point.
     PointList,
@@ -955,6 +961,7 @@ pub enum PrimitiveTopology {
 
 /// Vertex winding order which classifies the "front" face of a triangle.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub enum FrontFace {
     /// Triangles with vertices in counter clockwise order are considered the front face.
     ///
@@ -969,6 +976,7 @@ pub enum FrontFace {
 
 /// Face of a vertex.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub enum Face {
     /// Front face
     Front,
@@ -977,6 +985,7 @@ pub enum Face {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct PrimitiveState {
     /// The primitive topology used to interpret vertices.
     pub topology: PrimitiveTopology,
@@ -992,6 +1001,7 @@ pub struct PrimitiveState {
 
 /// Operation to perform on the stencil value.
 #[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub enum StencilOperation {
     /// Keep stencil value unchanged.
     #[default]
@@ -1016,6 +1026,7 @@ pub enum StencilOperation {
 ///
 /// If you are not using stencil state, set this to [`StencilFaceState::IGNORE`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct StencilFaceState {
     /// Comparison function that determines if the fail_op or pass_op is used on the stencil buffer.
     pub compare: CompareFunction,
@@ -1045,6 +1056,7 @@ impl Default for StencilFaceState {
 
 /// State of the stencil operation (fixed-pipeline stage).
 #[derive(Default, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct StencilState {
     /// Front face mode.
     pub front: StencilFaceState,
@@ -1057,6 +1069,7 @@ pub struct StencilState {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct DepthBiasState {
     /// Constant depth biasing factor, in basic units of the depth format.
     pub constant: i32,
@@ -1068,6 +1081,7 @@ pub struct DepthBiasState {
 
 /// Describes the depth/stencil state in a render pipeline.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct DepthStencilState {
     /// Format of the depth/stencil texture view.
     pub format: TextureFormat,
@@ -1083,6 +1097,7 @@ pub struct DepthStencilState {
 
 /// Alpha blend factor.
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub enum BlendFactor {
     /// 0.0
     Zero,
@@ -1114,6 +1129,7 @@ pub enum BlendFactor {
 
 /// Alpha blend operation.
 #[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub enum BlendOperation {
     /// Src + Dst
     #[default]
@@ -1130,6 +1146,7 @@ pub enum BlendOperation {
 
 /// Describes a blend component of a [`BlendState`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct BlendComponent {
     /// Multiplier for the source, which is produced by the fragment shader.
     pub src_factor: BlendFactor,
@@ -1172,6 +1189,7 @@ impl Default for BlendComponent {
 /// Describe the blend state of a render pipeline,
 /// within [`ColorTargetState`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct BlendState {
     /// Color equation.
     pub color: BlendComponent,
@@ -1229,6 +1247,42 @@ bitflags::bitflags! {
     }
 }
 
+#[cfg(feature = "nanoserde")]
+mod color_writes_serialization {
+    use super::ColorWrites;
+
+    impl nanoserde::SerRon for ColorWrites {
+        fn ser_ron(&self, indent: usize, state: &mut nanoserde::SerRonState) {
+            self.bits().ser_ron(indent, state);
+        }
+    }
+
+    impl nanoserde::DeRon for ColorWrites {
+        fn de_ron(
+            state: &mut nanoserde::DeRonState,
+            input: &mut nanoserde::Chars,
+        ) -> Result<Self, nanoserde::DeRonErr> {
+            Ok(Self::from_bits_truncate(nanoserde::DeRon::de_ron(
+                state, input,
+            )?))
+        }
+    }
+
+    impl nanoserde::SerBin for ColorWrites {
+        fn ser_bin(&self, output: &mut Vec<u8>) {
+            self.bits().ser_bin(output);
+        }
+    }
+
+    impl nanoserde::DeBin for ColorWrites {
+        fn de_bin(offset: &mut usize, bytes: &[u8]) -> Result<Self, nanoserde::DeBinErr> {
+            Ok(Self::from_bits_truncate(nanoserde::DeBin::de_bin(
+                offset, bytes,
+            )?))
+        }
+    }
+}
+
 impl Default for ColorWrites {
     fn default() -> Self {
         Self::ALL
@@ -1237,6 +1291,7 @@ impl Default for ColorWrites {
 
 /// Describes the color state of a render pipeline.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct ColorTargetState {
     /// The [`TextureFormat`] of the image that this pipeline will render to.
     pub format: TextureFormat,
@@ -1274,30 +1329,36 @@ pub struct RenderPipelineDesc<'a> {
 /// The compiled shader is replaced by an identity the caller assigns, because only the caller
 /// knows how a shader permutation is produced and how to produce it again.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct OwnedShaderFunction {
     pub shader: u64,
     pub entry_point: String,
-    pub constants: PipelineConstants,
+    /// Sorted, so that the same function always writes down the same way
+    pub constants: Vec<(String, f64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct OwnedShaderDataLayout {
     pub bindings: Vec<(String, ShaderBinding)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct OwnedVertexLayout {
     pub attributes: Vec<(String, VertexAttribute)>,
     pub stride: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct OwnedVertexFetchState {
     pub layout: OwnedVertexLayout,
     pub instanced: bool,
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct OwnedRenderPipelineDesc {
     pub name: String,
     pub data_layouts: Vec<OwnedShaderDataLayout>,
@@ -1311,6 +1372,7 @@ pub struct OwnedRenderPipelineDesc {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct OwnedComputePipelineDesc {
     pub name: String,
     pub data_layouts: Vec<OwnedShaderDataLayout>,
@@ -1319,18 +1381,36 @@ pub struct OwnedComputePipelineDesc {
 
 impl OwnedShaderFunction {
     pub fn from_function(function: &ShaderFunction, shader: u64) -> Self {
+        let mut constants: Vec<(String, f64)> = function
+            .constants
+            .iter()
+            .map(|(name, value)| (name.clone(), *value))
+            .collect();
+        constants.sort_by(|a, b| a.0.cmp(&b.0));
+
         Self {
             shader,
             entry_point: function.entry_point.to_string(),
-            constants: function.constants.clone(),
+            constants,
         }
     }
 
-    fn as_function<'a>(&'a self, shader: &'a Shader) -> ShaderFunction<'a> {
+    pub fn to_constants(&self) -> PipelineConstants {
+        self.constants
+            .iter()
+            .map(|(name, value)| (name.clone(), *value))
+            .collect()
+    }
+
+    fn as_function<'a>(
+        &'a self,
+        shader: &'a Shader,
+        constants: &'a PipelineConstants,
+    ) -> ShaderFunction<'a> {
         ShaderFunction {
             shader,
             entry_point: &self.entry_point,
-            constants: &self.constants,
+            constants,
         }
     }
 }
@@ -1458,10 +1538,13 @@ impl OwnedRenderPipelineDesc {
             })
             .collect();
 
+        let vertex_constants = self.vertex.to_constants();
+        let fragment_constants = self.fragment.as_ref().map(|it| it.to_constants());
+
         Some(create(RenderPipelineDesc {
             name: &self.name,
             data_layouts: &data_layouts,
-            vertex: self.vertex.as_function(vertex_shader),
+            vertex: self.vertex.as_function(vertex_shader, &vertex_constants),
             vertex_fetches: &vertex_fetches,
             primitive: self.primitive.clone(),
             depth_stencil: self.depth_stencil.clone(),
@@ -1469,7 +1552,8 @@ impl OwnedRenderPipelineDesc {
                 .fragment
                 .as_ref()
                 .zip(fragment_shader)
-                .map(|(fragment, shader)| fragment.as_function(shader)),
+                .zip(fragment_constants.as_ref())
+                .map(|((fragment, shader), constants)| fragment.as_function(shader, constants)),
             color_targets: &self.color_targets,
             multisample_state: self.multisample_state,
         }))
@@ -1500,15 +1584,18 @@ impl OwnedComputePipelineDesc {
             self.data_layouts.iter().map(|it| it.to_layout()).collect();
         let data_layouts: Vec<&ShaderDataLayout> = data_layouts.iter().collect();
 
+        let constants = self.compute.to_constants();
+
         Some(create(ComputePipelineDesc {
             name: &self.name,
             data_layouts: &data_layouts,
-            compute: self.compute.as_function(compute_shader),
+            compute: self.compute.as_function(compute_shader, &constants),
         }))
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "nanoserde", derive(nanoserde::SerRon, nanoserde::DeRon, nanoserde::SerBin, nanoserde::DeBin))]
 pub struct MultisampleState {
     pub sample_count: u32,
     pub sample_mask: u64,

@@ -22,9 +22,17 @@ once_cell = "1"
 aftermath = { optional=true, git="https://github.com/ErikWDev/aftermath_sys", rev="7ee391270816f8bf98057d1a6bc2db69a392458f" }
 # spirv-tools = "0.13.2"
 profiling.workspace = true
+#
+# NOTE: Currently on branch ErikWDev/more-impls-and-runtime. Must stay the same revision as the
+#       one bladerend pins, or the derived traits are different traits.
+#
+nanoserde = { git="https://github.com/ErikWDev/nanoserde.git", rev="22666a59b4360098fbcb204a21bffd8910653213", optional=true, default-features=false, features=["std", "ron", "binary"] }
 
 [features]
 default = []
+# Serialization for the owned pipeline descriptions, so a build can write down every pipeline it
+# needed and create them all up front on a later run.
+nanoserde = ["dep:nanoserde"]
 # default = ["dx12"]
 # default = ["aftermath"]
 
