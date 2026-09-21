@@ -35,6 +35,24 @@ pub trait ShaderDevice {
     fn destroy_compute_pipeline(&self, pipeline: &mut Self::ComputePipeline);
     fn create_render_pipeline(&self, desc: super::RenderPipelineDesc) -> Self::RenderPipeline;
     fn destroy_render_pipeline(&self, pipeline: &mut Self::RenderPipeline);
+
+    /// Creates the pipeline only once the description is known to match the shaders it names, so
+    /// that a description written down by an older build fails here instead of panicking.
+    fn try_create_render_pipeline(
+        &self,
+        desc: super::RenderPipelineDesc,
+    ) -> Result<Self::RenderPipeline, super::PipelineCreationError> {
+        desc.validate()?;
+        Ok(self.create_render_pipeline(desc))
+    }
+
+    fn try_create_compute_pipeline(
+        &self,
+        desc: super::ComputePipelineDesc,
+    ) -> Result<Self::ComputePipeline, super::PipelineCreationError> {
+        desc.validate()?;
+        Ok(self.create_compute_pipeline(desc))
+    }
 }
 
 pub trait CommandDevice {

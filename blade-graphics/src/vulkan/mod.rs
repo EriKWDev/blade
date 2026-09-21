@@ -23,7 +23,9 @@ pub enum PlatformError {
 
 struct Instance {
     core: ash::Instance,
-    _debug_utils: ash::ext::debug_utils::Instance,
+    debug_utils: ash::ext::debug_utils::Instance,
+    /// Reports what the validation layers say through `log`, when validation is on
+    debug_messenger: vk::DebugUtilsMessengerEXT,
     get_physical_device_properties2: khr::get_physical_device_properties2::Instance,
     fragment_shading_rate: khr::fragment_shading_rate::Instance,
     get_surface_capabilities2: Option<khr::get_surface_capabilities2::Instance>,
@@ -695,12 +697,19 @@ impl crate::traits::CommandDevice for Context {
             .semaphores(&semaphores)
             .values(&semaphore_values);
         let timeout_ns = map_timeout(timeout_ms);
-        unsafe {
+        let ret = unsafe {
             self.device
                 .timeline_semaphore
                 .wait_semaphores(&wait_info, timeout_ns)
-                .is_ok()
+        };
+        /*
+            NOTE: A lost device answers every wait immediately, so a caller waiting for progress
+                  that will never come would spin forever without being told what happened.
+        */
+        if ret == Err(vk::Result::ERROR_DEVICE_LOST) {
+            report_device_lost("waiting for submitted work");
         }
+        ret.is_ok()
     }
 }
 
@@ -792,14 +801,30 @@ impl Context {
         match self.device.present_wait {
             Some(ref pw) => {
                 let timeout_ns = map_timeout(timeout_ms);
-                unsafe {
+                let ret = unsafe {
                     pw.wait_for_present(surface.swapchain.raw, present_id, timeout_ns)
-                        .is_ok()
+                };
+                if ret == Err(vk::Result::ERROR_DEVICE_LOST) {
+                    report_device_lost("waiting for a present to be displayed");
                 }
+                ret.is_ok()
             }
             None => true,
         }
     }
+}
+
+/*
+    NOTE: The device is lost when the driver resets the GPU, most often because a submission took
+          longer than the operating system's timeout, and every later call fails the same way. It
+          says so once, naming where it was noticed, since the error itself carries nothing.
+*/
+pub(super) fn report_device_lost(during: &str) -> ! {
+    log::error!(
+        "GPU device lost while {during}. The graphics driver reset the device, \
+         usually because a submission took too long or the driver crashed."
+    );
+    panic!("GPU device lost while {during}");
 }
 
 fn map_texture_format(format: crate::TextureFormat) -> vk::Format {

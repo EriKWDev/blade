@@ -101,6 +101,7 @@ impl super::Surface {
                     present_fence: vk::Fence::null(),
                 }
             }
+            Err(vk::Result::ERROR_DEVICE_LOST) => super::report_device_lost("acquiring a frame"),
             Err(other) => panic!("Aquire image error {}", other),
         }
     }

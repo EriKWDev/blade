@@ -795,6 +795,127 @@ pub struct ShaderFunction<'a> {
     pub constants: &'a PipelineConstants,
 }
 
+/// Why a pipeline could not be created from a description, which happens when a description was
+/// written down by an older build and the shaders have moved on since.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PipelineCreationError {
+    MissingEntryPoint {
+        entry_point: String,
+        available: Vec<String>,
+    },
+    MissingBindingGroup {
+        entry_point: String,
+        group: u32,
+        groups: usize,
+    },
+    MissingBinding {
+        entry_point: String,
+        group: u32,
+        binding: u32,
+        bindings: usize,
+    },
+}
+
+impl std::fmt::Display for PipelineCreationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::MissingEntryPoint {
+                entry_point,
+                available,
+            } => write!(
+                f,
+                "entry point '{entry_point}' is not in the shader, which has {available:?}"
+            ),
+            Self::MissingBindingGroup {
+                entry_point,
+                group,
+                groups,
+            } => write!(
+                f,
+                "'{entry_point}' binds group {group} but only {groups} data layouts were given"
+            ),
+            Self::MissingBinding {
+                entry_point,
+                group,
+                binding,
+                bindings,
+            } => write!(
+                f,
+                "'{entry_point}' binds {group}:{binding} but that group has {bindings} bindings"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PipelineCreationError {}
+
+impl ShaderFunction<'_> {
+    /// Checks the description against the shader it names, so that a stale description is an
+    /// error rather than a panic deep in the backend.
+    pub fn validate(
+        &self,
+        data_layouts: &[&ShaderDataLayout],
+    ) -> Result<(), PipelineCreationError> {
+        if !self
+            .shader
+            .module
+            .entry_points
+            .iter()
+            .any(|entry_point| entry_point.name == self.entry_point)
+        {
+            return Err(PipelineCreationError::MissingEntryPoint {
+                entry_point: self.entry_point.to_string(),
+                available: self
+                    .shader
+                    .module
+                    .entry_points
+                    .iter()
+                    .map(|entry_point| entry_point.name.clone())
+                    .collect(),
+            });
+        }
+
+        for (_handle, global) in self.shader.module.global_variables.iter() {
+            let Some(resource) = &global.binding else {
+                continue;
+            };
+            let Some(layout) = data_layouts.get(resource.group as usize) else {
+                return Err(PipelineCreationError::MissingBindingGroup {
+                    entry_point: self.entry_point.to_string(),
+                    group: resource.group,
+                    groups: data_layouts.len(),
+                });
+            };
+            if layout.bindings.len() <= resource.binding as usize {
+                return Err(PipelineCreationError::MissingBinding {
+                    entry_point: self.entry_point.to_string(),
+                    group: resource.group,
+                    binding: resource.binding,
+                    bindings: layout.bindings.len(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl RenderPipelineDesc<'_> {
+    pub fn validate(&self) -> Result<(), PipelineCreationError> {
+        self.vertex.validate(self.data_layouts)?;
+        if let Some(fragment) = &self.fragment {
+            fragment.validate(self.data_layouts)?;
+        }
+        Ok(())
+    }
+}
+
+impl ComputePipelineDesc<'_> {
+    pub fn validate(&self) -> Result<(), PipelineCreationError> {
+        self.compute.validate(self.data_layouts)
+    }
+}
+
 impl ShaderFunction<'_> {
     fn entry_point_index(&self) -> usize {
         self.shader

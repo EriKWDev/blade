@@ -678,10 +678,12 @@ impl super::CommandEncoder {
                         log::error!("Last GPU executed marker is '{last_marker}'");
                         log::info!("Marker history: {}", history);
                     }
-                    panic!("GPU has crashed in {}", ch.name);
+                    log::error!("GPU has crashed in {}", ch.name);
+                    super::report_device_lost("submitting work");
                 }
                 None => {
-                    panic!("GPU has crashed, and no debug information is available.");
+                    log::error!("GPU has crashed, and no debug information is available.");
+                    super::report_device_lost("submitting work");
                 }
             },
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {

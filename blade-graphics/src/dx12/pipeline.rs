@@ -870,6 +870,23 @@ impl crate::traits::ShaderDevice for super::Context {
     }
 
     fn destroy_render_pipeline(&self, _pipeline: &mut super::RenderPipeline) {}
+
+    fn try_create_render_pipeline(
+        &self,
+        desc: crate::RenderPipelineDesc,
+    ) -> Result<super::RenderPipeline, crate::PipelineCreationError> {
+        desc.validate()?;
+        Ok(self.create_render_pipeline(desc))
+    }
+
+    fn try_create_compute_pipeline(
+        &self,
+        desc: crate::ComputePipelineDesc,
+    ) -> Result<super::ComputePipeline, crate::PipelineCreationError> {
+        desc.validate()?;
+        Ok(self.create_compute_pipeline(desc))
+    }
+
 }
 
 // ── Blend / depth / input layout helpers ─────────────────────────────────────

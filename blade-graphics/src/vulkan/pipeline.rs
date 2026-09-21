@@ -801,6 +801,23 @@ impl crate::traits::ShaderDevice for super::Context {
             self.device.core.destroy_pipeline(pipeline.raw, None);
         }
     }
+
+    fn try_create_render_pipeline(
+        &self,
+        desc: crate::RenderPipelineDesc,
+    ) -> Result<super::RenderPipeline, crate::PipelineCreationError> {
+        desc.validate()?;
+        Ok(self.create_render_pipeline(desc))
+    }
+
+    fn try_create_compute_pipeline(
+        &self,
+        desc: crate::ComputePipelineDesc,
+    ) -> Result<super::ComputePipeline, crate::PipelineCreationError> {
+        desc.validate()?;
+        Ok(self.create_compute_pipeline(desc))
+    }
+
 }
 
 fn map_shader_visibility(visibility: crate::ShaderVisibility) -> vk::ShaderStageFlags {

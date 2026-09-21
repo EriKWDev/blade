@@ -529,6 +529,7 @@ impl super::Context {
         let mut layers: Vec<&'static ffi::CStr> = Vec::new();
         let mut requested_layers = Vec::<&ffi::CStr>::new();
         if desc.validation {
+            log::info!("Validation was asked for, requesting the Khronos validation layer");
             requested_layers.push(layer::KHRONOS_VALIDATION);
         }
         if desc.overlay {
@@ -614,9 +615,39 @@ impl super::Context {
                 .map_err(super::PlatformError::Init)?
         };
 
+        let debug_utils = ext::debug_utils::Instance::new(&entry, &core_instance);
+        /*
+            NOTE: Without a messenger the validation layers only write to the platform's own debug
+                  output, which a player's log never captures.
+        */
+        let debug_messenger = if desc.validation {
+            let create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+                .message_severity(
+                    vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+                        | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                        | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+                )
+                .message_type(
+                    vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                        | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                        | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                )
+                .pfn_user_callback(Some(debug_utils_callback));
+            match unsafe { debug_utils.create_debug_utils_messenger(&create_info, None) } {
+                Ok(messenger) => messenger,
+                Err(error) => {
+                    log::error!("create_debug_utils_messenger: {error:?}");
+                    vk::DebugUtilsMessengerEXT::null()
+                }
+            }
+        } else {
+            vk::DebugUtilsMessengerEXT::null()
+        };
+
         let instance =
             super::Instance {
-                _debug_utils: ext::debug_utils::Instance::new(&entry, &core_instance),
+                debug_utils: debug_utils.clone(),
+                debug_messenger,
                 get_physical_device_properties2:
                     khr::get_physical_device_properties2::Instance::new(&entry, &core_instance),
                 fragment_shading_rate: khr::fragment_shading_rate::Instance::new(
@@ -1232,6 +1263,29 @@ impl super::Context {
     }
 }
 
+unsafe extern "system" fn debug_utils_callback(
+    severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    message_type: vk::DebugUtilsMessageTypeFlagsEXT,
+    callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
+    _user_data: *mut ffi::c_void,
+) -> vk::Bool32 {
+    let data = unsafe { &*callback_data };
+    let message = if data.p_message.is_null() {
+        std::borrow::Cow::Borrowed("")
+    } else {
+        unsafe { ffi::CStr::from_ptr(data.p_message) }.to_string_lossy()
+    };
+    let level = if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
+        log::Level::Error
+    } else if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
+        log::Level::Warn
+    } else {
+        log::Level::Info
+    };
+    log::log!(level, "Vulkan {message_type:?}: {message}");
+    vk::FALSE
+}
+
 impl Drop for super::Context {
     fn drop(&mut self) {
         if std::thread::panicking() {
@@ -1245,6 +1299,11 @@ impl Drop for super::Context {
                     .destroy_semaphore(queue.timeline_semaphore, None);
             }
             self.device.core.destroy_device(None);
+            if self.instance.debug_messenger != vk::DebugUtilsMessengerEXT::null() {
+                self.instance
+                    .debug_utils
+                    .destroy_debug_utils_messenger(self.instance.debug_messenger, None);
+            }
             self.instance.core.destroy_instance(None);
         }
     }
