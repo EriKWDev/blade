@@ -1268,6 +1268,246 @@ pub struct RenderPipelineDesc<'a> {
     pub multisample_state: MultisampleState,
 }
 
+/// A pipeline description that outlives the call that built it, so that the set of pipelines a
+/// run needed can be written down and created up front on a later run.
+///
+/// The compiled shader is replaced by an identity the caller assigns, because only the caller
+/// knows how a shader permutation is produced and how to produce it again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnedShaderFunction {
+    pub shader: u64,
+    pub entry_point: String,
+    pub constants: PipelineConstants,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnedShaderDataLayout {
+    pub bindings: Vec<(String, ShaderBinding)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnedVertexLayout {
+    pub attributes: Vec<(String, VertexAttribute)>,
+    pub stride: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnedVertexFetchState {
+    pub layout: OwnedVertexLayout,
+    pub instanced: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct OwnedRenderPipelineDesc {
+    pub name: String,
+    pub data_layouts: Vec<OwnedShaderDataLayout>,
+    pub vertex: OwnedShaderFunction,
+    pub vertex_fetches: Vec<OwnedVertexFetchState>,
+    pub primitive: PrimitiveState,
+    pub depth_stencil: Option<DepthStencilState>,
+    pub fragment: Option<OwnedShaderFunction>,
+    pub color_targets: Vec<ColorTargetState>,
+    pub multisample_state: MultisampleState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnedComputePipelineDesc {
+    pub name: String,
+    pub data_layouts: Vec<OwnedShaderDataLayout>,
+    pub compute: OwnedShaderFunction,
+}
+
+impl OwnedShaderFunction {
+    pub fn from_function(function: &ShaderFunction, shader: u64) -> Self {
+        Self {
+            shader,
+            entry_point: function.entry_point.to_string(),
+            constants: function.constants.clone(),
+        }
+    }
+
+    fn as_function<'a>(&'a self, shader: &'a Shader) -> ShaderFunction<'a> {
+        ShaderFunction {
+            shader,
+            entry_point: &self.entry_point,
+            constants: &self.constants,
+        }
+    }
+}
+
+impl OwnedShaderDataLayout {
+    pub fn from_layout(layout: &ShaderDataLayout) -> Self {
+        Self {
+            bindings: layout
+                .bindings
+                .iter()
+                .map(|(name, binding)| (name.to_string(), *binding))
+                .collect(),
+        }
+    }
+
+    /// The names become `&'static str` again, which costs a leak per distinct name. The set is
+    /// the binding names of the shaders, so it is bounded by the shaders and does not grow.
+    fn to_layout(&self) -> ShaderDataLayout {
+        ShaderDataLayout {
+            bindings: self
+                .bindings
+                .iter()
+                .map(|(name, binding)| (leak_name(name), *binding))
+                .collect(),
+        }
+    }
+}
+
+impl OwnedVertexLayout {
+    pub fn from_layout(layout: &VertexLayout) -> Self {
+        Self {
+            attributes: layout
+                .attributes
+                .iter()
+                .map(|(name, attribute)| (name.to_string(), *attribute))
+                .collect(),
+            stride: layout.stride,
+        }
+    }
+
+    fn to_layout(&self) -> VertexLayout {
+        VertexLayout {
+            attributes: self
+                .attributes
+                .iter()
+                .map(|(name, attribute)| (leak_name(name), *attribute))
+                .collect(),
+            stride: self.stride,
+        }
+    }
+}
+
+fn leak_name(name: &str) -> &'static str {
+    use std::sync::Mutex;
+    static NAMES: Mutex<Option<std::collections::HashSet<&'static str>>> = Mutex::new(None);
+
+    let mut names = NAMES.lock().unwrap();
+    let names = names.get_or_insert_with(std::collections::HashSet::new);
+    if let Some(already) = names.get(name) {
+        return already;
+    }
+    let leaked: &'static str = String::from(name).leak();
+    names.insert(leaked);
+    leaked
+}
+
+impl OwnedRenderPipelineDesc {
+    pub fn from_desc(desc: &RenderPipelineDesc, vertex_shader: u64, fragment_shader: u64) -> Self {
+        Self {
+            name: desc.name.to_string(),
+            data_layouts: desc
+                .data_layouts
+                .iter()
+                .map(|layout| OwnedShaderDataLayout::from_layout(layout))
+                .collect(),
+            vertex: OwnedShaderFunction::from_function(&desc.vertex, vertex_shader),
+            vertex_fetches: desc
+                .vertex_fetches
+                .iter()
+                .map(|fetch| OwnedVertexFetchState {
+                    layout: OwnedVertexLayout::from_layout(fetch.layout),
+                    instanced: fetch.instanced,
+                })
+                .collect(),
+            primitive: desc.primitive.clone(),
+            depth_stencil: desc.depth_stencil.clone(),
+            fragment: desc
+                .fragment
+                .as_ref()
+                .map(|fragment| OwnedShaderFunction::from_function(fragment, fragment_shader)),
+            color_targets: desc.color_targets.to_vec(),
+            multisample_state: desc.multisample_state,
+        }
+    }
+
+    /// Rebuilds the borrowed description and hands it to `create`, resolving each shader identity
+    /// back to a compiled shader. Returns `None` when a shader cannot be resolved.
+    pub fn with_desc<'a, R>(
+        &'a self,
+        resolve_shader: impl Fn(u64) -> Option<&'a Shader>,
+        create: impl FnOnce(RenderPipelineDesc) -> R,
+    ) -> Option<R> {
+        let vertex_shader = resolve_shader(self.vertex.shader)?;
+        let fragment_shader = match &self.fragment {
+            Some(fragment) => Some(resolve_shader(fragment.shader)?),
+            None => None,
+        };
+
+        let data_layouts: Vec<ShaderDataLayout> =
+            self.data_layouts.iter().map(|it| it.to_layout()).collect();
+        let data_layouts: Vec<&ShaderDataLayout> = data_layouts.iter().collect();
+
+        let vertex_layouts: Vec<VertexLayout> = self
+            .vertex_fetches
+            .iter()
+            .map(|fetch| fetch.layout.to_layout())
+            .collect();
+        let vertex_fetches: Vec<VertexFetchState> = self
+            .vertex_fetches
+            .iter()
+            .zip(vertex_layouts.iter())
+            .map(|(fetch, layout)| VertexFetchState {
+                layout,
+                instanced: fetch.instanced,
+            })
+            .collect();
+
+        Some(create(RenderPipelineDesc {
+            name: &self.name,
+            data_layouts: &data_layouts,
+            vertex: self.vertex.as_function(vertex_shader),
+            vertex_fetches: &vertex_fetches,
+            primitive: self.primitive.clone(),
+            depth_stencil: self.depth_stencil.clone(),
+            fragment: self
+                .fragment
+                .as_ref()
+                .zip(fragment_shader)
+                .map(|(fragment, shader)| fragment.as_function(shader)),
+            color_targets: &self.color_targets,
+            multisample_state: self.multisample_state,
+        }))
+    }
+}
+
+impl OwnedComputePipelineDesc {
+    pub fn from_desc(desc: &ComputePipelineDesc, compute_shader: u64) -> Self {
+        Self {
+            name: desc.name.to_string(),
+            data_layouts: desc
+                .data_layouts
+                .iter()
+                .map(|layout| OwnedShaderDataLayout::from_layout(layout))
+                .collect(),
+            compute: OwnedShaderFunction::from_function(&desc.compute, compute_shader),
+        }
+    }
+
+    pub fn with_desc<'a, R>(
+        &'a self,
+        resolve_shader: impl Fn(u64) -> Option<&'a Shader>,
+        create: impl FnOnce(ComputePipelineDesc) -> R,
+    ) -> Option<R> {
+        let compute_shader = resolve_shader(self.compute.shader)?;
+
+        let data_layouts: Vec<ShaderDataLayout> =
+            self.data_layouts.iter().map(|it| it.to_layout()).collect();
+        let data_layouts: Vec<&ShaderDataLayout> = data_layouts.iter().collect();
+
+        Some(create(ComputePipelineDesc {
+            name: &self.name,
+            data_layouts: &data_layouts,
+            compute: self.compute.as_function(compute_shader),
+        }))
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MultisampleState {
     pub sample_count: u32,
