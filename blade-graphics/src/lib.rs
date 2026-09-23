@@ -814,6 +814,10 @@ pub enum PipelineCreationError {
         binding: u32,
         bindings: usize,
     },
+    UnresolvedBinding {
+        entry_point: String,
+        variable: String,
+    },
 }
 
 impl std::fmt::Display for PipelineCreationError {
@@ -842,6 +846,13 @@ impl std::fmt::Display for PipelineCreationError {
             } => write!(
                 f,
                 "'{entry_point}' binds {group}:{binding} but that group has {bindings} bindings"
+            ),
+            Self::UnresolvedBinding {
+                entry_point,
+                variable,
+            } => write!(
+                f,
+                "'{entry_point}' uses '{variable}', which none of the data layouts binds"
             ),
         }
     }
@@ -892,6 +903,41 @@ impl ShaderFunction<'_> {
                     group: resource.group,
                     binding: resource.binding,
                     bindings: layout.bindings.len(),
+                });
+            }
+        }
+
+        /*
+            NOTE: A variable without a binding of its own is given one by name when the shader is
+                  prepared, and prepare has no way to report that it could not. Asking the same
+                  question here is what lets a caller that is willing to go without the pipeline,
+                  such as one replaying pipelines recorded against layouts that have since changed,
+                  be told so instead of being taken down with an assert
+        */
+        let ep_info = self.shader.info.get_entry_point(self.entry_point_index());
+        for (handle, global) in self.shader.module.global_variables.iter() {
+            if global.binding.is_some() || ep_info[handle].is_empty() {
+                continue;
+            }
+            match global.space {
+                naga::AddressSpace::Storage { .. }
+                | naga::AddressSpace::Uniform
+                | naga::AddressSpace::Handle => {}
+                _ => continue,
+            }
+            let Some(name) = global.name.as_ref() else {
+                continue;
+            };
+            let bound_somewhere = data_layouts.iter().any(|layout| {
+                layout
+                    .bindings
+                    .iter()
+                    .any(|&(binding_name, _)| binding_name == name)
+            });
+            if !bound_somewhere {
+                return Err(PipelineCreationError::UnresolvedBinding {
+                    entry_point: self.entry_point.to_string(),
+                    variable: name.clone(),
                 });
             }
         }
