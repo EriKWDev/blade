@@ -818,6 +818,12 @@ pub enum PipelineCreationError {
         entry_point: String,
         variable: String,
     },
+    MismatchedBinding {
+        entry_point: String,
+        variable: String,
+        expected: ShaderBinding,
+        found: ShaderBinding,
+    },
 }
 
 impl std::fmt::Display for PipelineCreationError {
@@ -853,6 +859,15 @@ impl std::fmt::Display for PipelineCreationError {
             } => write!(
                 f,
                 "'{entry_point}' uses '{variable}', which none of the data layouts binds"
+            ),
+            Self::MismatchedBinding {
+                entry_point,
+                variable,
+                expected,
+                found,
+            } => write!(
+                f,
+                "'{entry_point}' uses '{variable}' as {expected:?}, but the data layout binds it as {found:?}"
             ),
         }
     }
@@ -915,29 +930,44 @@ impl ShaderFunction<'_> {
                   be told so instead of being taken down with an assert
         */
         let ep_info = self.shader.info.get_entry_point(self.entry_point_index());
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(self.shader.module.to_ctx()).unwrap();
         for (handle, global) in self.shader.module.global_variables.iter() {
             if global.binding.is_some() || ep_info[handle].is_empty() {
                 continue;
             }
-            match global.space {
-                naga::AddressSpace::Storage { .. }
-                | naga::AddressSpace::Uniform
-                | naga::AddressSpace::Handle => {}
-                _ => continue,
-            }
+            let Some(access) = Shader::resource_access_of_space(global.space) else {
+                continue;
+            };
             let Some(name) = global.name.as_ref() else {
                 continue;
             };
-            let bound_somewhere = data_layouts.iter().any(|layout| {
+            let found = data_layouts.iter().find_map(|layout| {
                 layout
                     .bindings
                     .iter()
-                    .any(|&(binding_name, _)| binding_name == name)
+                    .find(|&&(binding_name, _)| binding_name == name)
+                    .map(|&(_, binding)| binding)
             });
-            if !bound_somewhere {
+            let Some(found) = found else {
                 return Err(PipelineCreationError::UnresolvedBinding {
                     entry_point: self.entry_point.to_string(),
                     variable: name.clone(),
+                });
+            };
+            let (expected, _) = Shader::expected_binding_of_variable(
+                &self.shader.module.types,
+                &layouter,
+                global.ty,
+                access,
+                found,
+            );
+            if expected != found {
+                return Err(PipelineCreationError::MismatchedBinding {
+                    entry_point: self.entry_point.to_string(),
+                    variable: name.clone(),
+                    expected,
+                    found,
                 });
             }
         }

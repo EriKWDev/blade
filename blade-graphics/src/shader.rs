@@ -141,6 +141,69 @@ impl super::Shader {
         }
     }
 
+    pub(crate) fn resource_access_of_space(
+        space: naga::AddressSpace,
+    ) -> Option<naga::StorageAccess> {
+        match space {
+            naga::AddressSpace::Storage { access } => Some(access),
+            naga::AddressSpace::Uniform | naga::AddressSpace::Handle => {
+                Some(naga::StorageAccess::empty())
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn expected_binding_of_variable(
+        types: &naga::UniqueArena<naga::Type>,
+        layouter: &naga::proc::Layouter,
+        var_type: naga::Handle<naga::Type>,
+        var_access: naga::StorageAccess,
+        proto_binding: crate::ShaderBinding,
+    ) -> (crate::ShaderBinding, naga::StorageAccess) {
+        match types[var_type].inner {
+            naga::TypeInner::Image {
+                class: naga::ImageClass::Storage { access, format: _ },
+                ..
+            } => (crate::ShaderBinding::Texture, access),
+            naga::TypeInner::Image { .. } => {
+                (crate::ShaderBinding::Texture, naga::StorageAccess::empty())
+            }
+            naga::TypeInner::Sampler { .. } => {
+                (crate::ShaderBinding::Sampler, naga::StorageAccess::empty())
+            }
+            naga::TypeInner::AccelerationStructure { .. } => (
+                crate::ShaderBinding::AccelerationStructure,
+                naga::StorageAccess::empty(),
+            ),
+            naga::TypeInner::BindingArray { base, size: _ } => {
+                //Note: we could extract the count from `size` for more rigor
+                let count = match proto_binding {
+                    crate::ShaderBinding::TextureArray { count } => count,
+                    crate::ShaderBinding::BufferArray { count } => count,
+                    _ => 0,
+                };
+                let proto = match types[base].inner {
+                    naga::TypeInner::Image { .. } => crate::ShaderBinding::TextureArray { count },
+                    naga::TypeInner::Struct { .. } => crate::ShaderBinding::BufferArray { count },
+                    ref other => panic!("Unsupported binding array for {:?}", other),
+                };
+                (proto, var_access)
+            }
+            _ => {
+                let type_layout = &layouter[var_type];
+                let proto =
+                    if var_access.is_empty() && proto_binding != crate::ShaderBinding::Buffer {
+                        crate::ShaderBinding::Plain {
+                            size: type_layout.size,
+                        }
+                    } else {
+                        crate::ShaderBinding::Buffer
+                    };
+                (proto, var_access)
+            }
+        }
+    }
+
     pub(crate) fn fill_resource_bindings(
         module: &mut naga::Module,
         sd_infos: &mut [crate::ShaderDataInfo],
@@ -151,16 +214,13 @@ impl super::Shader {
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(module.to_ctx()).unwrap();
 
+        let types = &module.types;
         for (handle, var) in module.global_variables.iter_mut() {
             if ep_info[handle].is_empty() {
                 continue;
             }
-            let var_access = match var.space {
-                naga::AddressSpace::Storage { access } => access,
-                naga::AddressSpace::Uniform | naga::AddressSpace::Handle => {
-                    naga::StorageAccess::empty()
-                }
-                _ => continue,
+            let Some(var_access) = Self::resource_access_of_space(var.space) else {
+                continue;
             };
 
             assert_eq!(var.binding, None);
@@ -174,53 +234,13 @@ impl super::Shader {
                     .enumerate()
                     .find(|&(_, &(name, _))| name == var_name)
                 {
-                    let (expected_proto, access) = match module.types[var.ty].inner {
-                        naga::TypeInner::Image {
-                            class: naga::ImageClass::Storage { access, format: _ },
-                            ..
-                        } => (crate::ShaderBinding::Texture, access),
-                        naga::TypeInner::Image { .. } => {
-                            (crate::ShaderBinding::Texture, naga::StorageAccess::empty())
-                        }
-                        naga::TypeInner::Sampler { .. } => {
-                            (crate::ShaderBinding::Sampler, naga::StorageAccess::empty())
-                        }
-                        naga::TypeInner::AccelerationStructure { .. } => (
-                            crate::ShaderBinding::AccelerationStructure,
-                            naga::StorageAccess::empty(),
-                        ),
-                        naga::TypeInner::BindingArray { base, size: _ } => {
-                            //Note: we could extract the count from `size` for more rigor
-                            let count = match proto_binding {
-                                crate::ShaderBinding::TextureArray { count } => count,
-                                crate::ShaderBinding::BufferArray { count } => count,
-                                _ => 0,
-                            };
-                            let proto = match module.types[base].inner {
-                                naga::TypeInner::Image { .. } => {
-                                    crate::ShaderBinding::TextureArray { count }
-                                }
-                                naga::TypeInner::Struct { .. } => {
-                                    crate::ShaderBinding::BufferArray { count }
-                                }
-                                ref other => panic!("Unsupported binding array for {:?}", other),
-                            };
-                            (proto, var_access)
-                        }
-                        _ => {
-                            let type_layout = &layouter[var.ty];
-                            let proto = if var_access.is_empty()
-                                && proto_binding != crate::ShaderBinding::Buffer
-                            {
-                                crate::ShaderBinding::Plain {
-                                    size: type_layout.size,
-                                }
-                            } else {
-                                crate::ShaderBinding::Buffer
-                            };
-                            (proto, var_access)
-                        }
-                    };
+                    let (expected_proto, access) = Self::expected_binding_of_variable(
+                        types,
+                        &layouter,
+                        var.ty,
+                        var_access,
+                        proto_binding,
+                    );
                     assert_eq!(
                         proto_binding, expected_proto,
                         "Mismatched type for binding '{}'",
